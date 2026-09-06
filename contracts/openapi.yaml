@@ -3294,6 +3294,23 @@ components:
           type: integer
         currentPage:
           type: integer
+        page:
+          type: integer
+          description: >-
+            Echoed 1-based page number (W2-B2 envelope extension, backward
+            compatible — legacy clients ignore it). Equal to `currentPage`.
+        pageSize:
+          type: integer
+          description: >-
+            Effective page size (W2-B2 envelope extension; the service
+            clamps to >= 1 — currently always the service default 20 because
+            the controller does not expose a pageSize query parameter yet).
+        total:
+          type: integer
+          description: >-
+            Total live rows matching the slot/q filter, paging excluded
+            (W2-B2 envelope extension) — the authoritative count for
+            client-side pagination.
 
     FavoriteItem:
       type: object

@@ -3,7 +3,7 @@
     <div class="favorite-view__heading">
       <h1 class="favorite-view__title">Favorites</h1>
       <span v-if="state === 'content'" class="favorite-view__count">
-        {{ favorites.length }} galleries
+        {{ countLabel }}
       </span>
     </div>
 
@@ -63,35 +63,130 @@
       </button>
     </nav>
 
+    <!-- 分页条（A4 定案：与下载/历史页同构，2026-09-06）：页码窗口 + 前后页 +
+         跳页 + PC 键盘翻页。服务端 /favorite/list 现固定 20 条/页（W2-B2 只在
+         FavoriteService 层支持 pageSize，控制器尚未暴露 pageSize 查询参数——
+         对照 HistoryController），条数切换档位（50/100/200，对齐下载页）待
+         后端补齐后解锁。total ≤ pageSize 时隐藏（Android PaginationIndicator
+         语义）。 -->
+    <nav
+      v-if="paginationVisible"
+      class="pagination-bar"
+      data-testid="favorite-pagination"
+      aria-label="收藏分页"
+    >
+      <span class="pagination-bar__info">
+        第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
+      </span>
+      <span class="pagination-bar__pages" role="group" aria-label="页码">
+        <button
+          type="button"
+          class="pagination-bar__page"
+          :disabled="currentPage <= 1"
+          aria-label="上一页"
+          @click="jumpToPage(currentPage - 1)"
+        >
+          ‹
+        </button>
+        <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+          <button
+            v-if="item !== '…'"
+            type="button"
+            class="pagination-bar__page"
+            :class="{ 'pagination-bar__page--active': item === currentPage }"
+            :aria-current="item === currentPage ? 'page' : undefined"
+            :aria-label="`第 ${item} 页`"
+            @click="jumpToPage(item)"
+          >
+            {{ item }}
+          </button>
+          <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+        </template>
+        <button
+          type="button"
+          class="pagination-bar__page"
+          :disabled="currentPage >= totalPages"
+          aria-label="下一页"
+          @click="jumpToPage(currentPage + 1)"
+        >
+          ›
+        </button>
+      </span>
+      <span class="pagination-bar__jump">
+        <input
+          v-model.number="jumpInput"
+          class="pagination-bar__input"
+          type="number"
+          min="1"
+          :max="totalPages"
+          :aria-label="`跳页（1 至 ${totalPages}）`"
+          @keyup.enter="jumpToPage()"
+          placeholder="页"
+        />
+        <button type="button" class="pagination-bar__btn" @click="jumpToPage()">
+          跳页
+        </button>
+      </span>
+    </nav>
+
     <ContentLayout
       ref="contentRef"
       class="favorite-view__content"
       :state="state"
       v-model:refreshing="refreshing"
-      :loading-more="loadingMore"
-      :has-more="currentPage < totalPages"
       empty-text="No favorites"
       :error-text="errorText"
       @refresh="onRefresh"
       @retry="onRetry"
-      @load-more="onLoadMore"
     >
-      <!-- Shared gallery list (B-1): renders the grid/list form from
-           prefs.general.listMode (R4-1 — no hardcoded layout anymore). The
-           favorite-slot badge rides along in both forms via item-extra.
+      <!-- A4 定案（W3-F4）：与下载/历史页同构的全宽单列密信息行——共享
+           AppListRow（缩略图→详情 / 主体→统一阅读器 点击分区 + 角标挂点）。
+           服务端分页（W2-B2 DB 分页）：usePagedList 把 1 起页码直传给
+           /favorite/list（收藏信封 page 1 起，历史是 0 起），整页替换渲染。
 
-           F-UX5: the badge renders the ITEM's real favoriteSlot (carried by
-           FavoriteItem since the tab-0 semantics fix), not the active tab
-           number. Slot -1 (default folder, only ever listed in tab 0) shows
-           the heart alone — the app's badge carries no number either. -->
-      <GalleryList :items="favorites" @select="openGallery">
-        <template #item-extra="{ gallery }">
-          <span class="slot-badge" :title="`In ${slotBadgeName(gallery.favoriteSlot)}`">
-            <AppIcon name="heart" size="12px" />
-            <template v-if="gallery.favoriteSlot >= 0">{{ gallery.favoriteSlot }}</template>
-          </span>
-        </template>
-      </GalleryList>
+           #badge 挂收藏夹角标（F-UX5：♥ + 条目真实 favoriteSlot——tab 0 混合
+           slot -1/0，旧服务器缺字段回落当前页签号；slot -1 只出♥，与 Android
+           徽章无数字一致）。#meta 放 CategoryChip + W6 阅读进度角标。
+
+           KeepAlive（App.vue 按 fullPath 缓存实例）：页码与页内滚动位置随
+           组件实例存续，从阅读器/详情返回即还原——页码还原语义 = 页码 +
+           页内滚动。 -->
+      <div class="favorite-list">
+        <AppListRow
+          v-for="row in rows"
+          :key="row.item.gid"
+          :id="row.item.gid"
+          :gid="row.item.gid"
+          :title="displayTitle(row.item)"
+          :subtitle="displaySubtitle(row.item)"
+          :thumb="row.item.thumb"
+          @open="openDetail"
+          @read="openReader"
+        >
+          <!-- Favorite folder badge — heart + folder number, accent
+               background; absolutely positioned corner badge anchored to the
+               row (AppListRow badge mount). -->
+          <template #badge>
+            <span class="slot-badge" :title="`In ${slotBadgeName(row.slot)}`">
+              <AppIcon name="heart" size="12px" />
+              <template v-if="row.slot >= 0">{{ row.slot }}</template>
+            </span>
+          </template>
+
+          <!-- 元信息行：CategoryChip + W6 阅读进度角标（N+1P，语义同
+               GalleryCard：showReadProgress 开且进度 > 0 才显示）。 -->
+          <template #meta>
+            <CategoryChip v-if="row.chip" :category="row.chip" />
+            <span
+              v-if="showReadProgressBadge(row.item)"
+              class="favorite-item__read-progress"
+              data-testid="read-progress-badge"
+            >
+              {{ readProgressLabelOf(row.item) }}
+            </span>
+          </template>
+        </AppListRow>
+      </div>
     </ContentLayout>
 
     <!-- FabLayout replica: refresh + back-to-top mini FABs
@@ -113,45 +208,57 @@
 <script setup lang="ts">
 /**
  * FavoriteView — web replica of Android `FavoritesScene`:
- * ContentLayout (pull-to-refresh + infinite paging + empty tip) filled with
- * the shared `GalleryList` (B-1 — grid/list form follows
- * `prefs.general.listMode`), a favorite-folder filter strip (slots 0–9,
- * names from `prefs.general.favoriteSlotNames`, B-4), and the scene's
- * FabLayout cluster (refresh / go-to-top).
+ * ContentLayout (pull-to-refresh + empty tip) filled with the shared
+ * `AppListRow` single-column rows (A4 定案，W3-F4——与下载/历史页完全同构：
+ * 缩略图→详情 / 主体→直接阅读 点击分区；`#badge` 挂收藏夹角标，`#meta` 放
+ * CategoryChip + 阅读进度角标)，加收藏夹过滤条（slots 0–9，名字来自
+ * `prefs.general.favoriteSlotNames`，B-4）与场景 FabLayout（刷新 / 回顶部）。
  *
- * The API is slot-scoped (`/favorite/list?slot=N&page=M`), mirroring the
- * Android scene which always shows exactly one folder; each row carries a
- * heart badge with the folder number it belongs to. Search (q, debounced)
- * and filter slots (A5d, q=pattern&regex=true) narrow the list server-side;
- * the two are mutually exclusive.
+ * 服务端分页（A4 / W2-B2 DB 分页）：`usePagedList` 状态机管理页码/跳页/PC
+ * 键盘翻页；`fetchPage` 把 1 起页码直传 /favorite/list（收藏信封 page 1 起，
+ * 历史是 0 起；响应信封 `{favorites, totalPages, currentPage}` + 新增
+ * `page/pageSize/total`，total 驱动 totalPages；旧服务器缺 total 时以
+ * legacy totalPages×页大小 复原，页数口径与旧 envelope 一致）。
+ * 偏离 A4 档位定案：/favorite/list 控制器暂不收 pageSize（服务固定 20 条/页），
+ * 条数档位（50/100/200）待后端暴露后再解锁——见分页条注释。
+ * Search（q，防抖）与 filter slots（A5d，q=pattern&regex=true）收窄服务端
+ * 结果，两者互斥且都随变更回第 1 页。
  *
  * F-UX5 — tab semantics align with the Android FavoritesScene: tab 0 is the
  * DEFAULT FOLDER (server filters `favoriteSlot in (-1, 0)`), tabs 1-9 are
  * the custom folders (`favoriteSlot == N`). The chip strip still sends
- * 0-9 exactly as before; only the server-side tab-0 mapping changed.
+ * 0-9 exactly as before. Rows carry a heart badge with the item's REAL
+ * favoriteSlot (FavoriteItem.favoriteSlot，tab 0 混合 -1/0)。
  *
- * Backend note: `FavoriteItem.category` is the stringified `SiteConfig` bit
- * (FavoriteService maps `entity.category.toString()`), so rows are converted
- * to `GalleryInfo` (numeric bit) before being handed to the list.
+ * KeepAlive（App.vue 按 fullPath 缓存实例）：页码与页内滚动位置随组件实例
+ * 存续，从阅读器/详情返回即还原。
+ *
+ * 隐私红线：标题一律经 `maskedTitle`（打码开启 → `#<gid>`）；日文副题在
+ * 打码开启时一并隐藏（同 GalleryCard 的 `!privacyMaskEnabled` 守卫）。
+ * R4-6: 无标题画廊以 `#<gid>` 展示。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { favoriteApi } from '@/api/favorite'
-import type { FavoriteItem } from '@/api/favorite'
+import type { FavoriteItem, FavoriteListResponse } from '@/api/favorite'
 import { useFilterSlots } from '@/composables/useFilterSlots'
+import { usePagedList } from '@/composables/usePagedList'
+import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import {
   CATEGORY_BIT_VALUES,
+  CATEGORY_BY_BIT,
   CATEGORY_LABELS,
   CATEGORY_ORDER,
   type FabAction,
-  type GalleryInfo,
+  type GalleryCategory,
 } from '@/types/components'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
-import GalleryList from '@/components/gallery/GalleryList.vue'
-import { parseFavoriteSlotNames } from '@/components/gallery/GalleryCard.vue'
+import AppListRow from '@/components/gallery/AppListRow.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
+import CategoryChip from '@/components/atoms/CategoryChip.vue'
+import { parseFavoriteSlotNames } from '@/components/gallery/GalleryCard.vue'
 import { usePreferencesStore } from '@/stores/preferences'
 
 /** View states matching ContentLayout's internal ViewTransition. */
@@ -200,72 +307,23 @@ function categoryBit(raw: number | string): number {
 
 const router = useRouter()
 
-const favorites = ref<GalleryInfo[]>([])
-const activeSlot = ref(0)
-const currentPage = ref(1)
-const totalPages = ref(1)
+/**
+ * 服务端分页口径（W2-B2）：/favorite/list 的 service 层 pageSize 默认且当前
+ * 唯一实效值 20——控制器尚未暴露 pageSize 查询参数（对照 HistoryController），
+ * 客户端不发会被忽略的条数参数；档位切换（50/100/200，对齐下载/历史页）待
+ * 后端补齐后解锁。
+ */
+const FAVORITE_PAGE_SIZE = 20
+const FAVORITE_PAGE_SIZES = [FAVORITE_PAGE_SIZE] as const
+
 const state = ref<ViewState>('loading')
 const refreshing = ref(false)
-const loadingMore = ref(false)
 const contentRef = ref<InstanceType<typeof ContentLayout> | null>(null)
 /** F4 REGEX_INVALID: the error tip switches to a dedicated regex message. */
 const errorText = ref('Failed to load favorites')
 
-/**
- * F4: extracts the business error code from the API error envelope
- * (`{error:{code,message,traceId,status}}` carried by axios as
- * `error.response.data`); null for any other failure shape.
- */
-function errorCodeOf(error: unknown): string | null {
-  const code = (error as { response?: { data?: { error?: { code?: unknown } } } } | undefined)
-    ?.response?.data?.error?.code
-  return typeof code === 'string' ? code : null
-}
-
-/** Monotonic request guard — stale responses (slot switches / refresh) drop. */
-let requestSeq = 0
-
-/** Maps an item slot onto its folder-tab index — slot -1 (default folder)
- *  is listed in tab 0, mirroring the Android FavoritesScene first tab. */
-function slotTabIndex(slot: number): number {
-  return slot >= 0 ? slot : 0
-}
-
-/** Folder display name for the badge title of an item with the given slot. */
-function slotBadgeName(slot: number): string {
-  return slotNames.value[slotTabIndex(slot)] ?? ''
-}
-
-/** Maps a backend favorite row onto the `GalleryInfo` shape the list renders. */
-function toGalleryInfo(item: FavoriteItem): GalleryInfo {
-  // F-UX5: the row's REAL slot rides along (FavoriteItem.favoriteSlot) so the
-  // ♥ badge shows the true folder — tab 0 mixes slots -1 and 0. Legacy
-  // servers without the field fall back to the active tab number.
-  const slot = item.favoriteSlot ?? activeSlot.value
-  return {
-    gid: item.gid,
-    token: item.token,
-    // R4-6: title-less galleries surface as `#<gid>`, not "Untitled".
-    title: item.title || item.titleJpn || `#${item.gid}`,
-    titleJpn: item.titleJpn,
-    thumb: item.thumb,
-    category: categoryBit(item.category),
-    posted: item.posted ?? '',
-    uploader: item.uploader ?? '',
-    rating: item.rating,
-    rated: false,
-    simpleLanguage: '',
-    simpleTags: [],
-    thumbWidth: 0,
-    thumbHeight: 0,
-    pages: 0,
-    favoriteSlot: slot,
-    favoriteName: slotBadgeName(slot),
-    // 阅读进度透传（同 gid 历史行 page）：GalleryCard 角标按 showReadProgress
-    // + readProgress > 0 门控；旧服务器缺省 undefined 自然隐藏。
-    readProgress: item.readProgress,
-  }
-}
+/** 标题计数：服务端过滤后全集条数（分页不再累计已加载数）。 */
+const countLabel = computed(() => `${total.value} galleries`)
 
 /* ---------------------------------------- search + filter slots (A5d) ----- */
 
@@ -285,9 +343,8 @@ const { slots, activeSlotId, activeSlot: filterSlot, selectSlot: selectFilterSlo
 function onSlotBarSelect(id: string | null): void {
   selectFilterSlot(id)
   // 槽位点击总是重新加载（清空搜索词不一定触发防抖 watch——搜索词本来就空时）。
-  favorites.value = []
-  state.value = 'loading'
-  void loadPage(1, false)
+  // 非静默 load → onLoadStart 切 loading 态。
+  void load()
 }
 
 /** 当前筛选条件：槽位激活 → (q=pattern, regex=true)；否则 → 搜索词（LIKE）。 */
@@ -314,15 +371,14 @@ function scheduleSearchCommit(): void {
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
     if (searchComposing.value) return
+    // 搜索词变化 → 回第 1 页重新加载（负载在服务端）。
     const next = searchQuery.value
     if (debouncedQuery.value !== next) {
       debouncedQuery.value = next
       // 槽位激活时该变更来自 selectFilterSlot 清空搜索词——加载已由
       // onSlotBarSelect 触发（避免与槽位过滤重复请求）。
       if (filterSlot.value) return
-      favorites.value = []
-      state.value = 'loading'
-      void loadPage(1, false)
+      void load()
     }
   }, 400)
 }
@@ -330,15 +386,44 @@ function scheduleSearchCommit(): void {
 function clearSearch(): void {
   searchQuery.value = ''
   debouncedQuery.value = ''
-  favorites.value = []
-  state.value = 'loading'
-  void loadPage(1, false)
+  void load()
 }
 
-async function loadPage(page: number, append: boolean): Promise<void> {
-  const seq = ++requestSeq
-  if (append) loadingMore.value = true
-  try {
+/* ---------------------------------------------------- pagination bar ---- */
+
+/**
+ * F4: extracts the business error code from the API error envelope
+ * (`{error:{code,message,traceId,status}}` carried by axios as
+ * `error.response.data`); null for any other failure shape.
+ */
+function errorCodeOf(error: unknown): string | null {
+  const code = (error as { response?: { data?: { error?: { code?: unknown } } } } | undefined)
+    ?.response?.data?.error?.code
+  return typeof code === 'string' ? code : null
+}
+
+/** 当前收藏夹页签（0-9；-1 = All，服务端映射 slot < 0 全量）。 */
+const activeSlot = ref(0)
+
+/**
+ * 分页状态机（W3-C1 usePagedList）：页码 / 跳页 / PC 页码窗口 /
+ * PageUp/Down / stale 竞态守卫。fetchPage 适配 /favorite/list 信封——
+ * 收藏 page 1 起【直传】（无历史的 -1 换算）；pageSize 服务端固定 20
+ * （见 FAVORITE_PAGE_SIZE 注释）。视图四态机与错误文案留在本视图，
+ * 经 onLoadStart/onSuccess/onError 钩子接线。
+ */
+const {
+  items: favorites,
+  total,
+  currentPage,
+  totalPages,
+  paginationVisible,
+  pageWindow,
+  jumpInput,
+  load: loadPage,
+  jumpToPage,
+} = usePagedList<FavoriteItem>({
+  fetchPage: async (page) => {
     const filter = currentFilter()
     const response = await favoriteApi.listFavorites(
       activeSlot.value,
@@ -346,19 +431,29 @@ async function loadPage(page: number, append: boolean): Promise<void> {
       filter.q || null,
       filter.regex || undefined,
     )
-    if (seq !== requestSeq) return
-    const mapped = response.favorites.map(toGalleryInfo)
-    if (append) {
-      const known = new Set(favorites.value.map((gallery) => gallery.gid))
-      favorites.value.push(...mapped.filter((gallery) => !known.has(gallery.gid)))
-    } else {
-      favorites.value = mapped
+    // W2-B2 信封新增 page/pageSize/total（favorite.ts 类型尚未声明——运行时
+    // 存在）：total 驱动 totalPages。旧服务器缺 total 时以 legacy
+    // totalPages×页大小 复原（ceil 恒等于旧 totalPages，口径不漂移）。
+    const envelope = response as FavoriteListResponse & { total?: number }
+    return {
+      items: response.favorites,
+      total:
+        typeof envelope.total === 'number'
+          ? envelope.total
+          : response.totalPages * FAVORITE_PAGE_SIZE,
     }
-    currentPage.value = response.currentPage
-    totalPages.value = response.totalPages
-    state.value = favorites.value.length === 0 ? 'empty' : 'content'
-  } catch (error) {
-    if (seq !== requestSeq) return
+  },
+  pageSizes: FAVORITE_PAGE_SIZES,
+  initialPageSize: FAVORITE_PAGE_SIZE,
+  fallbackPageSize: FAVORITE_PAGE_SIZE,
+  onLoadStart: () => {
+    state.value = 'loading'
+  },
+  onSuccess: (result) => {
+    state.value = result.items.length === 0 ? 'empty' : 'content'
+    contentRef.value?.scrollToTop()
+  },
+  onError: (error) => {
     console.error('Failed to load favorites', error)
     // F4: invalid regex in q → 400 REGEX_INVALID; name the cause instead of
     // the generic "failed to load" tip (dedicated toast + error-state copy).
@@ -368,13 +463,92 @@ async function loadPage(page: number, append: boolean): Promise<void> {
     } else {
       errorText.value = 'Failed to load favorites'
     }
-    if (!append && favorites.value.length === 0) state.value = 'error'
-  } finally {
-    // F5: 无条件复位——append 被后续 replace 作废（seq 过期）时也必须松开
-    // loadingMore，否则页脚 spinner 永久卡死（对照 DownloadView.loadMore）。
-    if (append) loadingMore.value = false
-  }
+    if (favorites.value.length === 0) {
+      state.value = 'error'
+    } else if (errorCodeOf(error) !== 'REGEX_INVALID') {
+      showToast('Failed to refresh favorites')
+    }
+  },
+  keyboardPaging: true,
+})
+
+/**
+ * 视图层加载入口：搜索/槽位/刷新等所有入口都回第 1 页。`silent: true`
+ * 不切 loading 态——下拉刷新等宿主自管忙态的入口。
+ */
+function load(opts?: { silent?: boolean }): Promise<void> {
+  return loadPage(1, opts)
 }
+
+async function onRefresh(): Promise<void> {
+  await load({ silent: true })
+  refreshing.value = false
+}
+
+function onRetry(): void {
+  void load()
+}
+
+/* --------------------------------------------------- row presentation --- */
+
+/** 行展示标题——脱敏在本视图完成（隐私红线：标题必经 maskedTitle）。 */
+function displayTitle(item: FavoriteItem): string {
+  return maskedTitle(item.title || item.titleJpn || `#${item.gid}`, item.gid)
+}
+
+/** 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）。 */
+function displaySubtitle(item: FavoriteItem): string | null {
+  return !privacyMaskEnabled.value && item.titleJpn ? item.titleJpn : null
+}
+
+/** Numeric category bit → `GalleryCategory` key (undefined when unknown). */
+function categoryKeyOf(item: FavoriteItem): GalleryCategory | undefined {
+  return CATEGORY_BY_BIT[categoryBit(item.category)]
+}
+
+/**
+ * F-UX5: the row's REAL slot rides along (FavoriteItem.favoriteSlot) so the
+ * ♥ badge shows the true folder — tab 0 mixes slots -1 and 0. Legacy
+ * servers without the field fall back to the active tab number.
+ */
+function rowSlot(item: FavoriteItem): number {
+  return item.favoriteSlot ?? activeSlot.value
+}
+
+/** Folder display name for the badge title of an item with the given slot
+ *  — slot -1 (default folder) is named by tab 0, mirroring the scene. */
+function slotBadgeName(slot: number): string {
+  return slotNames.value[slot >= 0 ? slot : 0] ?? ''
+}
+
+/**
+ * Per-row view models: the raw favorite item plus the pre-resolved category
+ * chip key (v-if narrows the property, not a function call — same shape as
+ * HistoryView's rows.chip) and the ♥ badge slot number.
+ */
+const rows = computed(() =>
+  favorites.value.map((item) => ({
+    item,
+    chip: categoryKeyOf(item),
+    slot: rowSlot(item),
+  })),
+)
+
+/* W6 (plan-2026-09-02): 阅读进度角标——showReadProgress 开且进度 > 0 才
+   显示；收藏行带的是同 gid 历史行的 0 起页索引 → N+1P 格式（对齐
+   GalleryCard/历史行语义）。字段缺失（旧服务器 undefined）时隐藏。 */
+function readProgressLabelOf(item: FavoriteItem): string {
+  const progress = item.readProgress
+  if (typeof progress !== 'number' || !Number.isFinite(progress) || progress <= 0) return ''
+  return `${progress + 1}P`
+}
+
+function showReadProgressBadge(item: FavoriteItem): boolean {
+  const prefs = preferencesStore.prefs?.general as { showReadProgress?: boolean } | undefined
+  return prefs?.showReadProgress === true && readProgressLabelOf(item) !== ''
+}
+
+/* ------------------------------------------------- folder chip strip --- */
 
 function selectSlot(slot: number, event: MouseEvent): void {
   if (slot === activeSlot.value) return
@@ -383,33 +557,27 @@ function selectSlot(slot: number, event: MouseEvent): void {
   if (el instanceof HTMLElement) {
     el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
   }
-  favorites.value = []
-  state.value = 'loading'
-  void loadPage(1, false)
+  void load()
 }
 
-async function onRefresh(): Promise<void> {
-  await loadPage(1, false)
-  refreshing.value = false
-}
+/* --------------------------------------------------- click partitions --- */
 
-function onRetry(): void {
-  state.value = 'loading'
-  void loadPage(1, false)
-}
-
-/** Footer near-bottom → next page (Android ContentLayout footer refresh). */
-function onLoadMore(): void {
-  if (state.value !== 'content' || loadingMore.value || refreshing.value) return
-  if (currentPage.value >= totalPages.value) return
-  void loadPage(currentPage.value + 1, true)
-}
-
-function openGallery(gallery: GalleryInfo): void {
-  // 本地 token 透传（P-A）：收藏行若无历史/下载背书，服务端凭 token 上游直取。
+/** 缩略图点击 → 详情页；P-A：本地 token 透传（收藏行若无历史/下载背书，
+ *  服务端凭 token 上游直取）。 */
+function openDetail(gid: number): void {
+  const item = favorites.value.find((entry) => entry.gid === gid)
   void router.push({
-    path: `/gallery/${gallery.gid}`,
-    query: gallery.token ? { token: gallery.token } : {},
+    path: `/gallery/${gid}`,
+    query: item?.token ? { token: item.token } : {},
+  })
+}
+
+/** 行主体点击 → 直接进统一阅读器（A4 点击分区，快速续读）。 */
+function openReader(gid: number): void {
+  const item = favorites.value.find((entry) => entry.gid === gid)
+  void router.push({
+    path: `/reader/${gid}`,
+    query: item?.token ? { token: item.token } : {},
   })
 }
 
@@ -425,8 +593,7 @@ const fabActions: FabAction[] = [
 function onFabAction(action: FabAction): void {
   fabExpanded.value = false
   if (action.id === 'refresh') {
-    state.value = 'loading'
-    void loadPage(1, false)
+    void load()
   } else if (action.id === 'scroll-top') {
     contentRef.value?.scrollToTop()
   }
@@ -450,13 +617,13 @@ onUnmounted(() => {
 })
 
 onMounted(() => {
-  // Folder names (B-4) come from preferences. GalleryList loads them when it
-  // mounts, but the chip strip renders before the content state does — kick
-  // the load here so custom names appear as early as possible.
+  // Folder names (B-4) come from preferences. The chip strip renders before
+  // the content state does — kick the load here so custom names appear as
+  // early as possible.
   if (!preferencesStore.prefs && !preferencesStore.loading) {
     void preferencesStore.load()
   }
-  void loadPage(1, false)
+  void load()
 })
 </script>
 
@@ -622,9 +789,146 @@ onMounted(() => {
   outline-offset: 1px;
 }
 
+/* ----------------------------------------------------- pagination bar ---- */
+/* 与 DownloadView / HistoryView 分页条同构复刻（A4）：页码窗口 / 跳页
+   （条数切换待 /favorite/list 暴露 pageSize 后补——见模板注释）。 */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing);
+  flex-shrink: 0;
+  padding: 6px max(var(--gallery-list-margin-h), 4px);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-divider);
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+}
+
+.pagination-bar__info {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* PC 页码窗口：直点页码 + 省略号折叠 + 前后页。 */
+.pagination-bar__pages {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.pagination-bar__pages::-webkit-scrollbar {
+  display: none;
+}
+
+.pagination-bar__page {
+  min-width: 26px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__page:hover:not(:disabled) {
+  background: var(--color-surface-activated);
+}
+
+.pagination-bar__page:disabled {
+  color: var(--text-color-disabled, #9e9e9e);
+  cursor: default;
+}
+
+.pagination-bar__page--active {
+  background: var(--color-primary);
+  color: var(--color-primary-inverse, #fff);
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__page--active:hover {
+  background: var(--color-primary);
+}
+
+.pagination-bar__ellipsis {
+  min-width: 18px;
+  text-align: center;
+  color: var(--text-color-secondary);
+  user-select: none;
+}
+
+.pagination-bar__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.pagination-bar__input {
+  padding: 2px 6px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--card-radius);
+  background: var(--color-surface);
+  color: var(--text-color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+}
+
+.pagination-bar__input {
+  width: 52px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.pagination-bar__input::-webkit-outer-spin-button,
+.pagination-bar__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.pagination-bar__input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__btn {
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__btn:hover {
+  background: var(--color-surface-activated);
+}
+
 /* -------------------------------------------------------------- list ---- */
-/* Row layout, entrance animation and stagger live in GalleryList (B-1);
-   only the favorites-specific slot badge is styled here. */
+/* Single-column dense rows (A4): the row skeleton (card surface / thumb /
+   title) lives in the shared AppListRow; only the favorites-specific folder
+   badge is styled here. */
+.favorite-list {
+  padding: var(--gallery-list-margin-v) var(--gallery-list-margin-h)
+    var(--gallery-padding-bottom-fab);
+}
 
 /* ------------------------------------------------------------- toast ---- */
 .toast {
@@ -659,8 +963,8 @@ onMounted(() => {
   }
 }
 
-
-/* Favorite slot indicator — heart + folder number, accent background. */
+/* Favorite slot indicator — heart + folder number, accent background.
+   Absolute corner badge anchored to the AppListRow row (its badge slot). */
 .slot-badge {
   position: absolute;
   right: 10px;
@@ -677,5 +981,14 @@ onMounted(() => {
   line-height: 1.4;
   box-shadow: 0 1px 3px var(--shadow-color);
   pointer-events: none;
+}
+
+/* W6: 阅读进度角标 — 12sp secondary，跟在分类 chip 之后。 */
+.favorite-item__read-progress {
+  flex-shrink: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 </style>
