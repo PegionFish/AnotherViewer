@@ -1004,8 +1004,10 @@ onBeforeUnmount(() => {
 }
 
 /* 分页条（A4）：固定在滚动区上方，吃浮动搜索条清理位（同下载/历史页的
-   常驻分页导航形态）。 */
-.home__pagination {
+   常驻分页导航形态）。双类选择器压过 .pagination-bar 基类的 padding
+   简写——同权重后序规则会把 64px 清理位覆盖成 6px，首页首行被浮动
+   搜索栏遮住正是这个根因。 */
+.pagination-bar.home__pagination {
   flex-shrink: 0;
   padding-top: calc(
     var(--gallery-padding-top-search-bar) + var(--availability-offset, 0px)
