@@ -156,6 +156,65 @@ describe('useEnhancedImage (T-F2)', () => {
     expect(wsSubscribe).toHaveBeenLastCalledWith('/topic/gallery/9/enhanced', expect.any(Function))
   })
 
+  it('drops an in-flight preload that resolves after the gid changed (no map pollution)', async () => {
+    const { api, gid } = mountEnhanced(7)
+    api.connect()
+
+    // Gallery 7 preload for page 3 (1-based) → index 2, still in flight.
+    lastHandler()(readyPayload())
+    const staleImg = FakeImage.instances.at(-1)!
+    expect(api.enhancing.value).toBe(true)
+
+    // Switch galleries while the preload is in flight → resetState runs.
+    gid.value = 9
+    await nextTick()
+    expect(api.getImageUrl(2, 'x')).toBe('x') // map was cleared
+
+    // Gallery 9 starts its own preload while the stale one is still pending.
+    lastHandler()(readyPayload({ galleryId: 9, page: 1 }))
+    const freshImg = FakeImage.instances.at(-1)!
+    expect(freshImg.src).toBe('/api/v1/image/9/0?w=800&enhanced=1')
+
+    // Stale preload resolves after the switch — must not write the new
+    // gallery's map (audit P1-4).
+    staleImg.succeed()
+    await Promise.resolve()
+    expect(api.getImageUrl(2, 'x')).toBe('x')
+    expect(api.enhancedPages.value).toEqual([])
+
+    // Fresh preload is unaffected: `enhancing` was not prematurely cleared by
+    // the dropped stale callback, and its own hot-swap still lands.
+    expect(api.enhancing.value).toBe(true)
+    freshImg.succeed()
+    await Promise.resolve()
+    expect(api.getImageUrl(0, 'x')).toBe('/api/v1/image/9/0?w=800&enhanced=1')
+    expect(api.enhancing.value).toBe(false)
+    expect(api.enhancedPages.value).toEqual([0])
+  })
+
+  it('drops an in-flight preload that fails after the gid changed (accounting intact)', async () => {
+    const { api, gid } = mountEnhanced(7)
+    api.connect()
+
+    lastHandler()(readyPayload())
+    const staleImg = FakeImage.instances.at(-1)!
+
+    gid.value = 9
+    await nextTick()
+
+    staleImg.fail()
+    await Promise.resolve()
+    expect(api.enhancedPages.value).toEqual([])
+
+    // The stale failure must not corrupt the new gallery's preload counter.
+    lastHandler()(readyPayload({ galleryId: 9, page: 2 }))
+    expect(api.enhancing.value).toBe(true)
+    FakeImage.instances.at(-1)!.succeed()
+    await Promise.resolve()
+    expect(api.getImageUrl(1, 'x')).toBe('/api/v1/image/9/1?w=800&enhanced=1')
+    expect(api.enhancing.value).toBe(false)
+  })
+
   it('disconnect releases the reference, unsubscribes and resets state; repeat calls are safe', async () => {
     const { api } = mountEnhanced(7)
     api.connect()

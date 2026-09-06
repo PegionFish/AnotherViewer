@@ -115,6 +115,17 @@ export function useEnhancedImage(gid: Ref<number>): {
   /** Number of in-flight preload operations (drives `enhancing`). */
   let activePreloads = 0
 
+  /**
+   * Monotonic generation guard for in-flight preloads. Bumped by
+   * `resetState` (gid change / disconnect): preloads started before the bump
+   * belong to a gallery whose URL map has already been cleared, so their
+   * onload/onerror closures must neither write the map nor disturb the
+   * preload counter that now belongs to the new gallery (`resetState`
+   * zeroed `activePreloads`, so decrementing a stale callback would
+   * under-count the new gallery's in-flight preloads).
+   */
+  let preloadGeneration = 0
+
   /* ---- helpers ---- */
 
   /**
@@ -148,18 +159,27 @@ export function useEnhancedImage(gid: Ref<number>): {
     const pageIndex = payload.page - 1
     const url = buildEnhancedUrl(payload.galleryId, pageIndex, payload.width)
 
+    // Cross-gallery guard: snapshot the generation at initiation. If the gid
+    // changes while this preload is in flight, `resetState` bumps the
+    // generation and the closures below become no-ops (audit P1-4).
+    const generation = preloadGeneration
+
     activePreloads++
     enhancing.value = true
 
     const img = new Image()
 
     img.onload = () => {
+      // Stale preload: the gallery switched mid-flight — the map now belongs
+      // to a different gallery, so drop the result without writing it.
+      if (generation !== preloadGeneration) return
       // Atomic swap — the reader re-renders with the enhanced URL.
       enhancedUrls.value.set(pageIndex, url)
       decrementPreloads()
     }
 
     img.onerror = () => {
+      if (generation !== preloadGeneration) return
       // Silently keep the original on failure (§3.3 client behavior #5).
       decrementPreloads()
     }
@@ -196,6 +216,9 @@ export function useEnhancedImage(gid: Ref<number>): {
 
   /** Reset all per-gallery state (map, enhancing flag, preload counter). */
   function resetState(): void {
+    // Invalidate in-flight preloads started for the previous gallery: their
+    // completion callbacks compare against this generation before writing.
+    preloadGeneration++
     enhancedUrls.value.clear()
     enhancing.value = false
     activePreloads = 0
