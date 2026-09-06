@@ -55,6 +55,8 @@ tags:
     description: Unified background jobs (admin operations async-ified, plan 2026-08-06)
   - name: Health
     description: Health check and metrics
+  - name: Privacy
+    description: Server-side content-mask switch state (admin advanced settings)
 
 paths:
   # ============================================================
@@ -592,32 +594,6 @@ paths:
         '404':
           description: Gallery not found
 
-  /api/v1/gallery/history:
-    get:
-      tags: [Gallery]
-      operationId: getGalleryHistory
-      summary: Get paginated gallery browsing history (via GalleryService)
-      parameters:
-        - name: page
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 0
-        - name: pageSize
-          in: query
-          required: false
-          schema:
-            type: integer
-            default: 20
-      responses:
-        '200':
-          description: Gallery history list
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GalleryListResponse'
-
   /api/v1/gallery/history/{gid}:
     post:
       tags: [Gallery]
@@ -643,19 +619,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SuccessResponse'
-
-  /api/v1/gallery/favorites:
-    get:
-      tags: [Gallery]
-      operationId: getLocalFavorites
-      summary: Get local favorites list
-      responses:
-        '200':
-          description: Local favorites
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GalleryListResponse'
 
   /api/v1/gallery/quick-search:
     get:
@@ -1062,6 +1025,29 @@ paths:
       responses:
         '200':
           description: Always true
+          content:
+            application/json:
+              schema:
+                type: boolean
+
+  /api/v1/download/restart-all:
+    post:
+      tags: [Download]
+      operationId: restartAllDownloads
+      summary: Restart every download task, skipping rows that pass on-disk verification
+      description: |
+        WebUI "Restart all"（全部下载）. Ignores the current state (including
+        FINISHED=3, FAILED=4, PAUSED=0) of every row and restarts it. Before
+        iterating, the on-disk download directory index is force-refreshed, so
+        pages just copied/uploaded into downloads/<gid>/ are picked up without
+        a server restart. A row whose local content directory already holds a
+        complete set of page files (count >= total, total>0) is marked
+        FINISHED (state=3, done=total, error cleared) and skipped with zero
+        network I/O; every other row goes through the normal download
+        pipeline. Disk-only directories never get DB rows created for them.
+      responses:
+        '200':
+          description: Always true (the restart runs server-side; counts are logged only)
           content:
             application/json:
               schema:
@@ -1573,6 +1559,76 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags: [Gallery]
+      operationId: proxySitePost
+      summary: POST form of the transparent Gallery Site proxy (App EH API calls)
+      description: |
+        Same host whitelist and pass-through semantics as GET /site/proxy, but
+        forwards a request body verbatim: the App's EH API calls (api.php,
+        e.g. `{"method":"showpage",...}` JSON) arrive here. The body bytes and
+        the request `Content-Type` header are forwarded unchanged (missing
+        header defaults to `application/json; charset=utf-8`); the site
+        Referer/Origin headers are rebuilt exactly like the GET path so
+        api.php accepts the request. The upstream response status,
+        content-type and body are passed straight back (bounded read — an
+        oversized upstream body surfaces 502 code=UPSTREAM_TOO_LARGE).
+      parameters:
+        - name: url
+          in: query
+          required: true
+          schema:
+            type: string
+          description: Absolute Gallery Site URL to fetch (host-whitelisted)
+        - name: Content-Type
+          in: header
+          required: false
+          schema:
+            type: string
+          description: >-
+            Forwarded verbatim as the upstream request media type;
+            defaults to application/json; charset=utf-8 when absent
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: string
+              format: binary
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+      responses:
+        '200':
+          description: Site response passed through (upstream status/content-type/body preserved)
+          content:
+            application/json:
+              schema:
+                type: string
+            text/html:
+              schema:
+                type: string
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+            image/png:
+              schema:
+                type: string
+                format: binary
+        '400':
+          description: url missing/malformed or host outside the Gallery Site whitelist (code=VALIDATION_ERROR)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '502':
+          description: Gallery Site unreachable (code=BAD_GATEWAY) or upstream body over the size limit (code=UPSTREAM_TOO_LARGE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   # ============================================================
   # Preferences (per-user UI preferences)
@@ -1610,6 +1666,49 @@ paths:
                 $ref: '#/components/schemas/PreferenceResponse'
         '401':
           description: Authentication required
+
+  # ============================================================
+  # Privacy (server-side content-mask switch)
+  # ============================================================
+  /api/v1/privacy/mask:
+    get:
+      tags: [Privacy]
+      operationId: getPrivacyMask
+      summary: Get the server-side content-mask ("privacy mask") switch state
+      description: |
+        Authoritative server state of the single content-mask switch. When
+        enabled, the PrivacyMaskFilter redacts content-class JSON responses
+        server-side, so headless clients (agents, sync) only ever receive
+        masked data. The WebUI persists its toggle here so every client
+        shares one state; there is no separate per-client redaction switch.
+      responses:
+        '200':
+          description: Current mask state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacyMaskResponse'
+    post:
+      tags: [Privacy]
+      operationId: setPrivacyMask
+      summary: Set the server-side content-mask switch
+      description: |
+        Persists the switch in serverConfig; takes effect immediately on the
+        response path (masking is applied per response at emission time).
+        Returns the new state.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivacyMaskRequest'
+      responses:
+        '200':
+          description: Echo of the persisted mask state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PrivacyMaskResponse'
 
   # ============================================================
   # Image (existing proxy + new streaming)
@@ -5330,6 +5429,22 @@ components:
         enableAnalytics:
           type: boolean
           default: true
+
+    PrivacyMaskRequest:
+      type: object
+      description: POST /privacy/mask body; `enabled` falls back to false when omitted
+      properties:
+        enabled:
+          type: boolean
+          default: false
+          description: true = content-mask responses on, false = off
+
+    PrivacyMaskResponse:
+      type: object
+      description: Current content-mask switch state (GET echo / POST result)
+      properties:
+        enabled:
+          type: boolean
 
     # ----------------------------------------------------------
     # Common

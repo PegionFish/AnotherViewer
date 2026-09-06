@@ -264,20 +264,6 @@ class GalleryControllerTest {
         verify(galleryService).searchGallery("alpha", null, 0, 20, 0, 0, 0, 5, false, false, false, false)
     }
 
-    @Test
-    fun `getHistory clamps oversized pageSize to 200`() {
-        mockMvc.perform(get("/api/v1/gallery/history").param("pageSize", "5000"))
-            .andExpect(status().isOk)
-        verify(galleryService).getHistory(0, 200)
-    }
-
-    @Test
-    fun `getHistory clamps negative page up to 0`() {
-        mockMvc.perform(get("/api/v1/gallery/history").param("page", "-1"))
-            .andExpect(status().isOk)
-        verify(galleryService).getHistory(0, 20)
-    }
-
     // ---------------------------------------------------------------------
     // getDetail 404 envelope
     // ---------------------------------------------------------------------

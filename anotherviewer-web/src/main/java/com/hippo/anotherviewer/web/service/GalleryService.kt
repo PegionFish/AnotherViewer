@@ -616,29 +616,6 @@ class GalleryService(
         }
     }
 
-    fun getHistory(page: Int, pageSize: Int): GalleryListResponse {
-        val all = historyRepository.findAllByOrderByTimeDesc()
-        val total = all.size
-        val paged = all.drop(page * pageSize).take(pageSize)
-        return GalleryListResponse(
-            success = true,
-            data = paged.map { it.toDto().copy(readProgress = it.page) },
-            total = total
-        )
-    }
-
-    fun getLocalFavorites(): GalleryListResponse {
-        val all = localFavoriteInfoRepository.findAllByOrderByTimeDesc()
-        // S5⑦: 批量取历史行填 readProgress（S7 findByGidIn），避免逐行 N+1。
-        val progressByGid = historyRepository.findByGidIn(all.map { it.gid })
-            .associateBy({ it.gid }) { it.page }
-        return GalleryListResponse(
-            success = true,
-            data = all.map { it.toDto().copy(readProgress = progressByGid[it.gid] ?: 0) },
-            total = all.size
-        )
-    }
-
     fun getQuickSearches(): QuickSearchListResponse {
         val all = quickSearchRepository.findAllByOrderById()
         return QuickSearchListResponse(

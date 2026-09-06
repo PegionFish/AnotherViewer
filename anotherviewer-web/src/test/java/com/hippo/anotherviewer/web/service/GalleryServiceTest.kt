@@ -437,40 +437,6 @@ class GalleryServiceTest {
         assertEquals(3, detail!!.favoriteSlot)
     }
 
-    // ── S5⑥⑦: 列表 readProgress 填充 ───────────────────────────
-
-    @Test
-    fun `getHistory fills readProgress from the rows`() {
-        val h = harness()
-        val rows = listOf(historyRow().apply { gid = 1; page = 3 }, historyRow().apply { gid = 2; page = 0 })
-        `when`(h.history.findAllByOrderByTimeDesc()).thenReturn(rows)
-
-        val response = h.service.getHistory(0, 20)
-
-        assertTrue(response.success)
-        assertEquals(listOf(3, 0), response.data.map { it.readProgress })
-    }
-
-    @Test
-    fun `getLocalFavorites fills readProgress in one batched query`() {
-        val h = harness()
-        val fav1 = favoriteRow().apply { gid = 1 }
-        val fav2 = favoriteRow().apply { gid = 2 }
-        `when`(h.favorites.findAllByOrderByTimeDesc()).thenReturn(listOf(fav1, fav2))
-        `when`(h.history.findByGidIn(listOf(1L, 2L))).thenReturn(
-            listOf(historyRow().apply { gid = 1; page = 8 })
-        )
-
-        val response = h.service.getLocalFavorites()
-
-        assertTrue(response.success)
-        val byGid = response.data.associateBy { it.gid }
-        assertEquals(8, byGid[1L]!!.readProgress)
-        // 无历史行 → 0（未读），与详情路径 readProgressOf 语义一致。
-        assertEquals(0, byGid[2L]!!.readProgress)
-        verify(h.history).findByGidIn(listOf(1L, 2L)) // 单次批量，非逐行 N+1
-    }
-
     // ── P2: toplist / search 站点结果缓存 ───────────────────────
 
     @Test

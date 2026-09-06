@@ -95,17 +95,6 @@ class GalleryController(private val galleryService: GalleryService) {
         return ResponseEntity.ok(detail)
     }
 
-    @GetMapping("/history")
-    fun getHistory(
-        @RequestParam(defaultValue = "0") page: Int,
-        @RequestParam(defaultValue = "20") pageSize: Int
-    ): ResponseEntity<GalleryListResponse> {
-        // Same M-5 clamping as /search.
-        val clampedPage = page.coerceAtLeast(0)
-        val clampedPageSize = pageSize.coerceIn(1, MAX_PAGE_SIZE)
-        return ResponseEntity.ok(galleryService.getHistory(clampedPage, clampedPageSize))
-    }
-
     @PostMapping("/history/{gid}")
     fun addToHistory(
         @PathVariable gid: Long,
@@ -117,11 +106,6 @@ class GalleryController(private val galleryService: GalleryService) {
         // S6: page 透传（可空）——缺省（null）不改写已存进度，显式 0 重读写 0。
         galleryService.addToHistory(gid, body.token, body.title, body.mode, body.page)
         return ResponseEntity.ok(mapOf("success" to true))
-    }
-
-    @GetMapping("/favorites")
-    fun getFavorites(): ResponseEntity<GalleryListResponse> {
-        return ResponseEntity.ok(galleryService.getLocalFavorites())
     }
 
     @GetMapping("/quick-search")
