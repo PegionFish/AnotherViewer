@@ -33,6 +33,9 @@
         </KeepAlive>
       </router-view>
     </main>
+
+    <!-- C7: 首次使用引导卡（Home + 未配置服务器时出现；fixed 浮层，不占布局、不入 KeepAlive）。 -->
+    <SetupHintCard />
   </div>
 </template>
 
@@ -40,6 +43,7 @@
 import { ref, computed, watch, type Component } from 'vue'
 import { useRoute, useRouter, type RouteLocationNormalized } from 'vue-router'
 import NavigationDrawer, { DEFAULT_NAV_ITEMS, NAV_TARGET_PATHS } from '@/components/layout/NavigationDrawer.vue'
+import SetupHintCard from '@/components/setup/SetupHintCard.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 import type { NavItem } from '@/types/components'

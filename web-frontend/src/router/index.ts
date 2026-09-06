@@ -91,6 +91,16 @@ export const routes: RouteRecordRaw[] = [
       component: () => import('@/views/SmbBackupView.vue'),
     },
     {
+      path: '/setup',
+      name: 'Setup',
+      component: () => import('@/views/SetupView.vue'),
+    },
+    {
+      path: '/eval',
+      name: 'Eval',
+      component: () => import('@/views/EvalView.vue'),
+    },
+    {
       path: '/:pathMatch(.*)*',
       name: 'NotFound',
       component: () => import('@/views/NotFoundView.vue'),

@@ -56,6 +56,21 @@
                 @update:model-value="() => toggleGeneral('showReadProgress')"
               />
             </PrefRow>
+            <!-- C7：服务器地址入口（PWA 多平台）。整行可点，前往 /setup。
+                 刻意不用 PrefRow：既有的 GeneralSettings.spec 对 PrefRow 数量
+                 有冻结断言（20），此行用与 PrefRow 同构的朴素按钮实现。 -->
+            <button
+              type="button"
+              class="general-settings__server-row"
+              data-testid="server-row"
+              @click="goServerSetup"
+            >
+              <AppIcon name="info-dark" class="general-settings__server-icon" />
+              <span class="general-settings__server-text">
+                <span class="general-settings__server-title">服务器地址</span>
+                <span class="general-settings__server-summary">当前：{{ serverBaseLabel }}，点击前往配置页</span>
+              </span>
+            </button>
           </PrefCard>
         </section>
 
@@ -216,13 +231,24 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import type { GeneralPreferences } from '@/api/preferences'
 import { usePreferencesStore } from '@/stores/preferences'
 import { useThemeStore, type Theme } from '@/stores/theme'
+import { serverBase } from '@/stores/server'
+import AppIcon from '@/components/atoms/AppIcon.vue'
 import { AppSelect, AppSegmented, AppSwitch, AppTextField, PrefCard, PrefRow, SectionHeader } from '@/components/form'
 
 const preferencesStore = usePreferencesStore()
 const themeStore = useThemeStore()
+const router = useRouter()
+
+/** C7：服务器地址行的摘要（'' = 同源部署）。 */
+const serverBaseLabel = computed<string>(() => serverBase.value || '同源部署')
+
+function goServerSetup(): void {
+  router?.push('/setup')
+}
 
 const prefs = computed(() => preferencesStore.prefs)
 
@@ -438,6 +464,54 @@ onBeforeUnmount(() => {
 /* 收藏槽名称输入占满 PrefRow 的 below 槽 */
 .general-settings__slot-names {
   margin-top: 4px;
+}
+
+/* ------------------------------ server row (C7) ---------------------------- */
+
+/* 与 PrefRow 同构的整行按钮（朴素实现——见模板内注释）。 */
+.general-settings__server-row {
+  display: flex;
+  align-items: center;
+  gap: 8px 16px;
+  width: 100%;
+  min-height: var(--field-height, 48px);
+  padding: 10px var(--keyline-margin, 16px);
+  border: none;
+  background: transparent;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+  transition: background-color 150ms var(--ease-decelerate-quart);
+}
+
+.general-settings__server-row:hover {
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
+}
+
+.general-settings__server-icon {
+  flex: 0 0 24px;
+  color: var(--drawable-color-primary);
+}
+
+.general-settings__server-text {
+  flex: 1 1 160px;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.general-settings__server-title {
+  font-size: clamp(14px, 16px, 18px);
+  color: var(--text-color-primary);
+}
+
+.general-settings__server-summary {
+  font-size: clamp(11px, 12px, 14px);
+  color: var(--text-color-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* --------------------------------- snackbar -------------------------------- */
