@@ -64,11 +64,9 @@
     </nav>
 
     <!-- 分页条（A4 定案：与下载/历史页同构，2026-09-06）：页码窗口 + 前后页 +
-         跳页 + PC 键盘翻页。服务端 /favorite/list 现固定 20 条/页（W2-B2 只在
-         FavoriteService 层支持 pageSize，控制器尚未暴露 pageSize 查询参数——
-         对照 HistoryController），条数切换档位（50/100/200，对齐下载页）待
-         后端补齐后解锁。total ≤ pageSize 时隐藏（Android PaginationIndicator
-         语义）。 -->
+         每页条数切换（50/100/200，默认 50——W3-F4b 起控制器收 pageSize 并钳制
+         1..200，与历史页同口径）+ 跳页 + PC 键盘翻页。total ≤ pageSize 时隐藏
+         （Android PaginationIndicator 语义）。 -->
     <nav
       v-if="paginationVisible"
       class="pagination-bar"
@@ -112,6 +110,18 @@
           ›
         </button>
       </span>
+      <label class="pagination-bar__size">
+        条/页
+        <select
+          v-model.number="pageSize"
+          class="pagination-bar__select"
+          aria-label="每页条数"
+        >
+          <option v-for="size in FAVORITE_PAGE_SIZES" :key="size" :value="size">
+            {{ size }}
+          </option>
+        </select>
+      </label>
       <span class="pagination-bar__jump">
         <input
           v-model.number="jumpInput"
@@ -214,13 +224,13 @@
  * CategoryChip + 阅读进度角标)，加收藏夹过滤条（slots 0–9，名字来自
  * `prefs.general.favoriteSlotNames`，B-4）与场景 FabLayout（刷新 / 回顶部）。
  *
- * 服务端分页（A4 / W2-B2 DB 分页）：`usePagedList` 状态机管理页码/跳页/PC
- * 键盘翻页；`fetchPage` 把 1 起页码直传 /favorite/list（收藏信封 page 1 起，
- * 历史是 0 起；响应信封 `{favorites, totalPages, currentPage}` + 新增
- * `page/pageSize/total`，total 驱动 totalPages；旧服务器缺 total 时以
- * legacy totalPages×页大小 复原，页数口径与旧 envelope 一致）。
- * 偏离 A4 档位定案：/favorite/list 控制器暂不收 pageSize（服务固定 20 条/页），
- * 条数档位（50/100/200）待后端暴露后再解锁——见分页条注释。
+ * 服务端分页（A4 / W2-B2 DB 分页）：`usePagedList` 状态机管理页码/条数/
+ * 跳页/PC 键盘翻页；`fetchPage` 把 1 起页码与每页条数直传 /favorite/list
+ * （收藏信封 page 1 起，历史是 0 起；响应信封 `{favorites, totalPages,
+ * currentPage}` + 新增 `page/pageSize/total`，total 驱动 totalPages；旧服务
+ * 器缺 total 时以 legacy totalPages×20 复原，页数口径与旧 envelope 一致）。
+ * 条数档位 50/100/200、默认 50（W3-F4b：控制器收 pageSize 并钳制 1..200，
+ * 与历史页同口径）。
  * Search（q，防抖）与 filter slots（A5d，q=pattern&regex=true）收窄服务端
  * 结果，两者互斥且都随变更回第 1 页。
  *
@@ -240,7 +250,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { favoriteApi } from '@/api/favorite'
-import type { FavoriteItem, FavoriteListResponse } from '@/api/favorite'
+import type { FavoriteItem } from '@/api/favorite'
 import { useFilterSlots } from '@/composables/useFilterSlots'
 import { usePagedList } from '@/composables/usePagedList'
 import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
@@ -308,13 +318,15 @@ function categoryBit(raw: number | string): number {
 const router = useRouter()
 
 /**
- * 服务端分页口径（W2-B2）：/favorite/list 的 service 层 pageSize 默认且当前
- * 唯一实效值 20——控制器尚未暴露 pageSize 查询参数（对照 HistoryController），
- * 客户端不发会被忽略的条数参数；档位切换（50/100/200，对齐下载/历史页）待
- * 后端补齐后解锁。
+ * 每页条数档位（A4 定案，W3-F4b 贯通：50/100/200，默认 50）。后端
+ * /favorite/list 控制器把 pageSize 钳制在 1..200——三档全部有效（与
+ * /history/list 同口径）。
  */
-const FAVORITE_PAGE_SIZE = 20
-const FAVORITE_PAGE_SIZES = [FAVORITE_PAGE_SIZE] as const
+const FAVORITE_PAGE_SIZES = [50, 100, 200] as const
+/** 初始每页条数（无持久化偏好键，回落后同为 50）。 */
+const DEFAULT_FAVORITE_PAGE_SIZE = 50
+/** 旧服务器忽略 pageSize 且信封无 total 时按其固定 20 条/页复原 total。 */
+const LEGACY_FAVORITE_PAGE_SIZE = 20
 
 const state = ref<ViewState>('loading')
 const refreshing = ref(false)
@@ -406,15 +418,16 @@ function errorCodeOf(error: unknown): string | null {
 const activeSlot = ref(0)
 
 /**
- * 分页状态机（W3-C1 usePagedList）：页码 / 跳页 / PC 页码窗口 /
+ * 分页状态机（W3-C1 usePagedList）：页码 / 条数 / 跳页 / PC 页码窗口 /
  * PageUp/Down / stale 竞态守卫。fetchPage 适配 /favorite/list 信封——
- * 收藏 page 1 起【直传】（无历史的 -1 换算）；pageSize 服务端固定 20
- * （见 FAVORITE_PAGE_SIZE 注释）。视图四态机与错误文案留在本视图，
- * 经 onLoadStart/onSuccess/onError 钩子接线。
+ * 收藏 page 1 起【直传】（无历史的 -1 换算）+ pageSize 直传（W3-F4b，
+ * 服务端钳制 1..200）。视图四态机与错误文案留在本视图，经
+ * onLoadStart/onSuccess/onError 钩子接线。
  */
 const {
   items: favorites,
   total,
+  pageSize,
   currentPage,
   totalPages,
   paginationVisible,
@@ -423,29 +436,29 @@ const {
   load: loadPage,
   jumpToPage,
 } = usePagedList<FavoriteItem>({
-  fetchPage: async (page) => {
+  fetchPage: async (page, size) => {
     const filter = currentFilter()
     const response = await favoriteApi.listFavorites(
       activeSlot.value,
       page,
       filter.q || null,
       filter.regex || undefined,
+      size,
     )
-    // W2-B2 信封新增 page/pageSize/total（favorite.ts 类型尚未声明——运行时
-    // 存在）：total 驱动 totalPages。旧服务器缺 total 时以 legacy
-    // totalPages×页大小 复原（ceil 恒等于旧 totalPages，口径不漂移）。
-    const envelope = response as FavoriteListResponse & { total?: number }
+    // W2-B2 信封新增 page/pageSize/total：total 驱动 totalPages。旧服务器缺
+    // total 时以 legacy totalPages×20 复原（旧服务端固定 20 条/页，ceil 恒等
+    // 于旧 totalPages，口径不漂移）。
     return {
       items: response.favorites,
       total:
-        typeof envelope.total === 'number'
-          ? envelope.total
-          : response.totalPages * FAVORITE_PAGE_SIZE,
+        typeof response.total === 'number'
+          ? response.total
+          : response.totalPages * LEGACY_FAVORITE_PAGE_SIZE,
     }
   },
   pageSizes: FAVORITE_PAGE_SIZES,
-  initialPageSize: FAVORITE_PAGE_SIZE,
-  fallbackPageSize: FAVORITE_PAGE_SIZE,
+  initialPageSize: DEFAULT_FAVORITE_PAGE_SIZE,
+  fallbackPageSize: DEFAULT_FAVORITE_PAGE_SIZE,
   onLoadStart: () => {
     state.value = 'loading'
   },
@@ -790,8 +803,7 @@ onMounted(() => {
 }
 
 /* ----------------------------------------------------- pagination bar ---- */
-/* 与 DownloadView / HistoryView 分页条同构复刻（A4）：页码窗口 / 跳页
-   （条数切换待 /favorite/list 暴露 pageSize 后补——见模板注释）。 */
+/* 与 DownloadView / HistoryView 分页条同构复刻（A4）：页码 / 每页条数 / 跳页。 */
 .pagination-bar {
   display: flex;
   align-items: center;
@@ -869,6 +881,7 @@ onMounted(() => {
   user-select: none;
 }
 
+.pagination-bar__size,
 .pagination-bar__jump {
   display: inline-flex;
   align-items: center;
@@ -877,6 +890,7 @@ onMounted(() => {
   white-space: nowrap;
 }
 
+.pagination-bar__select,
 .pagination-bar__input {
   padding: 2px 6px;
   border: 1px solid var(--color-divider);
@@ -899,6 +913,7 @@ onMounted(() => {
   margin: 0;
 }
 
+.pagination-bar__select:focus,
 .pagination-bar__input:focus {
   outline: none;
   border-color: var(--color-primary);

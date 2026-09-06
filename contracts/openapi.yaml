@@ -693,6 +693,19 @@ paths:
             type: integer
             default: 1
           description: Page number (1-based)
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 50
+            minimum: 1
+            maximum: 200
+          description: >-
+            Number of favorites per page (W3-F4b). The controller clamps the
+            value into 1..200 — the same window as /api/v1/history/list
+            (FavoriteService itself only clamps the lower bound; its default
+            20 applies to direct service callers, not this endpoint).
         - name: q
           in: query
           required: false
@@ -3302,9 +3315,9 @@ components:
         pageSize:
           type: integer
           description: >-
-            Effective page size (W2-B2 envelope extension; the service
-            clamps to >= 1 — currently always the service default 20 because
-            the controller does not expose a pageSize query parameter yet).
+            Effective page size (W2-B2 envelope extension; the listFavorites
+            controller defaults it to 50 and clamps the request value into
+            1..200).
         total:
           type: integer
           description: >-

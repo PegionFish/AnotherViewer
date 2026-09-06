@@ -111,6 +111,39 @@ class FavoriteControllerTest {
     }
 
     @Test
+    fun `list forwards pageSize param to the service`() {
+        `when`(favoriteService.listFavorites(anyInt(), anyInt(), anyInt(), nullable(String::class.java), anyBoolean()))
+            .thenReturn(FavoriteListResponse(emptyList(), 0, 1))
+
+        mockMvc.perform(get("/api/v1/favorite/list").param("pageSize", "100"))
+            .andExpect(status().isOk)
+            .andExpect(jsonPath("$.favorites").isArray)
+        verify(favoriteService).listFavorites(eq(0), eq(1), eq(100), nullable(String::class.java), eq(false))
+    }
+
+    @Test
+    fun `list defaults pageSize to 50 and clamps into 1-200`() {
+        `when`(favoriteService.listFavorites(anyInt(), anyInt(), anyInt(), nullable(String::class.java), anyBoolean()))
+            .thenReturn(FavoriteListResponse(emptyList(), 0, 1))
+
+        // 缺省 → 控制器默认 50（对齐 /history/list 的默认口径，A4 条数档位默认档；
+        // FavoriteService 自身默认 20 只对服务层直调生效）。
+        mockMvc.perform(get("/api/v1/favorite/list"))
+            .andExpect(status().isOk)
+        verify(favoriteService).listFavorites(eq(0), eq(1), eq(50), nullable(String::class.java), eq(false))
+
+        // 0 → 下界 1；501 → 上界 200（HistoryService 同款 1..200 窗口——service
+        // 只钳下界，上界由控制器把关）。
+        mockMvc.perform(get("/api/v1/favorite/list").param("pageSize", "0"))
+            .andExpect(status().isOk)
+        verify(favoriteService).listFavorites(eq(0), eq(1), eq(1), nullable(String::class.java), eq(false))
+
+        mockMvc.perform(get("/api/v1/favorite/list").param("pageSize", "501"))
+            .andExpect(status().isOk)
+        verify(favoriteService).listFavorites(eq(0), eq(1), eq(200), nullable(String::class.java), eq(false))
+    }
+
+    @Test
     fun `list forwards q and regex params`() {
         `when`(favoriteService.listFavorites(anyInt(), anyInt(), anyInt(), eq("futa"), eq(true)))
             .thenReturn(FavoriteListResponse(emptyList(), 0, 1))

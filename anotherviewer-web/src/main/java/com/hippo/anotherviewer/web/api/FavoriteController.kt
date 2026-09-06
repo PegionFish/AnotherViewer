@@ -17,11 +17,15 @@ class FavoriteController(private val favoriteService: FavoriteService) {
     fun listFavorites(
         @RequestParam(defaultValue = "0") slot: Int,
         @RequestParam(defaultValue = "1") page: Int,
+        @RequestParam(defaultValue = "50") pageSize: Int,
         @RequestParam(required = false) q: String?,
         @RequestParam(defaultValue = "false") regex: Boolean
     ): ResponseEntity<*> {
         return try {
-            ResponseEntity.ok(favoriteService.listFavorites(slot, page, q = q, regex = regex))
+            // W3-F4b: pageSize 查询参数贯通（对齐 /history/list 语义）。默认 50、
+            // 钳制 1..200 在控制器完成——FavoriteService 自身只钳下界 >= 1
+            // （默认 20 仅服务层旧调用方生效），上界必须由控制器把关。
+            ResponseEntity.ok(favoriteService.listFavorites(slot, page, pageSize.coerceIn(1, 200), q = q, regex = regex))
         } catch (e: IllegalArgumentException) {
             errorEnvelope(HttpStatus.BAD_REQUEST, "REGEX_INVALID", e.message ?: "正则表达式无效")
         }

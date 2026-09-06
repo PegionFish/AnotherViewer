@@ -52,8 +52,8 @@ const FILTER_SLOTS = [
   { id: 's2', name: 'Doujin', pattern: 'doujin|doujinshi' },
 ]
 
-/** 服务端固定 20 条/页（W2-B2 service 默认；控制器暂不收 pageSize）。 */
-const PAGE_SIZE = 20
+/** 默认每页条数 50（W3-F4b：控制器默认 50、钳制 1..200；前端默认档同为 50）。 */
+const PAGE_SIZE = 50
 
 function makeFavorite(gid: number, overrides: Partial<FavoriteItem> = {}): FavoriteItem {
   return {
@@ -73,22 +73,28 @@ function makeFavorite(gid: number, overrides: Partial<FavoriteItem> = {}): Favor
 
 /**
  * W2-B2 信封：favorites/totalPages/currentPage + 新增 page/pageSize/total
- * （favorite.ts 类型尚未声明后三个——运行时存在，视图经防御式读取消费）。
+ * （W3-F4b 起 favorite.ts 已声明后三个可选字段）。
  */
 function listResult(
   items: FavoriteItem[],
-  opts: { total?: number; totalPages?: number; currentPage?: number } = {},
+  opts: {
+    total?: number
+    totalPages?: number
+    currentPage?: number
+    pageSize?: number
+  } = {},
 ): FavoriteListResponse {
   const page = opts.currentPage ?? 1
   const total = opts.total ?? items.length
+  const size = opts.pageSize ?? PAGE_SIZE
   return {
     favorites: items,
-    totalPages: opts.totalPages ?? Math.max(1, Math.ceil(total / PAGE_SIZE)),
+    totalPages: opts.totalPages ?? Math.max(1, Math.ceil(total / size)),
     currentPage: page,
     total,
     page,
-    pageSize: PAGE_SIZE,
-  } as FavoriteListResponse
+    pageSize: size,
+  }
 }
 
 /** Seed the preferences store directly (avoids the async preferences load). */
@@ -136,7 +142,7 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
 
   it('loads the folder list through /favorite/list with slot/page params', async () => {
     await mountFavorites([makeFavorite(1), makeFavorite(2)])
-    expect(favoriteApi.listFavorites).toHaveBeenCalledWith(0, 1, null, undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenCalledWith(0, 1, null, undefined, 50)
     expect(wrapper.text()).toContain('Favorite 1')
     // 标题计数 = 服务端过滤后全集条数（total 驱动，不再累计已加载数）。
     expect(wrapper.find('.favorite-view__count').text()).toBe('2 galleries')
@@ -245,7 +251,7 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     await wrapper.findAll('.slot-bar__chip').find((c) => c.text() === 'Favorites 3')!.trigger('click')
     await flushPromises()
     await flushPromises()
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(3, 1, null, undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(3, 1, null, undefined, 50)
   })
 
   it('activates a filter slot and requests q=pattern&regex=true', async () => {
@@ -254,14 +260,14 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     expect(wrapper.findAll('.filter-slot-bar__chip')).toHaveLength(3) // 全部 + 2
 
     await clickFilterChip('Artist')
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, 'artist', true)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, 'artist', true, 50)
     // 互斥：选槽位清空搜索词。
     const input = wrapper.find('.search-bar__input').element as HTMLInputElement
     expect(input.value).toBe('')
 
     // 回到「全部」→ 恢复无过滤加载（分页重置回第 1 页）。
     await clickFilterChip('全部')
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined, 50)
   })
 
   it('debounces a typed search to q=word and cancels the active slot', async () => {
@@ -278,7 +284,7 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     await flushPromises()
 
     // 输入搜索取消槽位 → LIKE 搜索（无 regex 参数）。
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, 'futa', undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, 'futa', undefined, 50)
     const artistChip = wrapper
       .findAll('.filter-slot-bar__chip')
       .find((c) => c.text() === 'Artist')!
@@ -302,7 +308,7 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     await input.setValue('漫画')
     await vi.advanceTimersByTimeAsync(500)
     await flushPromises()
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, '漫画', undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, '漫画', undefined, 50)
     vi.useRealTimers()
   })
 
@@ -312,29 +318,32 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     await wrapper.find('.search-bar__input').setValue('futa')
     await vi.advanceTimersByTimeAsync(500)
     await flushPromises()
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, 'futa', undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, 'futa', undefined, 50)
 
     await wrapper.find('.search-bar__clear').trigger('click')
     await flushPromises()
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined, 50)
     vi.useRealTimers()
   })
 
   /* ---------------- 服务端分页（A4，usePagedList + 分页条） ---------------- */
 
-  /** 按服务端分页语义切片的 mock：page 1 起始（收藏信封），pageSize 固定 20。 */
+  /** 按服务端分页语义切片的 mock：page 1 起始（收藏信封），pageSize 每页条数。 */
   function pagedServer(totalRows: number) {
     return async (
       _slot: unknown,
       page = 1,
+      _q?: unknown,
+      _regex?: unknown,
+      pageSize = PAGE_SIZE,
     ): Promise<FavoriteListResponse> => {
-      const start = (page - 1) * PAGE_SIZE
-      const count = Math.max(0, Math.min(PAGE_SIZE, totalRows - start))
+      const start = (page - 1) * pageSize
+      const count = Math.max(0, Math.min(pageSize, totalRows - start))
       return listResult(
         Array.from({ length: count }, (_, i) =>
           makeFavorite(start + i + 1, { title: `F ${start + i + 1}` }),
         ),
-        { total: totalRows, currentPage: page },
+        { total: totalRows, currentPage: page, pageSize },
       )
     }
   }
@@ -347,19 +356,19 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
   }
 
   it('first screen loads page=1 only and shows the pagination bar (no full fetch)', async () => {
-    await mountPaged(100)
+    await mountPaged(120)
 
-    // 首屏：page=1，整页替换渲染 20 行（服务端固定 pageSize）。
+    // 首屏：page=1&pageSize=50（默认档），整页替换渲染 50 行。
     expect(favoriteApi.listFavorites).toHaveBeenCalledTimes(1)
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined)
-    expect(wrapper.findAll('.app-list-row')).toHaveLength(20)
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined, 50)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(50)
     expect(wrapper.text()).toContain('F 1')
     // 标题计数 = 服务端过滤后全集条数。
-    expect(wrapper.find('.favorite-view__count').text()).toBe('100 galleries')
-    // 分页条：第 1 / 5 页 · 100 条。
+    expect(wrapper.find('.favorite-view__count').text()).toBe('120 galleries')
+    // 分页条：第 1 / 3 页 · 120 条。
     const bar = wrapper.find('[data-testid="favorite-pagination"]')
     expect(bar.exists()).toBe(true)
-    expect(bar.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 100 条')
+    expect(bar.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 120 条')
   })
 
   it('hides the pagination bar when total <= pageSize (Android 语义)', async () => {
@@ -368,43 +377,65 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
   })
 
   it('jumps to a page via the page buttons (whole-page replace)', async () => {
-    await mountPaged(100)
+    await mountPaged(120)
 
     const bar = () => wrapper.find('[data-testid="favorite-pagination"]')
     await bar()
       .findAll('.pagination-bar__page')
-      .find((b) => b.text() === '5')!
+      .find((b) => b.text() === '3')!
       .trigger('click')
     await flushPromises()
     await flushPromises()
 
-    // 收藏信封 page 1 起——usePagedList 页码 5 直传 page=5。
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 5, null, undefined)
-    // 最后一页 20 条整——整页替换（不再是追加语义）。
+    // 收藏信封 page 1 起——usePagedList 页码 3 直传 page=3。
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 3, null, undefined, 50)
+    // 最后一页只剩 20 条——整页替换（不再是追加语义）。
     expect(wrapper.findAll('.app-list-row')).toHaveLength(20)
-    expect(wrapper.text()).toContain('F 100')
-    expect(bar().find('.pagination-bar__info').text()).toBe('第 5 / 5 页 · 100 条')
-    expect(bar().find('.pagination-bar__page--active').text()).toBe('5')
+    expect(wrapper.text()).toContain('F 120')
+    expect(bar().find('.pagination-bar__info').text()).toBe('第 3 / 3 页 · 120 条')
+    expect(bar().find('.pagination-bar__page--active').text()).toBe('3')
+  })
+
+  it('reloads page 1 with the selected page size (50/100/200 tiers)', async () => {
+    await mountPaged(300)
+
+    // 三档下拉（对齐下载/历史页档位），默认 50。
+    const select = wrapper.find('.pagination-bar__select')
+    expect(select.findAll('option').map((o) => o.text())).toEqual(['50', '100', '200'])
+
+    await select.setValue('100')
+    await flushPromises()
+    await flushPromises()
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined, 100)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(100)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 300 条')
+
+    await wrapper.find('.pagination-bar__select').setValue('200')
+    await flushPromises()
+    await flushPromises()
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined, 200)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(200)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 2 页 · 300 条')
   })
 
   it('pages with keyboard PageDown / PageUp (PC)', async () => {
-    await mountPaged(100)
+    await mountPaged(120)
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }))
     await flushPromises()
     await flushPromises()
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 2, null, undefined)
-    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 2 / 5 页 · 100 条')
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 2, null, undefined, 50)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 2 / 3 页 · 120 条')
 
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }))
     await flushPromises()
     await flushPromises()
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined)
-    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 100 条')
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(0, 1, null, undefined, 50)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 120 条')
   })
 
   it('keeps whole-page replace semantics when switching the folder chip mid-pagination', async () => {
-    await mountPaged(100)
+    await mountPaged(120)
 
     // 翻到第 2 页后切收藏夹 → 回第 1 页整页替换（新 slot 参数）。
     window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }))
@@ -414,8 +445,8 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     await flushPromises()
     await flushPromises()
 
-    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(3, 1, null, undefined)
-    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 100 条')
+    expect(favoriteApi.listFavorites).toHaveBeenLastCalledWith(3, 1, null, undefined, 50)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 120 条')
   })
 
   /* ---------------- F4 REGEX_INVALID 错误识别 --------------- */

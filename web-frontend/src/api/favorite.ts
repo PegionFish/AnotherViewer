@@ -27,6 +27,20 @@ export interface FavoriteListResponse {
   favorites: FavoriteItem[]
   totalPages: number
   currentPage: number
+  /**
+   * W2-B2 信封扩展（向后兼容，旧服务器缺省）：回显 1 起页码（= currentPage）。
+   */
+  page?: number
+  /**
+   * W2-B2 信封扩展：服务端实效每页条数（控制器默认 50、钳制 1..200；旧服务
+     器固定 20 且可能忽略本端传入的 pageSize）。
+   */
+  pageSize?: number
+  /**
+   * W2-B2 信封扩展：过滤后全集条数（分页排除），totalPages 的权威来源。旧
+   * 服务器缺省时调用方以 legacy totalPages×页大小 复原。
+   */
+  total?: number
 }
 
 export const favoriteApi = {
@@ -35,10 +49,12 @@ export const favoriteApi = {
     page = 1,
     q?: string | null,
     regex?: boolean,
+    pageSize?: number,
   ): Promise<FavoriteListResponse> {
     const params: Record<string, string> = { slot: String(slot), page: String(page) }
     if (q !== undefined && q !== null && q !== '') params.q = q
     if (regex) params.regex = 'true'
+    if (pageSize !== undefined) params.pageSize = pageSize.toString()
     const { data } = await client.get('/favorite/list', { params })
     return data
   },
