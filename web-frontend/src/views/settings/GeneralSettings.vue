@@ -63,13 +63,6 @@
         <section>
           <SectionHeader title="浏览" />
           <PrefCard>
-            <PrefRow icon="reorder" title="列表模式" summary="画廊列表的默认布局">
-              <AppSelect
-                :model-value="prefs.general.listMode"
-                :options="LIST_MODE_OPTIONS"
-                @update:model-value="(v) => updateGeneralValue('listMode', v)"
-              />
-            </PrefRow>
             <PrefRow icon="share-primary" title="显示上传者" summary="在画廊卡片上显示上传者">
               <AppSwitch
                 :model-value="prefs.general.showUploader"
@@ -254,11 +247,6 @@ const LAUNCH_PAGE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'subscription', label: '订阅' },
   { value: 'hot', label: '热门' },
   { value: 'whats_hot', label: '热门' },
-]
-
-const LIST_MODE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'grid', label: '网格' },
-  { value: 'list', label: '列表' },
 ]
 
 const DETAIL_SIZE_OPTIONS: Array<{ value: string; label: string }> = [

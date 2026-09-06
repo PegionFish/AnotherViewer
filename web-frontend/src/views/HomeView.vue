@@ -354,12 +354,6 @@ const MODE_TO_NUM: Readonly<Record<NormalSearchMode, number>> = {
   tag: 3,
 }
 
-/**
- * Legacy localStorage key of the pre-preferences list mode. Read once during
- * the B-1 migration, written into `general.listMode`, then removed.
- */
-const LIST_MODE_KEY = 'anotherviewer-webui:gallery-list-mode'
-
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
@@ -614,33 +608,6 @@ async function checkEhSession(): Promise<void> {
   }
 }
 
-/* ------------------------------ legacy listMode migration ---------------- */
-
-/** One-shot guard for the legacy localStorage → preferences migration. */
-let legacyModeMigrated = false
-
-/**
- * B-1 migration: the pre-preferences list mode lived in localStorage. Once
- * preferences are available the stored value is written into
- * `general.listMode` (debounced PUT /preferences) and the key removed —
- * exactly once, so server-side values win afterwards.（A4 单列化后本视图不再
- * 消费 listMode，迁移保留为该遗留键的一次性清理。）
- */
-function migrateLegacyListMode(): void {
-  if (legacyModeMigrated || !preferencesStore.prefs) return
-  legacyModeMigrated = true
-  try {
-    const legacy = localStorage.getItem(LIST_MODE_KEY)
-    if (legacy === null) return
-    preferencesStore.updateGeneral({ listMode: legacy === 'grid' ? 'grid' : 'list' })
-    localStorage.removeItem(LIST_MODE_KEY)
-  } catch {
-    /* Storage unavailable — nothing to migrate. */
-  }
-}
-
-watch(() => preferencesStore.prefs, migrateLegacyListMode, { immediate: true })
-
 /* ------------------------- search filters wiring ------------------------- */
 
 /** 筛选即时搜索防抖（C6）：连续勾选 N 个分类只发一次请求。 */
@@ -889,9 +856,9 @@ function openReader(gid: number): void {
 /* --------------------------------- lifecycle ---------------------------- */
 
 onMounted(() => {
-  // Preferences feed the legacy listMode migration. Kick the load here so the
-  // migration runs as early as possible (the store would otherwise stay
-  // unloaded until some view needs a live pref).
+  // Warm the preferences store early: HistoryView rows (read-progress badge)
+  // consume `general.showReadProgress` but do not kick a load themselves, and
+  // the store would otherwise stay unloaded until some view needs a live pref.
   if (!preferencesStore.prefs && !preferencesStore.loading) {
     void preferencesStore.load()
   }

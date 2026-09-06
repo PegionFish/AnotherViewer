@@ -268,7 +268,7 @@ import FabLayout from '@/components/atoms/FabLayout.vue'
 import AppListRow from '@/components/gallery/AppListRow.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import CategoryChip from '@/components/atoms/CategoryChip.vue'
-import { parseFavoriteSlotNames } from '@/components/gallery/GalleryCard.vue'
+import { parseFavoriteSlotNames } from '@/utils/favoriteSlotNames'
 import { usePreferencesStore } from '@/stores/preferences'
 
 /** View states matching ContentLayout's internal ViewTransition. */

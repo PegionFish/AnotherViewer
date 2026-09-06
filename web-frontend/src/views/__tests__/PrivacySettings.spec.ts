@@ -16,7 +16,6 @@ function defaultPrefs(): Preferences {
       theme: 'dark',
       themeAutoSwitch: false,
       launchPage: 'homepage',
-      listMode: 'grid',
       showReadProgress: true,
       detailSize: 'long',
       thumbSize: 'middle',

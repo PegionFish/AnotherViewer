@@ -9,7 +9,6 @@ import { galleryApi } from '@/api/gallery'
 import { authApi } from '@/api/auth'
 import { siteApi } from '@/api/site'
 import { preferencesApi } from '@/api/preferences'
-import { usePreferencesStore } from '@/stores/preferences'
 import { availability, markUnknown } from '@/stores/availability'
 import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 import type { Preferences } from '@/api/preferences'
@@ -60,9 +59,6 @@ const feedListMock = vi.mocked(
     pageSize?: number,
   ) => Promise<GalleryListResponse>,
 )
-
-/** Legacy localStorage key of the pre-preferences list mode (B-1 migration). */
-const LIST_MODE_KEY = 'anotherviewer-webui:gallery-list-mode'
 
 /** Minimal Preferences fixture — schema keys optional (parallel-work keys). */
 function makePrefs(general: Record<string, unknown>): Preferences {
@@ -126,9 +122,9 @@ describe('HomeView (首页)', () => {
       gallerySite: 0,
       cookies: [],
     })
-    // Default: preferences resolve with the grid layout (the pre-migration
+    // Default: preferences resolve with an empty general section (the
     // tests below can override per case).
-    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'grid' }))
+    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({}))
     vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
     // 默认站点状态 UP：横幅不出现（每个用例可按需覆盖）。
     vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UP' })
@@ -423,7 +419,7 @@ describe('HomeView — A4 服务端分页（分页条，usePagedList）', () => 
       gallerySite: 0,
       cookies: [],
     })
-    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'list' }))
+    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({}))
     vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
     vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UP' })
     vi.mocked(siteApi.probeAvailability).mockResolvedValue({ state: 'UP' })
@@ -546,106 +542,6 @@ describe('HomeView — A4 服务端分页（分页条，usePagedList）', () => 
   })
 })
 
-describe('HomeView (B-1 localStorage → preferences listMode migration)', () => {
-  let wrapper: VueWrapper
-
-  beforeEach(() => {
-    setActivePinia(createPinia())
-    localStorage.clear()
-    pushMock.mockClear()
-    routeMock.query = {}
-    availability.state = null
-    availability.downAt = null
-    availability.lastReason = null
-    availability.lastLoadedAt = null
-    markUnknown()
-    setPrivacyMaskEnabled(false)
-    vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
-    vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: [gallery()], total: 1 })
-    vi.mocked(authApi.ehSession).mockResolvedValue({
-      signedIn: false,
-      expired: false,
-      gallerySite: 0,
-      cookies: [],
-    })
-    vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
-    vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UP' })
-    vi.mocked(siteApi.probeAvailability).mockResolvedValue({ state: 'UP' })
-  })
-
-  afterEach(() => {
-    wrapper?.unmount()
-    vi.useRealTimers()
-    vi.clearAllMocks()
-  })
-
-  async function mountHomeWithPrefs(general: Record<string, unknown>) {
-    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs(general))
-    wrapper = mount(HomeView)
-    await flushPromises()
-    return wrapper
-  }
-
-  it('writes the legacy grid value into preferences and clears localStorage', async () => {
-    vi.useFakeTimers()
-    localStorage.setItem(LIST_MODE_KEY, 'grid')
-    await mountHomeWithPrefs({ listMode: 'list' }) // server value differs
-
-    // Migration applied the legacy value to the store…
-    expect(usePreferencesStore().prefs?.general.listMode).toBe('grid')
-    // …cleared the legacy key…
-    expect(localStorage.getItem(LIST_MODE_KEY)).toBeNull()
-    // …and persists it through the preferences API (debounced PUT).
-    await vi.advanceTimersByTimeAsync(600)
-    expect(preferencesApi.update).toHaveBeenCalledTimes(1)
-    expect(preferencesApi.update).toHaveBeenCalledWith({
-      general: expect.objectContaining({ listMode: 'grid' }),
-    })
-  })
-
-  it('migrates the legacy list value too', async () => {
-    vi.useFakeTimers()
-    localStorage.setItem(LIST_MODE_KEY, 'list')
-    await mountHomeWithPrefs({ listMode: 'grid' })
-
-    expect(usePreferencesStore().prefs?.general.listMode).toBe('list')
-    expect(localStorage.getItem(LIST_MODE_KEY)).toBeNull()
-  })
-
-  it('normalizes an unrecognized legacy value to list', async () => {
-    vi.useFakeTimers()
-    localStorage.setItem(LIST_MODE_KEY, 'table')
-    await mountHomeWithPrefs({ listMode: 'grid' })
-
-    // Legacy semantics: anything that is not exactly "grid" was list mode.
-    expect(usePreferencesStore().prefs?.general.listMode).toBe('list')
-    expect(localStorage.getItem(LIST_MODE_KEY)).toBeNull()
-  })
-
-  it('leaves preferences untouched when no legacy value is stored', async () => {
-    vi.useFakeTimers()
-    await mountHomeWithPrefs({ listMode: 'list' })
-
-    expect(usePreferencesStore().prefs?.general.listMode).toBe('list')
-    await vi.advanceTimersByTimeAsync(600)
-    expect(preferencesApi.update).not.toHaveBeenCalled()
-  })
-
-  it('migrates exactly once', async () => {
-    vi.useFakeTimers()
-    localStorage.setItem(LIST_MODE_KEY, 'grid')
-    await mountHomeWithPrefs({ listMode: 'list' })
-    await vi.advanceTimersByTimeAsync(600)
-
-    // The key is gone; a later preferences change is not re-migrated.
-    const store = usePreferencesStore()
-    store.updateGeneral({ listMode: 'list' })
-    await vi.advanceTimersByTimeAsync(600)
-    expect(store.prefs?.general.listMode).toBe('list')
-    expect(localStorage.getItem(LIST_MODE_KEY)).toBeNull()
-  })
-})
-
 describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
   let wrapper: VueWrapper
 
@@ -668,7 +564,7 @@ describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
       gallerySite: 0,
       cookies: [],
     })
-    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'grid' }))
+    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({}))
     vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
     vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UNKNOWN' })
     vi.mocked(siteApi.probeAvailability).mockResolvedValue({ state: 'UP' })

@@ -21,7 +21,6 @@ function defaultPrefs(): Preferences {
       theme: 'dark',
       themeAutoSwitch: false,
       launchPage: 'homepage',
-      listMode: 'grid',
       showReadProgress: true,
       detailSize: 'long',
       thumbSize: 'middle',
@@ -101,15 +100,15 @@ describe('GeneralSettings (通用设置)', () => {
     const headers = w.findAllComponents(SectionHeader)
     expect(headers.map((h) => h.text())).toEqual(['通用', '浏览', '布局', '画廊'])
     expect(w.findAllComponents(PrefCard)).toHaveLength(4)
-    expect(w.findAllComponents(PrefRow)).toHaveLength(20)
+    expect(w.findAllComponents(PrefRow)).toHaveLength(19)
   })
 
-  it('renders 4 AppSelect controls with complete option lists', async () => {
+  it('renders 3 AppSelect controls with complete option lists', async () => {
     const w = await mountView()
     const selects = w.findAllComponents(AppSelect)
-    expect(selects).toHaveLength(4)
+    expect(selects).toHaveLength(3)
 
-    const expectedCounts = [9, 2, 2, 3]
+    const expectedCounts = [9, 2, 3]
     for (let i = 0; i < selects.length; i++) {
       const trigger = selects[i].find('button.app-select__trigger')
       await trigger.trigger('click')
@@ -198,28 +197,6 @@ describe('GeneralSettings (通用设置)', () => {
   })
 
   // ---- Wave-1 B 组「浏览」 ----
-
-  it('shows the listMode select in the 浏览 group with grid first', async () => {
-    const w = await mountView()
-    const listModeSelect = w.findAllComponents(AppSelect)[1]
-    expect(listModeSelect.props('modelValue')).toBe('grid')
-    expect(listModeSelect.find('.app-select__value').text()).toBe('网格')
-
-    const trigger = listModeSelect.find('button.app-select__trigger')
-    await trigger.trigger('click')
-    expect(menuOptions().map((option) => option.textContent)).toEqual(['网格', '列表'])
-    await trigger.trigger('click')
-  })
-
-  it('persists a listMode change through the store', async () => {
-    const w = await mountView()
-    const store = usePreferencesStore()
-    const trigger = w.findAllComponents(AppSelect)[1].find('button.app-select__trigger')
-    await trigger.trigger('click')
-    menuOptions()[1].click()
-    await wrapper.vm.$nextTick()
-    expect(store.prefs!.general.listMode).toBe('list')
-  })
 
   it('flips the showUploader / showPostedTime switches', async () => {
     const w = await mountView()

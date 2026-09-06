@@ -1,11 +1,13 @@
 import client from './client'
 
+/**
+ * WebUI 通用偏好。A4 收尾后 Web 不再消费 `general.listMode`（后端字段保留，
+ * 仍由 App 端同步）；GET 返回的原始对象按原样透传 PUT，键值不受影响。
+ */
 export interface GeneralPreferences {
   theme: string
   themeAutoSwitch: boolean
   launchPage: string
-  /** grid|list — 画廊列表默认布局（默认 grid） */
-  listMode: string
   showReadProgress: boolean
   detailSize: string
   thumbSize: string
@@ -78,7 +80,6 @@ export const DEFAULT_GENERAL_PREFERENCES: GeneralPreferences = {
   theme: 'light',
   themeAutoSwitch: false,
   launchPage: 'homepage',
-  listMode: 'grid',
   showReadProgress: true,
   detailSize: 'long',
   thumbSize: 'middle',

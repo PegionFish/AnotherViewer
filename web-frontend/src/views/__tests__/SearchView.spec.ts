@@ -12,7 +12,6 @@ import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
-import GalleryCard from '@/components/gallery/GalleryCard.vue'
 import { galleryApi } from '@/api/gallery'
 import { preferencesApi } from '@/api/preferences'
 import type { SearchFilters } from '@/api/gallery'
@@ -50,7 +49,6 @@ function prefsFixture(general: Record<string, unknown> = {}): Preferences {
       theme: 'dark',
       themeAutoSwitch: false,
       launchPage: 'homepage',
-      listMode: 'grid',
       showReadProgress: true,
       detailSize: 'medium',
       thumbSize: 'medium',
@@ -619,12 +617,11 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: items, total })
     }
 
-    it('renders one shared AppListRow per result and no GalleryCard', async () => {
+    it('renders one shared AppListRow per result (A4 — legacy card rows are gone)', async () => {
       mockResults([galleryFixture(), galleryFixture({ gid: 2 })])
       await mountView()
 
       expect(wrapper.findAll('.app-list-row')).toHaveLength(2)
-      expect(wrapper.findComponent(GalleryCard).exists()).toBe(false)
       // 打码关闭 → 标题原文，副题 = 日文标题。
       expect(wrapper.find('.app-list-row__title').text()).toBe('Test Gallery')
       expect(wrapper.find('.app-list-row__subtitle').text()).toBe('テストギャラリー')

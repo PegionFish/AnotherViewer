@@ -16,8 +16,6 @@
  * imported/re-exported here — never duplicated.
  */
 
-import type { GalleryInfo } from './index'
-
 export type { GalleryInfo } from './index'
 
 /* -------------------------------------------------------------------------- */
@@ -708,42 +706,4 @@ export interface CategoryTableEmits {
   (e: 'update:selected', selected: GalleryCategory[]): void
   /** Block long-pressed (Android `onLongClick` inversion rule applies). */
   (e: 'long-press', category: GalleryCategory): void
-}
-
-/* -------------------------------------------------------------------------- */
-/* Gallery (S1 / S2 / S7)                                                     */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Props for `GalleryCard.vue` — the gallery list card in both modes
- * (roadmap §卡片规范, replicates `scene_gallery_list.xml` item layouts):
- *
- * - `list`: fixed 80×120dp (2:3) thumbnail left; right column = title (16sp,
- *   `textColorPrimary`, maxLines 2, end-ellipsize), uploader (14sp,
- *   `textColorSecondary`, single line), `RatingStars`, `CategoryChip`.
- * - `grid`: `GalleryThumb` tile (TileThumb aspect clamping) + 32×24dp
- *   `CategoryTriangle` at the top-right corner + language code badge
- *   (`gallery.simpleLanguage`, 10sp white bold).
- *
- * The card itself uses `AppCard` styling (2dp radius/shadow/margin,
- * theme-aware background). Derive the category via
- * `CATEGORY_BY_BIT[gallery.category]`.
- */
-export interface GalleryCardProps {
-  /** Gallery to render (numeric `category` is an {@link CATEGORY_BIT_VALUES} bit). */
-  gallery: GalleryInfo
-  /** Display mode, kept in sync with the list screen's layout mode. */
-  mode: 'list' | 'grid'
-}
-
-/** Emits for `GalleryCard.vue`. */
-export interface GalleryCardEmits {
-  /** Card tapped — open gallery detail. */
-  (e: 'click', gallery: GalleryInfo): void
-}
-
-/** Slots for `GalleryCard.vue`. */
-export interface GalleryCardSlots {
-  /** Optional overlay/badge area (e.g. download progress in S4 reuse). */
-  overlay?(): any
 }

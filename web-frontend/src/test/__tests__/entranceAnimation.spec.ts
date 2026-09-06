@@ -18,8 +18,9 @@
  * (the entrance lives in CSS). So we pin the CSS source itself instead of
  * rendered computed styles.
  *
- * B-1 note: the Favorites/History list rows moved into the shared
- * `GalleryList.vue` component — the row assertions follow them there.
+ * A4 note: the shared `GalleryList.vue` (grid/list dual form) was removed —
+ * the download list row is the last single-column row that still carries this
+ * exact entrance contract.
  */
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
@@ -75,8 +76,6 @@ const LIST_ROWS: Array<{
   selector: string
   shorthand: string
 }> = [
-  // B-1: Favorites/History rows render through the shared GalleryList now.
-  { view: 'components/gallery/GalleryList.vue', selector: 'gallery-list__row', shorthand: 'animation: item-in 240ms var(--ease-decelerate-quart) backwards' },
   { view: 'views/DownloadView.vue', selector: 'download-list__item', shorthand: 'animation: item-in 240ms var(--ease-decelerate-quart) backwards' },
 ]
 
@@ -156,8 +155,6 @@ describe('T-1 sweep: no `both`/forwards fill anywhere in views', () => {
     'views/DownloadView.vue',
     'views/GalleryDetailView.vue',
     'views/LoginView.vue',
-    // B-1: the shared list component owns the row entrance now.
-    'components/gallery/GalleryList.vue',
   ]
 
   for (const view of views) {
