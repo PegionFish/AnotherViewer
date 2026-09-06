@@ -57,6 +57,9 @@ const ROUTES: RouteEntry[] = [
   { path: '/admin/advanced', slug: 'admin-advanced' },
   { path: '/admin/about', slug: 'admin-about' },
   { path: '/reader/12345', slug: 'reader' },
+  // PWA batch (plan-2026-09-06-pwa): server setup wizard + aspect eval bench.
+  { path: '/setup', slug: 'setup' },
+  { path: '/eval?ratio=16:9&orient=land', slug: 'eval-16x9-land' },
 ]
 
 /* -------------------------------------------------------------------------- */
