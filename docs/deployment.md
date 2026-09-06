@@ -212,13 +212,13 @@ sudo systemctl restart systemd-journald
 
 ## 慢请求分析（access log）
 
-应用对每个 HTTP 请求记一行访问日志（`server.tomcat.accesslog`，默认开启）：落 `<data-dir>/logs/access.yyyy-MM-dd.log`，按天滚动，保留 30 天自动清理。字段最小集：时间、客户端 IP、请求行（方法 路径 协议）、状态码、响应字节、耗时毫秒：
+应用对每个 HTTP 请求记一行访问日志（`server.tomcat.accesslog`，默认开启）：落 `<data-dir>/logs/access.yyyy-MM-dd.log`，按天滚动，保留 30 天自动清理。字段最小集：时间、客户端 IP、请求行（方法 路径 协议）、状态码、响应字节、耗时（%D）：
 
 ```
 [06/Sep/2026:10:01:02 +0800] 192.168.6.10 "GET /api/v1/health HTTP/1.1" 200 143 12
 ```
 
-一行内空格分隔，**最后一列（`$NF`）即耗时毫秒（%D）**。SPA 前端静态资源（`/`、`/assets/**`）与 API 共用同一份日志；分析 API 时按 `/api/v1/` 前缀过滤（请求路径固定在第 5 列）。
+一行内空格分隔，**最后一列（`$NF`）即耗时（%D）**。⚠️ **单位实测为微秒（µs）**（Tomcat 10.1.40 实证：图片代理 10s 上游超时记录为 ~10019443；本机 health 请求 ~369000 = 369ms），虽然 Tomcat 文档对 %D 的描述是毫秒——**阈值换算按 1ms = 1000µs**，下例已按 µs 口径。SPA 前端静态资源（`/`、`/assets/**`）与 API 共用同一份日志；分析 API 时按 `/api/v1/` 前缀过滤（请求路径固定在第 5 列）。
 
 常用命令（在 `<data-dir>/logs` 目录下执行）：
 
@@ -226,11 +226,11 @@ sudo systemctl restart systemd-journald
 # Top 20 最慢的 API 请求：%D 随行输出 → 按数值排序 → 还原原始行
 grep -h '/api/v1/' access.*.log | awk '{print $NF, $0}' | sort -n | cut -d' ' -f2- | tail -n 20
 
-# 只看超过 500ms 的 API 请求
-awk '$5 ~ /^\/api\/v1\// && $NF > 500' access.*.log
+# 只看超过 500ms 的 API 请求（µs 口径：500ms = 500000）
+awk '$5 ~ /^\/api\/v1\// && $NF > 500000' access.*.log
 
-# API 耗时分布：请求数 / 平均 / p50 / p95 / 最大（毫秒）
-grep -h '/api/v1/' access.*.log | awk '{print $NF}' | sort -n \
+# API 耗时分布：请求数 / 平均 / p50 / p95 / 最大（输出已换算为 ms）
+grep -h '/api/v1/' access.*.log | awk '{print $NF/1000}' | sort -n \
   | awk '{a[NR]=$1; s+=$1} END {if (NR==0) {print "no requests"; exit} print "requests="NR, "avg=" int(s/NR) "ms", "p50=" a[int((NR-1)*0.5)+1] "ms", "p95=" a[int((NR-1)*0.95)+1] "ms", "max=" a[NR] "ms"}'
 
 # 对照组：前端静态资源访问（排除 API）
