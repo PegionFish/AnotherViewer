@@ -86,6 +86,7 @@
  */
 import { computed, ref } from 'vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
+import { resolveApiUrl } from '@/stores/server'
 
 const props = withDefaults(
   defineProps<{
@@ -135,7 +136,7 @@ const thumbSrc = computed<string | null>(() => {
   const thumb = props.thumb
   if (!thumb) return null
   // 隐私打码不改 src——真实请求照发，像素由全局遮蔽样式隐藏。
-  return /^https?:\/\//i.test(thumb) ? `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}` : thumb
+  return /^https?:\/\//i.test(thumb) ? resolveApiUrl(`/image/proxy?url=${encodeURIComponent(thumb)}`) : thumb
 })
 
 function onThumbError(): void {

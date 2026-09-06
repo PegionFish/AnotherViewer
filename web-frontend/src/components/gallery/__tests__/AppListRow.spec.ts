@@ -71,6 +71,29 @@ describe('AppListRow — 缩略图处理（与 DownloadItem/GalleryCard 同语�
   })
 })
 
+describe('AppListRow — 缩略图代理 URL 经 server 模块派生（plan-2026-09-06-pwa C2 后继）', () => {
+  afterEach(() => {
+    localStorage.removeItem('server-base')
+  })
+
+  it('keeps the legacy literal when no server base is persisted (byte-identical anchor)', () => {
+    const thumb = 'https://ehgt.org/t/9001/cover.jpg'
+    const wrapper = mountRow({ thumb })
+    expect(wrapper.find('.app-list-row__thumb img').attributes('src')).toBe(
+      `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`,
+    )
+  })
+
+  it('prefixes the proxy URL with the configured server base (remote mode)', () => {
+    localStorage.setItem('server-base', 'http://x:1')
+    const thumb = 'https://ehgt.org/t/9001/cover.jpg'
+    const wrapper = mountRow({ thumb })
+    expect(wrapper.find('.app-list-row__thumb img').attributes('src')).toBe(
+      `http://x:1/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`,
+    )
+  })
+})
+
 describe('AppListRow — 点击分区（缩略图→详情 / 主体→阅读）', () => {
   it('thumb click emits open (detail) and not read', async () => {
     const wrapper = mountRow()
