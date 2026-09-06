@@ -33,46 +33,136 @@
 
     <FilterSlotBar :slots="slots" :active-id="activeSlotId" @select="onSlotBarSelect" />
 
+    <!-- 分页条（A4 定案：历史与下载页同构，2026-09-06）：页码指示 + 每页条数
+         切换（50/100/200，默认 50，服务端 pageSize 钳制 1..200）+ 跳页。
+         total ≤ pageSize 时隐藏（Android PaginationIndicator 语义）。 -->
+    <nav
+      v-if="paginationVisible"
+      class="pagination-bar"
+      data-testid="history-pagination"
+      aria-label="历史分页"
+    >
+      <span class="pagination-bar__info">
+        第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
+      </span>
+      <span class="pagination-bar__pages" role="group" aria-label="页码">
+        <button
+          type="button"
+          class="pagination-bar__page"
+          :disabled="currentPage <= 1"
+          aria-label="上一页"
+          @click="jumpToPage(currentPage - 1)"
+        >
+          ‹
+        </button>
+        <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+          <button
+            v-if="item !== '…'"
+            type="button"
+            class="pagination-bar__page"
+            :class="{ 'pagination-bar__page--active': item === currentPage }"
+            :aria-current="item === currentPage ? 'page' : undefined"
+            :aria-label="`第 ${item} 页`"
+            @click="jumpToPage(item)"
+          >
+            {{ item }}
+          </button>
+          <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+        </template>
+        <button
+          type="button"
+          class="pagination-bar__page"
+          :disabled="currentPage >= totalPages"
+          aria-label="下一页"
+          @click="jumpToPage(currentPage + 1)"
+        >
+          ›
+        </button>
+      </span>
+      <label class="pagination-bar__size">
+        条/页
+        <select
+          v-model.number="pageSize"
+          class="pagination-bar__select"
+          aria-label="每页条数"
+        >
+          <option v-for="size in HISTORY_PAGE_SIZES" :key="size" :value="size">
+            {{ size }}
+          </option>
+        </select>
+      </label>
+      <span class="pagination-bar__jump">
+        <input
+          v-model.number="jumpInput"
+          class="pagination-bar__input"
+          type="number"
+          min="1"
+          :max="totalPages"
+          :aria-label="`跳页（1 至 ${totalPages}）`"
+          @keyup.enter="jumpToPage()"
+          placeholder="页"
+        />
+        <button type="button" class="pagination-bar__btn" @click="jumpToPage()">
+          跳页
+        </button>
+      </span>
+    </nav>
+
     <ContentLayout
       ref="contentRef"
       class="history-view__content"
       :state="state"
-      :loading-more="loadingMore"
-      :has-more="entries.length < total"
       v-model:refreshing="refreshing"
       empty-text="No history"
       :error-text="errorText"
-      @load-more="loadMore"
       @refresh="onRefresh"
       @retry="onRetry"
     >
-      <!-- Shared gallery list (B-1): renders the grid/list form from
-           prefs.general.listMode (R4-1 — no hardcoded layout anymore).
-           List form: the absolute corner badge (item-extra). Grid form: the
-           last-viewed stamp flows inside the card meta as a second line
-           (item-sub, F-UX1 — the corner badge is hidden there). -->
-      <GalleryList :items="galleries" @select="openGallery">
-        <template #item-extra="{ index }">
-          <span
-            v-if="entries[index]"
-            class="time-badge"
-            :title="`Last viewed ${new Date(entries[index].time).toLocaleString()}`"
-          >
-            <AppIcon name="history-black" size="14px" />
-            {{ formatViewTime(entries[index].time) }}
-          </span>
-        </template>
-        <template #item-sub="{ index }">
-          <span
-            v-if="entries[index]"
-            class="time-row"
-            :title="`Last viewed ${new Date(entries[index].time).toLocaleString()}`"
-          >
-            <AppIcon name="history-black" size="12px" />
-            {{ formatViewTime(entries[index].time) }}
-          </span>
-        </template>
-      </GalleryList>
+      <!-- A4 定案（W3-F3）：历史与下载页同构的全宽单列密信息行——共享
+           AppListRow（缩略图→详情 / 主体→统一阅读器 点击分区 + 角标挂点）。
+           服务端分页（W2-B2 DB 分页）：usePagedList 把 page/pageSize 直传给
+           /history/list（page 0 起），整页替换渲染。KeepAlive 页码还原语义 =
+           页码（currentPage 随组件实例存续）+ 页内滚动（滚动容器 DOM 随
+           KeepAlive 保留 scrollTop），返回即还原，无需额外逻辑。 -->
+      <div class="history-list">
+        <AppListRow
+          v-for="row in rows"
+          :key="row.item.gid"
+          :id="row.item.gid"
+          :gid="row.item.gid"
+          :title="displayTitle(row.item)"
+          :subtitle="displaySubtitle(row.item)"
+          :thumb="row.item.thumb"
+          @open="openDetail"
+          @read="openReader"
+        >
+          <!-- Last-viewed stamp — clock glyph + compact date/time, secondary
+               ink; absolutely positioned corner badge anchored to the row
+               (AppListRow badge mount, the list-form .time-badge from before). -->
+          <template #badge>
+            <span
+              class="time-badge"
+              :title="`Last viewed ${new Date(row.item.time).toLocaleString()}`"
+            >
+              <AppIcon name="history-black" size="14px" />
+              {{ formatViewTime(row.item.time) }}
+            </span>
+          </template>
+
+          <!-- 元信息行：CategoryChip + W6 阅读进度角标（N+1P，语义同
+               GalleryCard：showReadProgress 开且 page > 0 才显示）。 -->
+          <template #meta>
+            <CategoryChip v-if="row.chip" :category="row.chip" />
+            <span
+              v-if="showReadProgressBadge(row.item)"
+              class="history-item__read-progress"
+              data-testid="read-progress-badge"
+            >
+              {{ readProgressLabelOf(row.item) }}
+            </span>
+          </template>
+        </AppListRow>
+      </div>
     </ContentLayout>
 
     <!-- FabLayout replica: clear-history + back-to-top mini FABs -->
@@ -124,40 +214,48 @@
 <script setup lang="ts">
 /**
  * HistoryView — web replica of Android `HistoryScene`:
- * ContentLayout (pull-to-refresh + empty tip + fast scroller) filled with
- * the shared `GalleryList` (B-1 — grid/list form follows
- * `prefs.general.listMode`), each row stamped with the last-viewed time
- * (`item_history.xml` shows the same horizontal card layout), plus a
- * FabLayout with clear-all (confirmed via dialog) and go-to-top.
+ * ContentLayout (pull-to-refresh + empty tip) filled with the shared
+ * `AppListRow` single-column rows (A4 定案，W3-F3——与下载页完全同构：
+ * 缩略图→详情 / 主体→直接阅读 点击分区；`#badge` 挂最后浏览时间角标，
+ * `#meta` 放 CategoryChip + 阅读进度角标)，加一个 FabLayout（清空历史 +
+ * 回顶部）。
  *
- * Server-side pagination (W2-DL F3): the list loads `HISTORY_PAGE_SIZE`
- * rows per request and appends the next page on scroll-to-bottom, aligned
- * with DownloadView's load-more/append pattern — large histories no longer
- * render in one shot. Search (q, debounced) and filter slots (A5d,
- * q=pattern&regex=true) narrow the list server-side; both paths honor the
- * page/pageSize params and reset to page 0 on filter changes.
+ * 服务端分页（A4 / W2-B2 DB 分页）：`usePagedList` 状态机管理页码/条数/
+ * 跳页/PC 键盘翻页；`fetchPage` 把 1 起页码换算成 /history/list 的 0 起
+ * `page` 直传（响应信封 `{history, total}`，total 驱动 totalPages）。
+ * 条数档位 50/100/200（服务端钳制 1..200，默认 50 与后端一致）。
+ * Search（q，防抖）与 filter slots（A5d，q=pattern&regex=true）收窄服务端
+ * 结果，两者都随 page/pageSize 直传并在变更时回第 1 页。
  *
- * Backend note: `HistoryItem.category` is the stringified `SiteConfig` bit
- * (HistoryService maps `entity.category.toString()`), so rows are converted
- * to `GalleryInfo` (numeric bit) before being handed to the list.
+ * KeepAlive（App.vue 按 fullPath 缓存实例）：页码与页内滚动位置随组件实例
+ * 存续，从阅读器/详情返回即还原——页码还原语义 = 页码 + 页内滚动。
+ *
+ * 隐私红线：标题一律经 `maskedTitle`（打码开启 → `#<gid>`）；日文副题在
+ * 打码开启时一并隐藏（同 GalleryCard 的 `!privacyMaskEnabled` 守卫）。
+ * R4-6: 无标题画廊以 `#<gid>` 展示。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { historyApi } from '@/api/history'
 import type { HistoryItem } from '@/api/history'
 import { useFilterSlots } from '@/composables/useFilterSlots'
+import { usePagedList } from '@/composables/usePagedList'
+import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { usePreferencesStore } from '@/stores/preferences'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import {
   CATEGORY_BIT_VALUES,
+  CATEGORY_BY_BIT,
   CATEGORY_LABELS,
   CATEGORY_ORDER,
   type FabAction,
-  type GalleryInfo,
+  type GalleryCategory,
 } from '@/types/components'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
-import GalleryList from '@/components/gallery/GalleryList.vue'
+import AppListRow from '@/components/gallery/AppListRow.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
+import CategoryChip from '@/components/atoms/CategoryChip.vue'
 
 /** View states matching ContentLayout's internal ViewTransition. */
 type ViewState = 'loading' | 'content' | 'empty' | 'error'
@@ -188,82 +286,31 @@ function categoryBit(raw: number | string): number {
 /* --------------------------------------------------------------- data --- */
 
 const router = useRouter()
+/** W6：阅读进度角标开关读 `general.showReadProgress`（防御式读取）。 */
+const preferences = usePreferencesStore()
 
-/** 服务端分页每页条数（W2-DL F3；服务端钳制 1..200，50 与后端默认一致）。 */
-const HISTORY_PAGE_SIZE = 50
+/**
+ * 每页条数档位（A4 定案对齐下载页：50/100/200，默认 50）。后端
+ * HistoryService 把 pageSize 钳制在 1..200——三档全部有效。
+ */
+const HISTORY_PAGE_SIZES = [50, 100, 200] as const
+/** 初始每页条数（无持久化偏好键，回落后同为 50）。 */
+const DEFAULT_HISTORY_PAGE_SIZE = 50
 
-/** A history row: the gallery card payload + the last-viewed epoch (ms). */
-interface HistoryEntry {
-  gallery: GalleryInfo
-  time: number
-}
-
-const entries = ref<HistoryEntry[]>([])
-/** 过滤后全集条数（服务端返回，分页前计数）——判断是否还有下一页。 */
-const total = ref(0)
 const state = ref<ViewState>('loading')
 const refreshing = ref(false)
-/** Guard against overlapping load-more requests. */
-const loadingMore = ref(false)
 const contentRef = ref<InstanceType<typeof ContentLayout> | null>(null)
 /** F4 REGEX_INVALID: the error tip switches to a dedicated regex message. */
 const errorText = ref('Failed to load history')
 
-/** 标题计数：分页加载中显示 已加载/总数。 */
-const countLabel = computed(() =>
-  total.value > entries.value.length
-    ? `${entries.value.length} / ${total.value} galleries`
-    : `${entries.value.length} galleries`,
-)
-
-/**
- * F4: extracts the business error code from the API error envelope
- * (`{error:{code,message,traceId,status}}` carried by axios as
- * `error.response.data`); null for any other failure shape.
- */
-function errorCodeOf(error: unknown): string | null {
-  const code = (error as { response?: { data?: { error?: { code?: unknown } } } } | undefined)
-    ?.response?.data?.error?.code
-  return typeof code === 'string' ? code : null
-}
-
-/** Gallery payloads for the shared GalleryList (parallel to `entries`). */
-const galleries = computed(() => entries.value.map((entry) => entry.gallery))
-
-/** Maps a backend history row onto the `GalleryInfo` shape the list renders. */
-function toGalleryInfo(item: HistoryItem): GalleryInfo {
-  return {
-    gid: item.gid,
-    token: item.token,
-    // R4-6: title-less galleries surface as `#<gid>`, not "Untitled".
-    title: item.title || item.titleJpn || `#${item.gid}`,
-    titleJpn: item.titleJpn,
-    thumb: item.thumb,
-    category: categoryBit(item.category),
-    posted: '',
-    uploader: '',
-    rating: item.rating,
-    rated: false,
-    simpleLanguage: '',
-    simpleTags: [],
-    thumbWidth: 0,
-    thumbHeight: 0,
-    pages: 0,
-    // W6 (plan-2026-09-02): 阅读进度随历史行透传（0 起页索引）。旧服务器
-    // 不下发 page → undefined，GalleryCard 角标按缺失隐藏。
-    readProgress: item.page,
-    favoriteSlot: -2,
-    favoriteName: '',
-  }
-}
+/** 标题计数：服务端过滤后全集条数（分页不再累计已加载数）。 */
+const countLabel = computed(() => `${total.value} galleries`)
 
 /* ---------------------------------------- search + filter slots (A5d) ----- */
 
 /** 搜索词：防抖后作为 q 传给 /history/list（服务端过滤）。 */
 const searchQuery = ref('')
 const debouncedQuery = ref('')
-/** Monotonic request guard — stale responses (fast search/slot switches) drop. */
-let requestSeq = 0
 let searchTimer: ReturnType<typeof setTimeout> | undefined
 
 /** 筛选槽位（A5d）：命名正则预设；与搜索框互斥（useFilterSlots 保证）。 */
@@ -272,8 +319,8 @@ const { slots, activeSlotId, activeSlot: filterSlot, selectSlot: selectFilterSlo
 
 function onSlotBarSelect(id: string | null): void {
   selectFilterSlot(id)
-  // 槽位点击总是重新加载（清空搜索词不一定触发防抖 watch——搜索词本来就空时）。
-  state.value = 'loading'
+  // 槽位点击总是重新加载（清空搜索词不一定触发防抖 watch——搜索词本来就
+  // 空时）。非静默 load → onLoadStart 切 loading 态。
   void load()
 }
 
@@ -301,13 +348,13 @@ function scheduleSearchCommit(): void {
   if (searchTimer) clearTimeout(searchTimer)
   searchTimer = setTimeout(() => {
     if (searchComposing.value) return
+    // 搜索词变化 → 回第 1 页重新加载（负载在服务端）。
     const next = searchQuery.value
     if (debouncedQuery.value !== next) {
       debouncedQuery.value = next
       // 槽位激活时该变更来自 selectFilterSlot 清空搜索词——加载已由
       // onSlotBarSelect 触发（避免与槽位过滤重复请求）。
       if (filterSlot.value) return
-      state.value = 'loading'
       void load()
     }
   }, 400)
@@ -316,28 +363,57 @@ function scheduleSearchCommit(): void {
 function clearSearch(): void {
   searchQuery.value = ''
   debouncedQuery.value = ''
-  state.value = 'loading'
   void load()
 }
 
-/** 首屏/筛选变更加载：从 page=0 重置分页（W2-DL F3）。 */
-async function load(): Promise<void> {
-  // 单调递增请求守卫：快速切换搜索词/筛选槽位时丢弃过期响应，
-  // 与 Download/Favorite/Search 视图一致，避免旧响应覆盖新结果。
-  const seq = ++requestSeq
-  try {
+/* ---------------------------------------------------- pagination bar ---- */
+
+/**
+ * F4: extracts the business error code from the API error envelope
+ * (`{error:{code,message,traceId,status}}` carried by axios as
+ * `error.response.data`); null for any other failure shape.
+ */
+function errorCodeOf(error: unknown): string | null {
+  const code = (error as { response?: { data?: { error?: { code?: unknown } } } } | undefined)
+    ?.response?.data?.error?.code
+  return typeof code === 'string' ? code : null
+}
+
+/**
+ * 分页状态机（W3-C1 usePagedList）：页码 / 条数 / 跳页 / PC 页码窗口 /
+ * PageUp/Down / stale 竞态守卫。fetchPage 适配 /history/list 的
+ * page/pageSize 直传契约（usePagedList 页码 1 起 → 接口 0 起）；视图四态机
+ * 与错误文案留在本视图，经 onLoadStart/onSuccess/onError 钩子接线。
+ */
+const {
+  items: entries,
+  total,
+  pageSize,
+  currentPage,
+  totalPages,
+  paginationVisible,
+  pageWindow,
+  jumpInput,
+  load: loadPage,
+  jumpToPage,
+} = usePagedList<HistoryItem>({
+  fetchPage: async (page, size) => {
     const filter = currentFilter()
-    const data = await historyApi.listHistory(filter.q || null, filter.regex || undefined, 0, HISTORY_PAGE_SIZE)
-    if (seq !== requestSeq) return
-    entries.value = data.history.map((item) => ({
-      gallery: toGalleryInfo(item),
-      time: item.time,
-    }))
-    total.value = data.total
-    state.value = entries.value.length === 0 ? 'empty' : 'content'
-  } catch (error) {
+    const data = await historyApi.listHistory(filter.q, filter.regex || undefined, page - 1, size)
+    return { items: data.history, total: data.total }
+  },
+  pageSizes: HISTORY_PAGE_SIZES,
+  initialPageSize: DEFAULT_HISTORY_PAGE_SIZE,
+  fallbackPageSize: DEFAULT_HISTORY_PAGE_SIZE,
+  onLoadStart: () => {
+    state.value = 'loading'
+  },
+  onSuccess: (result) => {
+    state.value = result.items.length === 0 ? 'empty' : 'content'
+    contentRef.value?.scrollToTop()
+  },
+  onError: (error) => {
     console.error('Failed to load history', error)
-    if (seq !== requestSeq) return
     // F4: invalid regex in q → 400 REGEX_INVALID; name the cause instead of
     // the generic "failed to load" tip (dedicated toast + error-state copy).
     if (errorCodeOf(error) === 'REGEX_INVALID') {
@@ -346,53 +422,89 @@ async function load(): Promise<void> {
     } else {
       errorText.value = 'Failed to load history'
     }
-    if (entries.value.length === 0) state.value = 'error'
-  }
-}
+    if (entries.value.length === 0) {
+      state.value = 'error'
+    } else if (errorCodeOf(error) !== 'REGEX_INVALID') {
+      showToast('Failed to refresh history')
+    }
+  },
+  keyboardPaging: true,
+})
 
 /**
- * 追加下一页（对齐 DownloadView 的 load-more 模式）：滚到底部时由
- * ContentLayout 触发；已加载条数达到 total 后不再请求。
+ * 视图层加载入口：搜索/槽位/刷新等所有入口都回第 1 页。`silent: true`
+ * 不切 loading 态——下拉刷新等宿主自管忙态的入口。
  */
-async function loadMore(): Promise<void> {
-  if (loadingMore.value || refreshing.value || state.value !== 'content') return
-  if (entries.value.length >= total.value) return
-  const seq = requestSeq
-  loadingMore.value = true
-  try {
-    const filter = currentFilter()
-    const nextPage = Math.floor(entries.value.length / HISTORY_PAGE_SIZE)
-    const data = await historyApi.listHistory(filter.q || null, filter.regex || undefined, nextPage, HISTORY_PAGE_SIZE)
-    if (seq !== requestSeq) return
-    entries.value.push(
-      ...data.history.map((item) => ({ gallery: toGalleryInfo(item), time: item.time })),
-    )
-    total.value = data.total
-  } catch (error) {
-    console.error('Failed to load more history', error)
-    // 可重试：下次滚动会再次触发追加。
-    showToast('Failed to load more history')
-  } finally {
-    // 无条件复位（F5 对照）：失败也不能永久卡死加载更多。
-    loadingMore.value = false
-  }
+function load(opts?: { silent?: boolean }): Promise<void> {
+  return loadPage(1, opts)
 }
 
 async function onRefresh(): Promise<void> {
-  await load()
+  await load({ silent: true })
   refreshing.value = false
 }
 
 function onRetry(): void {
-  state.value = 'loading'
   void load()
 }
 
-function openGallery(gallery: GalleryInfo): void {
-  // 本地 token 透传（P-A）：服务端先查历史行/上游直取，无本地行时不再必然失败。
+/* --------------------------------------------------- row presentation --- */
+
+/** 行展示标题——脱敏在本视图完成（隐私红线：标题必经 maskedTitle）。 */
+function displayTitle(item: HistoryItem): string {
+  return maskedTitle(item.title || item.titleJpn || `#${item.gid}`, item.gid)
+}
+
+/** 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）。 */
+function displaySubtitle(item: HistoryItem): string | null {
+  return !privacyMaskEnabled.value && item.titleJpn ? item.titleJpn : null
+}
+
+/** Numeric category bit → `GalleryCategory` key (undefined when unknown). */
+function categoryKeyOf(item: HistoryItem): GalleryCategory | undefined {
+  return CATEGORY_BY_BIT[categoryBit(item.category)]
+}
+
+/**
+ * Per-row view models: the raw history item plus the pre-resolved category
+ * chip key (v-if narrows the property, not a function call — same shape as
+ * DownloadView's virtualRows.chip).
+ */
+const rows = computed(() =>
+  entries.value.map((item) => ({ item, chip: categoryKeyOf(item) })),
+)
+
+/* W6 (plan-2026-09-02): 阅读进度角标——showReadProgress 开且进度 > 0 才
+   显示；历史行无总页数 → NP 格式（对齐 GalleryCard/下载行语义）。字段缺失
+   （旧服务器 undefined）时隐藏。 */
+function readProgressLabelOf(item: HistoryItem): string {
+  const progress = item.page
+  if (typeof progress !== 'number' || !Number.isFinite(progress) || progress <= 0) return ''
+  return `${progress + 1}P`
+}
+
+function showReadProgressBadge(item: HistoryItem): boolean {
+  const prefs = preferences.prefs?.general as { showReadProgress?: boolean } | undefined
+  return prefs?.showReadProgress === true && readProgressLabelOf(item) !== ''
+}
+
+/* --------------------------------------------------- click partitions --- */
+
+/** 缩略图点击 → 详情页；P-A：本地 token 透传（服务端先查历史行/上游直取）。 */
+function openDetail(gid: number): void {
+  const item = entries.value.find((entry) => entry.gid === gid)
   void router.push({
-    path: `/gallery/${gallery.gid}`,
-    query: gallery.token ? { token: gallery.token } : {},
+    path: `/gallery/${gid}`,
+    query: item?.token ? { token: item.token } : {},
+  })
+}
+
+/** 行主体点击 → 直接进统一阅读器（A4 点击分区，快速续读）。 */
+function openReader(gid: number): void {
+  const item = entries.value.find((entry) => entry.gid === gid)
+  void router.push({
+    path: `/reader/${gid}`,
+    query: item?.token ? { token: item.token } : {},
   })
 }
 
@@ -475,6 +587,7 @@ async function confirmClear(): Promise<void> {
   try {
     await historyApi.clearHistory()
     entries.value = []
+    total.value = 0
     state.value = 'empty'
     showClearDialog.value = false
   } catch (error) {
@@ -597,12 +710,151 @@ onMounted(() => {
   background: var(--color-surface-activated);
 }
 
+/* ----------------------------------------------------- pagination bar ---- */
+/* 与 DownloadView 分页条同构复刻（A4）：页码 / 每页条数 / 跳页。 */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing);
+  flex-shrink: 0;
+  padding: 6px max(var(--gallery-list-margin-h), 4px);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-divider);
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+}
+
+.pagination-bar__info {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* PC 页码窗口：直点页码 + 省略号折叠 + 前后页。 */
+.pagination-bar__pages {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.pagination-bar__pages::-webkit-scrollbar {
+  display: none;
+}
+
+.pagination-bar__page {
+  min-width: 26px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__page:hover:not(:disabled) {
+  background: var(--color-surface-activated);
+}
+
+.pagination-bar__page:disabled {
+  color: var(--text-color-disabled, #9e9e9e);
+  cursor: default;
+}
+
+.pagination-bar__page--active {
+  background: var(--color-primary);
+  color: var(--color-primary-inverse, #fff);
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__page--active:hover {
+  background: var(--color-primary);
+}
+
+.pagination-bar__ellipsis {
+  min-width: 18px;
+  text-align: center;
+  color: var(--text-color-secondary);
+  user-select: none;
+}
+
+.pagination-bar__size,
+.pagination-bar__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.pagination-bar__select,
+.pagination-bar__input {
+  padding: 2px 6px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--card-radius);
+  background: var(--color-surface);
+  color: var(--text-color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+}
+
+.pagination-bar__input {
+  width: 52px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.pagination-bar__input::-webkit-outer-spin-button,
+.pagination-bar__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.pagination-bar__select:focus,
+.pagination-bar__input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__btn {
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__btn:hover {
+  background: var(--color-surface-activated);
+}
+
 /* -------------------------------------------------------------- list ---- */
-/* Row layout, entrance animation and stagger live in GalleryList (B-1);
-   only the history-specific last-viewed badge is styled here. */
+/* Single-column dense rows (A4): the row skeleton (card surface / thumb /
+   title) lives in the shared AppListRow; only the history-specific
+   last-viewed corner badge and the read-progress stamp are styled here. */
+.history-list {
+  padding: var(--gallery-list-margin-v) var(--gallery-list-margin-h)
+    var(--gallery-padding-bottom-fab);
+}
 
 /* Last-viewed timestamp — clock glyph + compact date/time, secondary ink.
-   List-form only: an absolute corner badge over the horizontal card. */
+   Absolute corner badge anchored to the AppListRow row (its badge slot). */
 .time-badge {
   position: absolute;
   right: 10px;
@@ -617,27 +869,13 @@ onMounted(() => {
   pointer-events: none;
 }
 
-/* F-UX1: in the grid form the corner badge would sit on top of the card
-   title — the last-viewed stamp renders inside the card meta instead
-   (`.time-row` below), so the badge is suppressed there. */
-.gallery-grid__cell .time-badge {
-  display: none;
-}
-
-/* Grid-form last-viewed line — flows inside the card meta region as the
-   second line below the title (F-UX1), stretching the card instead of
-   overlapping the title. */
-.time-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  overflow: hidden;
+/* W6: 阅读进度角标 — 12sp secondary，跟在分类 chip 之后。 */
+.history-item__read-progress {
+  flex-shrink: 0;
+  font-size: var(--text-super-small); /* 12sp */
   color: var(--text-color-secondary);
-  font-size: inherit;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  pointer-events: none;
 }
 
 /* ------------------------------------------------------------- toast ---- */

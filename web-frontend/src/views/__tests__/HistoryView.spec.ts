@@ -8,6 +8,7 @@ import { filterSlotsApi } from '@/api/filterSlots'
 import { preferencesApi } from '@/api/preferences'
 import { usePreferencesStore } from '@/stores/preferences'
 import type { Preferences } from '@/api/preferences'
+import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 
 const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }))
 
@@ -75,7 +76,7 @@ function seedPrefs(general: Record<string, unknown>): void {
   store.prefs = { general } as unknown as Preferences
 }
 
-describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () => {
+describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
@@ -87,6 +88,7 @@ describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () =>
   })
 
   afterEach(() => {
+    setPrivacyMaskEnabled(false)
     wrapper?.unmount()
     vi.clearAllMocks()
   })
@@ -109,129 +111,109 @@ describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () =>
     await flushPromises()
   }
 
-  it('renders every grid card with the last-viewed stamp flowing in the card meta', async () => {
-    seedPrefs({ listMode: 'grid' })
-    const items = Array.from({ length: 5 }, (_, i) =>
-      makeHistoryItem({ gid: i + 1, title: `Gallery ${i + 1}` }),
-    )
-    await mountHistory(items)
+  /* ---------------- A4 单列密信息行（AppListRow + 角标/元信息） ---------------- */
 
-    const cells = wrapper.findAll('.gallery-grid__cell')
-    expect(cells).toHaveLength(5)
+  it('renders every history row as a single-column AppListRow with the last-viewed corner badge', async () => {
+    await mountHistory([
+      makeHistoryItem({ gid: 1, title: 'Gallery One' }),
+      makeHistoryItem({ gid: 2, title: 'Gallery Two' }),
+    ])
 
-    // All five cards carry the flowing sub line inside the card meta region.
-    for (const cell of cells) {
-      const meta = cell.find('.gallery-card__grid-meta')
-      expect(meta.exists()).toBe(true)
-      expect(meta.find('.gallery-card__grid-title').exists()).toBe(true)
-      const sub = meta.find('.gallery-card__grid-sub')
-      expect(sub.exists()).toBe(true)
-      expect(sub.find('.time-row').exists()).toBe(true)
-    }
-  })
-
-  it('makes the title and the sub line normal-flow siblings (no absolute overlap)', async () => {
-    seedPrefs({ listMode: 'grid' })
-    await mountHistory([makeHistoryItem({ gid: 7, title: 'Overlap Probe' })])
-
-    const meta = wrapper.find('.gallery-card__grid-meta')
-    const title = meta.find('.gallery-card__grid-title')
-    const sub = meta.find('.gallery-card__grid-sub')
-    expect(title.exists()).toBe(true)
-    expect(sub.exists()).toBe(true)
-    // DOM structure: the two lines are siblings stacked in normal flow —
-    // the sub line stretches the card instead of absolutely overlapping the
-    // title. (happy-dom performs no layout, so structure is the assertion.)
-    expect(title.element.nextElementSibling).toBe(sub.element)
-    expect(title.element.parentElement).toBe(meta.element)
-    expect(sub.element.parentElement).toBe(meta.element)
-    // The flowing line is NOT the absolutely positioned corner badge.
-    expect(sub.find('.time-badge').exists()).toBe(false)
-  })
-
-  it('shows the formatted last-viewed stamp in the sub line', async () => {
-    seedPrefs({ listMode: 'grid' })
-    await mountHistory([makeHistoryItem({ gid: 9, time: NOW - 60_000 })])
-    const sub = wrapper.find('.gallery-card__grid-sub')
-    // One minute ago formats as "Today HH:MM".
-    expect(sub.text()).toMatch(/^Today \d/)
-  })
-
-  it('suppresses the corner badge in grid cells (it is list-form only)', async () => {
-    seedPrefs({ listMode: 'grid' })
-    await mountHistory([makeHistoryItem({ gid: 3 })])
-    // The badge still renders (single slot content both forms) but lives
-    // under the grid-cell suppression rule; the grid form's visible stamp is
-    // the flowing sub line.
-    const badge = wrapper.find('.gallery-grid__cell .time-badge')
-    expect(badge.exists()).toBe(true)
-    expect(badge.classes()).not.toContain('time-row')
-  })
-
-  it('keeps the list form on the absolute corner badge without a meta region', async () => {
-    seedPrefs({ listMode: 'list' })
-    await mountHistory([makeHistoryItem({ gid: 5 }), makeHistoryItem({ gid: 6 })])
-
-    const rows = wrapper.findAll('.gallery-list__row')
+    const rows = wrapper.findAll('.app-list-row')
     expect(rows).toHaveLength(2)
+    // The last-viewed stamp rides the row's absolute corner badge mount.
+    const badges = wrapper.findAll('.history-list .time-badge')
+    expect(badges).toHaveLength(2)
+    expect(badges[0].text()).toMatch(/^Today \d/)
+    // GalleryList（网格/列表双形态）已被删除——只剩单列行。
     expect(wrapper.find('.gallery-grid__cell').exists()).toBe(false)
-    // List cards have no grid meta region and no flowing sub line.
-    expect(wrapper.find('.gallery-card__grid-meta').exists()).toBe(false)
-    expect(wrapper.find('.gallery-card__grid-sub').exists()).toBe(false)
-    // The last-viewed badge rides along in its classic corner form.
-    expect(wrapper.findAll('.gallery-list__row .time-badge')).toHaveLength(2)
+    expect(wrapper.find('.gallery-list__row').exists()).toBe(false)
   })
 
-  it('opens the gallery detail on card selection', async () => {
-    seedPrefs({ listMode: 'grid' })
-    await mountHistory([makeHistoryItem({ gid: 42 })])
-    await wrapper.find('.app-card').trigger('click')
-    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/42', query: { token: 'abc123' } })
+  it('routes the row title through maskedTitle — masking on shows only #<gid> (privacy red line)', async () => {
+    setPrivacyMaskEnabled(true)
+    await mountHistory([
+      makeHistoryItem({ gid: 7, title: 'Secret Title', titleJpn: '秘密のタイトル' }),
+    ])
+
+    const row = wrapper.find('.app-list-row')
+    expect(row.find('.app-list-row__title').text()).toBe('#7')
+    // 打码开启时日文副题一并隐藏（同 GalleryCard 的 !privacyMaskEnabled 守卫）。
+    expect(row.find('.app-list-row__subtitle').exists()).toBe(false)
   })
 
-  it('passes through the local token in the detail route query (P-A)', async () => {
-    seedPrefs({ listMode: 'grid' })
-    await mountHistory([makeHistoryItem({ gid: 7, token: 'tok7' })])
-    await wrapper.find('.app-card').trigger('click')
-    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/7', query: { token: 'tok7' } })
+  it('shows titleJpn as the subtitle when masking is off', async () => {
+    await mountHistory([makeHistoryItem({ gid: 3, title: 'T', titleJpn: '日本語' })])
+    const sub = wrapper.find('.app-list-row__subtitle')
+    expect(sub.exists()).toBe(true)
+    expect(sub.text()).toBe('日本語')
   })
 
-  it('omits the token query when the history row carries none', async () => {
-    seedPrefs({ listMode: 'grid' })
-    await mountHistory([makeHistoryItem({ gid: 9, token: '' })])
-    await wrapper.find('.app-card').trigger('click')
-    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/9', query: {} })
+  it('falls back to #<gid> for title-less rows (R4-6)', async () => {
+    await mountHistory([makeHistoryItem({ gid: 7, title: '', titleJpn: '' })])
+    expect(wrapper.find('.app-list-row__title').text()).toBe('#7')
+  })
+
+  it('renders the category chip in the meta row', async () => {
+    await mountHistory([makeHistoryItem({ gid: 1, category: 2 })])
+    expect(wrapper.find('.app-list-row__meta .category-chip').exists()).toBe(true)
+  })
+
+  it('rewrites external thumbnails through the image proxy', async () => {
+    const thumb = 'https://ehgt.org/t/1/cover.jpg'
+    await mountHistory([makeHistoryItem({ gid: 2, thumb })])
+    const img = wrapper.find('.app-list-row__thumb img')
+    expect(img.exists()).toBe(true)
+    expect(img.attributes('src')).toBe(`/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`)
   })
 
   /* ---------------- W6 阅读进度透传（plan-2026-09-02） ---------------- */
 
   it('passes the history row page through as readProgress (badge shows N+1P)', async () => {
-    // 历史行无页数（pages=0）→ 角标退化为 NP 格式。
-    seedPrefs({ listMode: 'list', showReadProgress: true })
+    // 历史行无页数 → 角标退化为 NP 格式。
+    seedPrefs({ showReadProgress: true })
     await mountHistory([makeHistoryItem({ gid: 11, page: 5 })])
     const badge = wrapper.find('[data-testid="read-progress-badge"]')
     expect(badge.exists()).toBe(true)
     expect(badge.text()).toBe('6P')
   })
 
-  it('shows the badge on grid cells too', async () => {
-    seedPrefs({ listMode: 'grid', showReadProgress: true })
-    await mountHistory([makeHistoryItem({ gid: 14, page: 2 })])
-    const badge = wrapper.find('[data-testid="read-progress-badge"]')
-    expect(badge.exists()).toBe(true)
-    expect(badge.text()).toBe('3P')
-  })
-
   it('hides the read-progress badge when the row carries no page (legacy server)', async () => {
-    seedPrefs({ listMode: 'list', showReadProgress: true })
+    seedPrefs({ showReadProgress: true })
     await mountHistory([makeHistoryItem({ gid: 12 })])
     expect(wrapper.find('[data-testid="read-progress-badge"]').exists()).toBe(false)
   })
 
+  it('hides the read-progress badge at page 0 (no progress yet, GalleryCard 语义)', async () => {
+    seedPrefs({ showReadProgress: true })
+    await mountHistory([makeHistoryItem({ gid: 15, page: 0 })])
+    expect(wrapper.find('[data-testid="read-progress-badge"]').exists()).toBe(false)
+  })
+
   it('hides the read-progress badge when showReadProgress is off', async () => {
-    seedPrefs({ listMode: 'list', showReadProgress: false })
+    seedPrefs({ showReadProgress: false })
     await mountHistory([makeHistoryItem({ gid: 13, page: 5 })])
     expect(wrapper.find('[data-testid="read-progress-badge"]').exists()).toBe(false)
+  })
+
+  /* ---------------- 点击分区（A4：缩略图→详情 / 主体→阅读） ---------------- */
+
+  it('opens the gallery detail from the thumbnail click zone', async () => {
+    await mountHistory([makeHistoryItem({ gid: 42, token: 'abc123' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/42', query: { token: 'abc123' } })
+  })
+
+  it('opens the reader directly from the row body click zone (A4)', async () => {
+    await mountHistory([makeHistoryItem({ gid: 7, token: 'tok7' })])
+    await wrapper.find('.app-list-row').trigger('click')
+    expect(pushMock).toHaveBeenCalledWith({ path: '/reader/7', query: { token: 'tok7' } })
+  })
+
+  it('omits the token query when the history row carries none (P-A)', async () => {
+    await mountHistory([makeHistoryItem({ gid: 9, token: '' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/9', query: {} })
   })
 
   /* ---------------- search + filter slots (A5d, 互斥) ---------------- */
@@ -252,7 +234,7 @@ describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () =>
     const input = wrapper.find('.search-bar__input').element as HTMLInputElement
     expect(input.value).toBe('')
 
-    // 回到「全部」→ 恢复无过滤加载（分页重置回 page=0）。
+    // 回到「全部」→ 恢复无过滤加载（分页重置回第 1 页）。
     await clickFilterChip('全部')
     expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 0, 50)
   })
@@ -313,11 +295,16 @@ describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () =>
     vi.useRealTimers()
   })
 
-  /* ---------------- 服务端分页（W2-DL F3） ---------------- */
+  /* ---------------- 服务端分页（A4，usePagedList + 分页条） ---------------- */
 
   /** 按服务端分页语义切片的 mock：page 0 起始，pageSize 每页条数，返回 total 全集数。 */
   function pagedServer(totalRows: number) {
-    return async (_q: unknown, _r: unknown, page = 0, pageSize = 50): Promise<{ history: HistoryItem[]; total: number }> => {
+    return async (
+      _q: unknown,
+      _r: unknown,
+      page = 0,
+      pageSize = 50,
+    ): Promise<{ history: HistoryItem[]; total: number }> => {
       const start = page * pageSize
       const count = Math.max(0, Math.min(pageSize, totalRows - start))
       return {
@@ -329,55 +316,80 @@ describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () =>
     }
   }
 
-  it('first screen loads page=0 only (server-side pagination, no full fetch)', async () => {
-    seedPrefs({ listMode: 'grid' })
-    vi.mocked(historyApi.listHistory).mockImplementation(pagedServer(120))
+  async function mountPaged(totalRows: number): Promise<void> {
+    vi.mocked(historyApi.listHistory).mockImplementation(pagedServer(totalRows))
     wrapper = mount(HistoryView)
     await flushPromises()
     await flushPromises()
+  }
 
-    // 首屏 offset=0：page=0&pageSize=50，只渲染第一页 50 行。
+  it('first screen loads page=0 only and shows the pagination bar (no full fetch)', async () => {
+    await mountPaged(120)
+
+    // 首屏：page=0&pageSize=50，整页替换渲染 50 行。
     expect(historyApi.listHistory).toHaveBeenCalledTimes(1)
     expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 0, 50)
-    expect(wrapper.findAll('.gallery-grid__cell')).toHaveLength(50)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(50)
     expect(wrapper.text()).toContain('H 1')
-    // 标题计数显示 已加载/全集。
-    expect(wrapper.find('.history-view__count').text()).toBe('50 / 120 galleries')
+    // 标题计数 = 服务端过滤后全集条数。
+    expect(wrapper.find('.history-view__count').text()).toBe('120 galleries')
+    // 分页条：第 1 / 3 页 · 120 条。
+    const bar = wrapper.find('[data-testid="history-pagination"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 120 条')
   })
 
-  it('appends the next page on scroll-to-bottom until total is reached', async () => {
-    seedPrefs({ listMode: 'grid' })
-    vi.mocked(historyApi.listHistory).mockImplementation(pagedServer(120))
-    wrapper = mount(HistoryView)
-    await flushPromises()
-    await flushPromises()
-    expect(wrapper.findAll('.gallery-grid__cell')).toHaveLength(50)
+  it('hides the pagination bar when total <= pageSize (Android 语义)', async () => {
+    await mountHistory([makeHistoryItem({ gid: 1 }), makeHistoryItem({ gid: 2 })])
+    expect(wrapper.find('[data-testid="history-pagination"]').exists()).toBe(false)
+  })
 
-    // 滚到底 → 追加 page=1（第 51–100 条）。
-    const el = wrapper.find('.fast-scroller__container').element as HTMLElement
-    Object.defineProperty(el, 'scrollTop', { value: 1000, configurable: true })
-    Object.defineProperty(el, 'clientHeight', { value: 800, configurable: true })
-    el.dispatchEvent(new Event('scroll'))
+  it('jumps to a page via the page buttons (whole-page replace)', async () => {
+    await mountPaged(120)
+
+    const bar = () => wrapper.find('[data-testid="history-pagination"]')
+    await bar()
+      .findAll('.pagination-bar__page')
+      .find((b) => b.text() === '3')!
+      .trigger('click')
     await flushPromises()
     await flushPromises()
 
-    expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 1, 50)
-    expect(wrapper.findAll('.gallery-grid__cell')).toHaveLength(100)
-
-    // 继续滚 → 追加最后一页（只剩 20 条）。
-    el.dispatchEvent(new Event('scroll'))
-    await flushPromises()
-    await flushPromises()
+    // usePagedList 页码 3 → /history/list 的 page=2（0 起）。
     expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 2, 50)
-    expect(wrapper.findAll('.gallery-grid__cell')).toHaveLength(120)
+    // 最后一页只剩 20 条——整页替换（不再是追加语义）。
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(20)
     expect(wrapper.text()).toContain('H 120')
+    expect(bar().find('.pagination-bar__info').text()).toBe('第 3 / 3 页 · 120 条')
+    expect(bar().find('.pagination-bar__page--active').text()).toBe('3')
+  })
 
-    // 达到 total 后继续滚动不再请求。
-    el.dispatchEvent(new Event('scroll'))
+  it('reloads page 1 with the selected page size', async () => {
+    await mountPaged(120)
+
+    await wrapper.find('.pagination-bar__select').setValue('100')
     await flushPromises()
-    expect(historyApi.listHistory).toHaveBeenCalledTimes(3)
-    // 计数回到纯总数形态。
-    expect(wrapper.find('.history-view__count').text()).toBe('120 galleries')
+    await flushPromises()
+
+    expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 0, 100)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(100)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 2 页 · 120 条')
+  })
+
+  it('pages with keyboard PageDown / PageUp (PC)', async () => {
+    await mountPaged(120)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }))
+    await flushPromises()
+    await flushPromises()
+    expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 1, 50)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 2 / 3 页 · 120 条')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }))
+    await flushPromises()
+    await flushPromises()
+    expect(historyApi.listHistory).toHaveBeenLastCalledWith(null, undefined, 0, 50)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 120 条')
   })
 
   /* ---------------- F4 REGEX_INVALID 错误识别 --------------- */
@@ -407,7 +419,7 @@ describe('HistoryView (F-UX1 grid meta — title + last-viewed sub line)', () =>
     expect(document.querySelector('.toast')?.textContent).toContain('正则无效')
   })
 
-  it('keeps the generic error tip for non-REGEX failures (F4)', async () => {
+  it('keeps the generic error tip for non-REGEX failures on the first screen (F4)', async () => {
     vi.mocked(historyApi.listHistory).mockRejectedValue(new Error('boom'))
     wrapper = mount(HistoryView)
     await flushPromises()
