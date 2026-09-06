@@ -96,21 +96,8 @@
           ›
         </button>
       </span>
-      <span class="pagination-bar__jump">
-        <input
-          v-model.number="jumpInput"
-          class="pagination-bar__input"
-          type="number"
-          min="1"
-          :max="totalPages"
-          :aria-label="`跳页（1 至 ${totalPages}）`"
-          @keyup.enter="jumpToPage()"
-          placeholder="页"
-        />
-        <button type="button" class="pagination-bar__btn" @click="jumpToPage()">
-          跳页
-        </button>
-      </span>
+      <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留——站点最新列表是流式
+           内容， arbitrary 页码没有目标语义。页码窗口/前后页保留。 -->
     </nav>
 
     <!-- ContentLayout: loading spinner / sadpanda empty tip / error retry /
@@ -450,7 +437,6 @@ const {
   totalPages,
   paginationVisible,
   pageWindow,
-  jumpInput,
   load: loadGalleryPage,
   jumpToPage,
 } = usePagedList<GalleryInfo>({
@@ -1184,41 +1170,6 @@ onBeforeUnmount(() => {
   text-align: center;
   color: var(--text-color-secondary);
   user-select: none;
-}
-
-.pagination-bar__jump {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.pagination-bar__input {
-  padding: 2px 6px;
-  border: 1px solid var(--color-divider);
-  border-radius: var(--card-radius);
-  background: var(--color-surface);
-  color: var(--text-color-primary);
-  font-family: inherit;
-  font-size: var(--text-super-small);
-}
-
-.pagination-bar__input {
-  width: 52px;
-  -moz-appearance: textfield;
-  appearance: textfield;
-}
-
-.pagination-bar__input::-webkit-outer-spin-button,
-.pagination-bar__input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-
-.pagination-bar__input:focus {
-  outline: none;
-  border-color: var(--color-primary);
 }
 
 .pagination-bar__btn {

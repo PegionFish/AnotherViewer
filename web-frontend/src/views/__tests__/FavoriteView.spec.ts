@@ -397,6 +397,13 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     expect(bar().find('.pagination-bar__page--active').text()).toBe('3')
   })
 
+  it('has no jump-to-page input（用户定案：跳页仅下载页）', async () => {
+    await mountPaged(120)
+
+    expect(wrapper.find('.pagination-bar__input').exists()).toBe(false)
+    expect(wrapper.find('.pagination-bar__btn').exists()).toBe(false)
+  })
+
   it('reloads page 1 with the selected page size (50/100/200 tiers)', async () => {
     await mountPaged(300)
 

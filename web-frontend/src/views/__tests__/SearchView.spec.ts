@@ -681,18 +681,12 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       expect(vi.mocked(galleryApi.search).mock.calls.length).toBe(before)
     })
 
-    it('jumps to a page through the pagination input', async () => {
+    it('has no jump-to-page input（用户定案：跳页仅下载页）', async () => {
       mockResults([galleryFixture({ gid: 3 })], 100)
       await mountView()
 
-      const input = wrapper.find('.pagination-bar__input')
-      await input.setValue(3)
-      await input.trigger('keyup.enter')
-      await flushPromises()
-
-      const calls = vi.mocked(galleryApi.search).mock.calls
-      expect(calls[calls.length - 1][2]).toBe(2) // 1-based 3 → 0-based 2
-      expect(calls[calls.length - 1][3]).toBe(25)
+      expect(wrapper.find('.pagination-bar__input').exists()).toBe(false)
+      expect(wrapper.find('.pagination-bar__btn').exists()).toBe(false)
     })
 
     it('retires the view-mode toggle: stale localStorage key is ignored, UI gone', async () => {

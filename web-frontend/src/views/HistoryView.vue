@@ -91,21 +91,7 @@
           </option>
         </select>
       </label>
-      <span class="pagination-bar__jump">
-        <input
-          v-model.number="jumpInput"
-          class="pagination-bar__input"
-          type="number"
-          min="1"
-          :max="totalPages"
-          :aria-label="`跳页（1 至 ${totalPages}）`"
-          @keyup.enter="jumpToPage()"
-          placeholder="页"
-        />
-        <button type="button" class="pagination-bar__btn" @click="jumpToPage()">
-          跳页
-        </button>
-      </span>
+      <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留。条数切换/页码窗口保留。 -->
     </nav>
 
     <ContentLayout
@@ -393,7 +379,6 @@ const {
   totalPages,
   paginationVisible,
   pageWindow,
-  jumpInput,
   load: loadPage,
   jumpToPage,
 } = usePagedList<HistoryItem>({
@@ -799,8 +784,7 @@ onMounted(() => {
   user-select: none;
 }
 
-.pagination-bar__size,
-.pagination-bar__jump {
+.pagination-bar__size {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -808,8 +792,7 @@ onMounted(() => {
   white-space: nowrap;
 }
 
-.pagination-bar__select,
-.pagination-bar__input {
+.pagination-bar__select {
   padding: 2px 6px;
   border: 1px solid var(--color-divider);
   border-radius: var(--card-radius);
@@ -819,39 +802,9 @@ onMounted(() => {
   font-size: var(--text-super-small);
 }
 
-.pagination-bar__input {
-  width: 52px;
-  -moz-appearance: textfield;
-  appearance: textfield;
-}
-
-.pagination-bar__input::-webkit-outer-spin-button,
-.pagination-bar__input::-webkit-inner-spin-button {
-  -webkit-appearance: none;
-  margin: 0;
-}
-
-.pagination-bar__select:focus,
-.pagination-bar__input:focus {
+.pagination-bar__select:focus {
   outline: none;
   border-color: var(--color-primary);
-}
-
-.pagination-bar__btn {
-  padding: 2px 8px;
-  border: none;
-  border-radius: var(--card-radius);
-  background: transparent;
-  color: var(--color-primary);
-  font-family: inherit;
-  font-size: var(--text-super-small);
-  font-weight: 600;
-  cursor: pointer;
-  transition: background-color 140ms var(--ease-decelerate-quart);
-}
-
-.pagination-bar__btn:hover {
-  background: var(--color-surface-activated);
 }
 
 /* -------------------------------------------------------------- list ---- */

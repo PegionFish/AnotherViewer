@@ -563,20 +563,21 @@ describe('HomeView — A4 服务端分页（分页条，usePagedList）', () => 
     expect(bar().find('.pagination-bar__page--active').text()).toBe('2')
   })
 
-  it('jumps through the page input (钳制到页码窗口)', async () => {
+  it('has no jump-to-page input（用户定案：跳页仅下载页，站点列表无目标语义）', async () => {
     await mountPaged(120)
 
-    const input = wrapper.find('.pagination-bar__input')
-    await input.setValue(5)
-    await wrapper.find('.pagination-bar__btn').trigger('click')
+    expect(wrapper.find('.pagination-bar__input').exists()).toBe(false)
+    expect(wrapper.find('.pagination-bar__btn').exists()).toBe(false)
+    // 页码窗口/前后页保留：页 2 可直达。
+    const bar = () => wrapper.find('[data-testid="home-pagination"]')
+    await bar()
+      .findAll('.pagination-bar__page')
+      .find((b) => b.text() === '2')!
+      .trigger('click')
     await flushPromises()
     await flushPromises()
-
-    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 4, 25, undefined)
-    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 5 / 5 页 · 120 条')
-    // 末页只剩 20 条——整页替换（不再是追加语义）。
-    expect(wrapper.findAll('.app-list-row')).toHaveLength(20)
-    expect(wrapper.text()).toContain('G 120')
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 1, 25, undefined)
+    expect(bar().find('.pagination-bar__page--active').text()).toBe('2')
   })
 
   it('pages with keyboard PageDown / PageUp (PC)', async () => {
