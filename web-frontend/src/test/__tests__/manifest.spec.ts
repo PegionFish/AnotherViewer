@@ -23,11 +23,10 @@ describe('UX-12 PWA manifest', () => {
     expect(icon?.type).toBe('image/png')
   })
 
-  it('a regular (non-maskable) icon is marked form_factor: wide', () => {
-    const wide = manifest.icons.find((icon) => icon.form_factor === 'wide')
-    expect(wide).toBeDefined()
-    expect(wide!.sizes).toBe('512x512')
-    expect(wide!.purpose).toBeUndefined()
+  it('no icon entry carries form_factor (unsupported on icons — browsers ignore it)', () => {
+    // Manifest members only recognize form_factor on screenshots/shortcuts,
+    // never on icons; the old wide hint was dead weight (plan-2026-09-06-pwa C6).
+    expect(manifest.icons.some((icon) => icon.form_factor !== undefined)).toBe(false)
   })
 
   it('display is standalone', () => {
