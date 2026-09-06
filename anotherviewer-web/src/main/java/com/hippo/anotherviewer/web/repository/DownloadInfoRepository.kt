@@ -11,11 +11,17 @@ import org.springframework.transaction.annotation.Transactional
 /**
  * A7-2 软删后的查询面约定：REST 列表/筛选/统计/生命周期遍历只看存活行
  * （deleted=false），墓碑行（deleted=true）是同步删除的唯一传播载体——
- * `findByGid`（merge/复活仲裁）与 `findByUsername*`（pull 载体）必须保持
+ * `findByGid`/`findAllByGid`（merge/复活仲裁）与 `findByUsername*`（pull 载体）必须保持
  * 不过滤，不得给它们加 deleted 条件。
  */
 interface DownloadInfoRepository : JpaRepository<DownloadInfoEntity, Long> {
     fun findByGid(gid: Long): DownloadInfoEntity?
+    /**
+     * A7-3（P1-1）：同 gid 多行（历史脏数据/属主并存）时单实体 [findByGid] 派生查询
+     * 会抛 IncorrectResultSizeDataAccessException，毒化整条同步通道。同步仲裁与
+     * 写前查找一律走本 List 版本 + 属主/存活 firstOrNull。
+     */
+    fun findAllByGid(gid: Long): List<DownloadInfoEntity>
     fun findByLabel(label: Int): List<DownloadInfoEntity>
     /** 按 label 分页（W6 下载列表分页）。A7-2（D1）: 仅存活行。 */
     fun findByLabelAndDeletedFalse(label: Int, pageable: Pageable): Page<DownloadInfoEntity>

@@ -413,14 +413,16 @@ class GalleryService(
         // 1. 本地推送下载行直接作为 detail 来源——pages 取行内 total
         //    （<=0 时数落盘文件），零 EH 依赖，阅读器必须能开。
         //    A7-2（D10）：墓碑下载行跳过（落到下一分支，不得以删除记录开详情）。
-        val download = downloadRepository.findByGid(gid)?.takeUnless { it.deleted }
+        //    A7-3（P1-1）：查找 List 化；读路径不按属主过滤（本地可见性语义保持，
+        //    firstOrNull 与原 findByGid 等价）——下同，history/favorite 分支。
+        val download = downloadRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }
         if (download != null) {
             return downloadDetailDto(download)
         }
 
         // 2. 历史行：本地 dto 立即构造；仅站点可达时尝试上游补强（评论等真实字段）。
         //    A7-2（H3）：墓碑历史行跳过（清空历史/设备删除后详情不再以墓碑为源）。
-        val history = historyRepository.findByGid(gid)?.takeUnless { it.deleted }
+        val history = historyRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }
         if (history != null) {
             return enrichHistoryDetail(gid, history)
         }
@@ -440,7 +442,7 @@ class GalleryService(
 
         // 4. 收藏行：无历史/下载的收藏条目在 EH DOWN 时仍可打开详情（本地 token/标题/缩略图）。
         //    A7-2（F2）：墓碑收藏行跳过（applyFavoriteFields 会把墓碑字段清空，渲染垃圾详情）。
-        val favorite = localFavoriteInfoRepository.findByGid(gid)?.takeUnless { it.deleted }
+        val favorite = localFavoriteInfoRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }
         if (favorite != null) {
             return favoriteDetailDto(favorite)
         }
@@ -598,9 +600,10 @@ class GalleryService(
         }
     }
 
-    /** S5: 已存阅读进度（0 起页索引）；无历史行视为 0（未读）。A7-2（H3）：墓碑行不计进度。 */
+    /** S5: 已存阅读进度（0 起页索引）；无历史行视为 0（未读）。A7-2（H3）：墓碑行不计进度。
+        A7-3（P1-1）：查找 List 化；读路径不按属主过滤（本地可见性语义保持）。 */
     private fun readProgressOf(gid: Long): Int =
-        historyRepository.findByGid(gid)?.takeUnless { it.deleted }?.page ?: 0
+        historyRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }?.page ?: 0
 
     fun addToHistory(gid: Long, token: String, title: String?, mode: Int, page: Int? = null) {
         // A7-1：委托 HistoryService.addHistory——stamping（username/lastModified）、

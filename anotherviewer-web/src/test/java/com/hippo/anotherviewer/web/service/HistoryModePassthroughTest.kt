@@ -106,6 +106,10 @@ class HistoryModePassthroughTest {
             e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        // A7-3：addHistory 写前查找走 List 版本——stub 与生产调用面保持一致。
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<HistoryInfoEntity>()
+        }
         `when`(repo.findAllByOrderByTimeDesc()).thenAnswer { store.values.sortedByDescending { it.time } }
         return repo
     }

@@ -135,7 +135,9 @@ class FavoriteService(
     ): Boolean {
         val clampedSlot = slot.coerceIn(SLOT_NOT_FAVORITED, SLOT_MAX)
         val now = System.currentTimeMillis()
-        val existing = favoriteRepository.findByGid(gid)
+        // A7-3（P1-1）：List 化防同 gid 多行炸单实体派生查询；firstOrNull 与原
+        // findByGid 等价（单行模型下语义不变，多行脏数据不再毒化请求）。
+        val existing = favoriteRepository.findAllByGid(gid).firstOrNull()
         // A7-2 复活语义（F3，对齐 SyncService.mergeFavorite 的 incoming live 复活分支）：
         // 墓碑行不拒绝而是复活（deleted→false + 覆写业务字段 + stamp），否则 Web 永远
         // 无法重新收藏该 gid（列表已隐藏墓碑，重加是无声失败）；活行仍拒绝。
@@ -176,8 +178,8 @@ class FavoriteService(
         // 已下载画廊的详情读取链 download 分支优先于 history 分支，下载列表行
         // 同样以 download 行为 favoriteSlot 来源——来源行是 download 行时也要
         // 回写，否则重进详情/下载列表仍显示未收藏。D11：墓碑下载行跳过（回写
-        // 不得复活删除）。
-        downloadRepository.findByGid(gid)?.takeIf { !it.deleted }?.let {
+        // 不得复活删除）。A7-3：查找 List 化（见 addFavorite 顶部注释）。
+        downloadRepository.findAllByGid(gid).firstOrNull()?.takeIf { !it.deleted }?.let {
             it.favoriteSlot = entity.favoriteSlot
             it.lastModified = System.currentTimeMillis()
             downloadRepository.save(it)
@@ -192,7 +194,8 @@ class FavoriteService(
      * 已是墓碑的行幂等返回 true，不再重复 bump 水位制造无谓 pull 流量。
      */
     fun removeFavorite(gid: Long): Boolean {
-        val existing = favoriteRepository.findByGid(gid) ?: return false
+        // A7-3（P1-1）：List 化防同 gid 多行炸单实体派生查询（firstOrNull 等价）。
+        val existing = favoriteRepository.findAllByGid(gid).firstOrNull() ?: return false
         if (existing.deleted) return true
         existing.deleted = true
         existing.lastModified = System.currentTimeMillis()
@@ -203,8 +206,8 @@ class FavoriteService(
         if (!historyService.updateFavoriteSlot(gid, SLOT_NOT_FAVORITED)) {
             logger.debug("removeFavorite gid={}: no history row, favoriteSlot reset skipped", gid)
         }
-        // D11：墓碑下载行跳过（回写不得复活删除）。
-        downloadRepository.findByGid(gid)?.takeIf { !it.deleted }?.let {
+        // D11：墓碑下载行跳过（回写不得复活删除）。A7-3：查找 List 化。
+        downloadRepository.findAllByGid(gid).firstOrNull()?.takeIf { !it.deleted }?.let {
             it.favoriteSlot = SLOT_NOT_FAVORITED
             it.lastModified = System.currentTimeMillis()
             downloadRepository.save(it)

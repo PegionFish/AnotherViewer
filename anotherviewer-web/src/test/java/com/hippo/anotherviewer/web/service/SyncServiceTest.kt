@@ -159,6 +159,9 @@ class SyncServiceTest {
             e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<LocalFavoriteInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv -> store.values.filter { it.username == inv.getArgument<String>(0) } }
@@ -180,6 +183,9 @@ class SyncServiceTest {
             e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<HistoryInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv -> store.values.filter { it.username == inv.getArgument<String>(0) } }
@@ -201,6 +207,9 @@ class SyncServiceTest {
             e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<DownloadInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv -> store.values.filter { it.username == inv.getArgument<String>(0) } }
@@ -222,6 +231,9 @@ class SyncServiceTest {
             e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<BookmarkInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv -> store.values.filter { it.username == inv.getArgument<String>(0) } }
@@ -1051,6 +1063,44 @@ class SyncServiceTest {
         assertEquals("B's title", stored.title)
         verify(downloadRepo, never()).save(any(DownloadInfoEntity::class.java))
         assertEquals(0, response.conflicts)
+    }
+
+    @Test
+    fun `merge tolerates duplicate gid rows across users without exception`() {
+        // A7-3（P1-1）：同 gid 多行（分属 A/B）时旧单实体 findByGid 派生查询会抛
+        // IncorrectResultSizeDataAccessException，毒化整条 push。List 化后按属主
+        // 仲裁，语义保持：B 已占时 A 的新行 push 不插不覆盖；同 gid 双行并存时
+        // 仲裁只落在推送者自己的行上（墓碑/活行规则不变）。
+        // 1) B 已占 gid：A push 新活行 → 不插、不炸、B 行原样。
+        seedDownload(gid = 20, lastModified = 1_000, state = 1, username = "B", title = "B's title")
+        val response = push("A", downloads = listOf(dl(20, lastModified = 6_001, state = 9, title = "A's title")))
+        val stored = downloadRepo.findByGid(20)!!
+        assertEquals("B", stored.username)
+        assertEquals(1, stored.state)
+        verify(downloadRepo, never()).save(any(DownloadInfoEntity::class.java))
+        assertEquals(0, response.conflicts)
+
+        // 2) 同 gid 真实双行（store 按 gid 单行，覆写 findAllByGid 模拟两行并存）：
+        //    A push 活行（LWW 行胜）→ 只落在 A 自己的行上，B 的行原样保留。
+        val rowB = HistoryInfoEntity().apply {
+            gid = 41; token = "tok41"; title = "B"; lastModified = 1_000; username = "B"
+        }
+        val rowA = HistoryInfoEntity().apply {
+            gid = 41; token = "tok41"; title = "A"; lastModified = 1_000; username = "A"
+        }
+        `when`(historyRepo.findAllByGid(41L)).thenReturn(listOf(rowB, rowA))
+        push("A", history = listOf(hist(41, lastModified = 6_001, title = "A v2")))
+        assertEquals("B", rowB.title)
+        assertEquals(1_000L, rowB.lastModified)
+        assertFalse(rowB.deleted)
+        assertEquals("A v2", rowA.title)
+        assertEquals(6_001L, rowA.lastModified)
+
+        // 3) A push 墓碑 → 墓碑仲裁同样只落 A 的行，B 的活行不受牵连。
+        push("A", history = listOf(hist(41, lastModified = 9_000, deleted = true)))
+        assertTrue(rowA.deleted)
+        assertFalse(rowB.deleted)
+        assertEquals(1_000L, rowB.lastModified)
     }
 
     @Test

@@ -108,7 +108,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory with mode persists it`() {
-        `when`(historyRepository.findByGid(7L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(7L)).thenReturn(emptyList())
 
         historyService.addHistory(7L, "t7", "Title 7", null, null, 1, 5.0f, mode = 9)
 
@@ -117,7 +117,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory without mode defaults to 0`() {
-        `when`(historyRepository.findByGid(8L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(8L)).thenReturn(emptyList())
 
         historyService.addHistory(8L, "t8", "Title 8", null, null, 1, 5.0f)
 
@@ -127,7 +127,7 @@ class HistoryServiceTest {
     @Test
     fun `addHistory on existing row updates mode`() {
         val existing = entity(9L, 1000).apply { mode = 5 }
-        `when`(historyRepository.findByGid(9L)).thenReturn(existing)
+        `when`(historyRepository.findAllByGid(9L)).thenReturn(listOf(existing))
 
         historyService.addHistory(9L, "t9", "Title 9", null, null, 1, 5.0f, mode = 7)
 
@@ -139,7 +139,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory insert stamps username and lastModified`() {
-        `when`(historyRepository.findByGid(21L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(21L)).thenReturn(emptyList())
 
         historyService.addHistory(21L, "t21", "Title 21", null, null, 1, 5.0f)
 
@@ -150,12 +150,14 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory update bumps lastModified for incremental pull and never overwrites the owner`() {
-        val existing = entity(22L, 1000).apply { username = "alice"; lastModified = 5L }
-        `when`(historyRepository.findByGid(22L)).thenReturn(existing)
+        // A7-3 起跨用户更新改为整体跳过（见 addHistory skips updating another
+        // user's row）——本测固定自己行的更新语义：非空属主不被覆写、水位必 bump。
+        val existing = entity(22L, 1000).apply { username = "test-user"; lastModified = 5L }
+        `when`(historyRepository.findAllByGid(22L)).thenReturn(listOf(existing))
 
         historyService.addHistory(22L, "t22", "Title 22", null, null, 1, 5.0f)
 
-        assertEquals("alice", existing.username)
+        assertEquals("test-user", existing.username)
         assertTrue(existing.lastModified > 5L)
         verify(historyRepository).save(existing)
     }
@@ -163,7 +165,7 @@ class HistoryServiceTest {
     @Test
     fun `addHistory update claims a legacy null-username row in place`() {
         val existing = entity(23L, 1000)
-        `when`(historyRepository.findByGid(23L)).thenReturn(existing)
+        `when`(historyRepository.findAllByGid(23L)).thenReturn(listOf(existing))
 
         historyService.addHistory(23L, "t23", "Title 23", null, null, 1, 5.0f)
 
@@ -172,9 +174,44 @@ class HistoryServiceTest {
     }
 
     @Test
+    fun `addHistory skips updating another user's row`() {
+        // A7-3 属主更新保护：行属主非当前用户且非 NULL → 跳过更新+留痕——
+        // 不跨用户改行，也不另起一行（保持 gid 全局单行模型）；
+        // require_auth=false 下全员 "default"，单用户部署无感知。
+        val other = entity(26L, 1000).apply {
+            username = "alice"; lastModified = 5L; mode = 5; page = 9
+        }
+        `when`(historyRepository.findAllByGid(26L)).thenReturn(listOf(other))
+
+        historyService.addHistory(26L, "t26", "Title 26", null, null, 1, 5.0f, mode = 7, page = 3)
+
+        assertEquals("alice", other.username)
+        assertEquals(5L, other.lastModified)
+        assertEquals(5, other.mode)   // 未被改写
+        assertEquals(9, other.page)   // 进度未被改写
+        assertFalse(other.deleted)    // 也不得借复活分支动他人行
+        verify(historyRepository, never()).save(any(HistoryInfoEntity::class.java))
+    }
+
+    @Test
+    fun `updateFavoriteSlot skips another user's row`() {
+        // A7-3：writeback 同样不跨用户——他人行返回 false（调用方降级为日志）。
+        val other = entity(27L, 1000).apply {
+            username = "alice"; favoriteSlot = 3; lastModified = 7L
+        }
+        `when`(historyRepository.findAllByGid(27L)).thenReturn(listOf(other))
+
+        assertFalse(historyService.updateFavoriteSlot(27L, 5))
+
+        assertEquals(3, other.favoriteSlot)
+        assertEquals(7L, other.lastModified)
+        verify(historyRepository, never()).save(any(HistoryInfoEntity::class.java))
+    }
+
+    @Test
     fun `updateFavoriteSlot bumps lastModified only on change`() {
         val row = entity(24L, 1000).apply { favoriteSlot = 3; lastModified = 7L }
-        `when`(historyRepository.findByGid(24L)).thenReturn(row)
+        `when`(historyRepository.findAllByGid(24L)).thenReturn(listOf(row))
 
         // 值未变：不产生任何写（无同步流量）。
         assertTrue(historyService.updateFavoriteSlot(24L, 3))
@@ -194,7 +231,7 @@ class HistoryServiceTest {
         // clearHistory 后重读同一画廊必须复活历史行（对齐 mergeHistory 墓碑复活），
         // 否则墓碑被反复更新而列表永远为空——「清空后重读」功能性丢失。
         val tombstone = entity(25L, 1000).apply { deleted = true; lastModified = 5L }
-        `when`(historyRepository.findByGid(25L)).thenReturn(tombstone)
+        `when`(historyRepository.findAllByGid(25L)).thenReturn(listOf(tombstone))
 
         historyService.addHistory(25L, "t25", "Title 25", null, null, 1, 5.0f)
 
@@ -264,7 +301,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory rejects masked serial title on insert (PrivacyMask 脱敏防污染)`() {
-        `when`(historyRepository.findByGid(12L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(12L)).thenReturn(emptyList())
 
         historyService.addHistory(12L, "t12", "#12", null, null, 1, 5.0f)
 
@@ -273,7 +310,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory keeps real title on insert`() {
-        `when`(historyRepository.findByGid(13L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(13L)).thenReturn(emptyList())
 
         historyService.addHistory(13L, "t13", "(C99) Real Title", null, null, 1, 5.0f)
 
@@ -284,7 +321,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory with page persists it on a new row`() {
-        `when`(historyRepository.findByGid(11L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(11L)).thenReturn(emptyList())
 
         historyService.addHistory(11L, "t11", "Title 11", null, null, 1, 5.0f, page = 37)
 
@@ -294,7 +331,7 @@ class HistoryServiceTest {
     @Test
     fun `addHistory without page keeps the stored progress`() {
         val existing = entity(12L, 1000).apply { page = 42 }
-        `when`(historyRepository.findByGid(12L)).thenReturn(existing)
+        `when`(historyRepository.findAllByGid(12L)).thenReturn(listOf(existing))
 
         historyService.addHistory(12L, "t12", "Title 12", null, null, 1, 5.0f)
 
@@ -305,7 +342,7 @@ class HistoryServiceTest {
     @Test
     fun `addHistory with explicit page 0 rewrites the stored progress to zero`() {
         val existing = entity(13L, 1000).apply { page = 42 }
-        `when`(historyRepository.findByGid(13L)).thenReturn(existing)
+        `when`(historyRepository.findAllByGid(13L)).thenReturn(listOf(existing))
 
         historyService.addHistory(13L, "t13", "Title 13", null, null, 1, 5.0f, page = 0)
 
@@ -315,7 +352,7 @@ class HistoryServiceTest {
 
     @Test
     fun `addHistory clamps a negative page to zero`() {
-        `when`(historyRepository.findByGid(14L)).thenReturn(null)
+        `when`(historyRepository.findAllByGid(14L)).thenReturn(emptyList())
 
         historyService.addHistory(14L, "t14", "Title 14", null, null, 1, 5.0f, page = -3)
 

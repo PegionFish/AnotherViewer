@@ -114,9 +114,9 @@ class GalleryServiceTest {
     }
 
     private fun stubNoLocalRows(h: Harness) {
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(null)
-        `when`(h.favorites.findByGid(GID)).thenReturn(null)
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(emptyList())
     }
 
     // ── getGalleryDetail source order (P-C) ────────────────────
@@ -124,7 +124,7 @@ class GalleryServiceTest {
     @Test
     fun `detail prefers the download row and never touches the site`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(downloadRow()))
 
         mockStatic(SiteEngine::class.java).use { engine ->
             val detail = h.service.getGalleryDetail(GID, TOKEN)
@@ -143,7 +143,7 @@ class GalleryServiceTest {
         // 触发阅读器「只读第一页」。
         val h = harness()
         val row = downloadRow().apply { total = 0 }
-        `when`(h.downloads.findByGid(GID)).thenReturn(row)
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(row))
         `when`(h.galleryLookup.resolvePageCount(GID)).thenReturn(47)
 
         val detail = h.service.getGalleryDetail(GID, TOKEN)
@@ -157,7 +157,7 @@ class GalleryServiceTest {
     fun `download detail stays open with zero pages when upstream cannot resolve either`() {
         val h = harness()
         val row = downloadRow().apply { total = 348 }
-        `when`(h.downloads.findByGid(GID)).thenReturn(row)
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(row))
         `when`(h.galleryLookup.resolvePageCount(GID)).thenReturn(348)
 
         val detail = h.service.getGalleryDetail(GID, TOKEN)
@@ -169,8 +169,8 @@ class GalleryServiceTest {
     @Test
     fun `detail with a history row is served locally while blocked without upstream`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow()))
         h.availability.recordFailure("connect timed out")
 
         mockStatic(SiteEngine::class.java).use { engine ->
@@ -186,8 +186,8 @@ class GalleryServiceTest {
     @Test
     fun `history enrichment is attempted while reachable and falls back on failure`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow()))
         `when`(h.historyTags.findByGid(GID)).thenReturn(emptyList<GalleryTagsEntity>())
         // P1: 补强改走 GalleryLookupService.getDetailCached（内部 detailCache）；
         // 上游失败 → null → 本地 DTO 原样返回（E2E-6 语义不变）。
@@ -203,8 +203,8 @@ class GalleryServiceTest {
     @Test
     fun `history enrichment uses the cached detail with comments`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow()))
         `when`(h.historyTags.findByGid(GID)).thenReturn(emptyList<GalleryTagsEntity>())
         // P1: 二次点击零上游——detail 由 getDetailCached 提供（含站点真实评论）。
         `when`(h.galleryLookup.getDetailCached(GID, TOKEN)).thenReturn(GalleryDetail().apply {
@@ -260,9 +260,9 @@ class GalleryServiceTest {
     @Test
     fun `detail with a token is skipped while blocked and falls through to the favorite row`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(null)
-        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(favoriteRow()))
         `when`(h.galleryLookup.resolvePageCount(GID)).thenReturn(null)
         h.availability.recordFailure("connect timed out")
 
@@ -279,9 +279,9 @@ class GalleryServiceTest {
     @Test
     fun `detail with a token while reachable wins over the favorite row`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(null)
-        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(favoriteRow()))
         // P1: 顺序 3 的上游直取改经 getDetailCached（mock 提供 detail）。
         `when`(h.galleryLookup.getDetailCached(GID, TOKEN)).thenReturn(GalleryDetail().apply {
             token = TOKEN
@@ -302,9 +302,9 @@ class GalleryServiceTest {
     @Test
     fun `favorite detail pageCount comes from resolvePageCount when reachable`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(null)
-        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(favoriteRow()))
         `when`(h.galleryLookup.resolvePageCount(GID)).thenReturn(33)
 
         val detail = h.service.getGalleryDetail(GID, null)
@@ -344,8 +344,8 @@ class GalleryServiceTest {
     @Test
     fun `download detail carries the stored read progress`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow())
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { page = 21 })
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(downloadRow()))
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow().apply { page = 21 }))
 
         val detail = h.service.getGalleryDetail(GID, TOKEN)
 
@@ -356,8 +356,8 @@ class GalleryServiceTest {
     @Test
     fun `history detail carries the row page without a second lookup`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { page = 13 })
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow().apply { page = 13 }))
         `when`(h.historyTags.findByGid(GID)).thenReturn(emptyList<GalleryTagsEntity>())
         h.availability.recordFailure("connect timed out") // blocked → 纯本地 DTO
 
@@ -370,9 +370,9 @@ class GalleryServiceTest {
     @Test
     fun `favorite detail reports zero progress when no history row exists`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(null)
-        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(favoriteRow()))
         `when`(h.galleryLookup.resolvePageCount(GID)).thenReturn(null)
         h.availability.recordFailure("connect timed out")
 
@@ -409,8 +409,8 @@ class GalleryServiceTest {
     @Test
     fun `history detail keeps readProgress through upstream enrichment`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { page = 13; pages = 0 })
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow().apply { page = 13; pages = 0 }))
         `when`(h.historyTags.findByGid(GID)).thenReturn(emptyList<GalleryTagsEntity>())
         `when`(h.galleryLookup.getDetailCached(GID, TOKEN)).thenReturn(GalleryDetail().apply {
             token = TOKEN
@@ -433,10 +433,10 @@ class GalleryServiceTest {
         // 按钮呈已收藏态；enrichment copy() 不覆盖 favoriteSlot。
         val h = harness()
         val history = historyRow().apply { favoriteSlot = -2 }
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(history)
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(history))
         `when`(h.historyTags.findByGid(GID)).thenReturn(emptyList<GalleryTagsEntity>())
-        `when`(h.favorites.findByGid(GID)).thenReturn(null)
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(emptyList())
         val favoriteService = FavoriteService(
             h.favorites,
             h.history,
@@ -460,7 +460,7 @@ class GalleryServiceTest {
         // A7-1：GalleryService.addToHistory 不再自行落库——委托 HistoryService.addHistory
         // （单一 stamping 实现点），新行 username/lastModified 由 HistoryService 落。
         val h = harness()
-        `when`(h.history.findByGid(GID)).thenReturn(null)
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
 
         h.service.addToHistory(GID, TOKEN, "Title", mode = 3)
 
@@ -476,7 +476,7 @@ class GalleryServiceTest {
         // S5① 语义经委托保持：page=null 不改写已存进度；水位 bump 供增量 pull。
         val h = harness()
         val existing = historyRow().apply { page = 41; lastModified = 7L }
-        `when`(h.history.findByGid(GID)).thenReturn(existing)
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(existing))
 
         h.service.addToHistory(GID, TOKEN, "Title", mode = 0)
 
@@ -580,9 +580,9 @@ class GalleryServiceTest {
     fun `getGalleryDetail skips tombstoned rows and falls through in source order`() {
         // F2/H3/D10：download 墓碑 → history 墓碑 → favorite 墓碑 → null（DOWN 期零上游）。
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow().apply { deleted = true })
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { deleted = true })
-        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow().apply { deleted = true })
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(downloadRow().apply { deleted = true }))
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow().apply { deleted = true }))
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(favoriteRow().apply { deleted = true }))
         h.availability.recordFailure("connect timed out")
 
         assertNull(h.service.getGalleryDetail(GID, TOKEN))
@@ -591,8 +591,8 @@ class GalleryServiceTest {
     @Test
     fun `getGalleryDetail falls through a tombstoned download row to the live history row`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow().apply { deleted = true })
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(downloadRow().apply { deleted = true }))
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow()))
         h.availability.recordFailure("connect timed out")
 
         val detail = h.service.getGalleryDetail(GID, TOKEN)
@@ -605,13 +605,44 @@ class GalleryServiceTest {
     fun `getGalleryDetail hides the read progress of a tombstoned history row`() {
         // H3：readProgressOf 不读墓碑行。
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow())
-        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { page = 21; deleted = true })
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(downloadRow()))
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow().apply { page = 21; deleted = true }))
 
         val detail = h.service.getGalleryDetail(GID, TOKEN)
 
         assertNotNull(detail)
         assertEquals(0, detail!!.readProgress)
+    }
+
+    @Test
+    fun `getGalleryDetail still resolves rows regardless of owner`() {
+        // A7-3 本地可见性回归锚：详情三分支与 readProgressOf 的读路径不按属主
+        // 过滤——他人同步落库的行在本机照样可开/可读（firstOrNull 与原 findByGid
+        // 等价）。属主保护只存在于写路径（addHistory/updateFavoriteSlot/merge*）。
+        val h = harness()
+        val bobsDownload = downloadRow().apply { username = "bob" }
+        val alicesHistory = historyRow().apply { username = "alice"; page = 13 }
+        val carolsFavorite = favoriteRow().apply { username = "carol" }
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(listOf(bobsDownload))
+        `when`(h.history.findAllByGid(GID)).thenReturn(listOf(alicesHistory))
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(carolsFavorite))
+
+        // 下载分支优先：bob 的下载行照常作为详情源（当前用户是 test-user）。
+        val fromDownload = h.service.getGalleryDetail(GID, TOKEN)
+        assertNotNull(fromDownload)
+        assertEquals("Download title", fromDownload!!.title)
+
+        // bob 行缺席 → 历史分支：alice 行的本地阅读进度照读。
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        val fromHistory = h.service.getGalleryDetail(GID, TOKEN)
+        assertEquals(13, fromHistory!!.readProgress)
+
+        // alice 行也缺席 → 收藏分支：carol 行在 EH 断网兜底下照常可开。
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        h.availability.recordFailure("connect timed out")
+        val fromFavorite = h.service.getGalleryDetail(GID, null)
+        assertNotNull(fromFavorite)
+        assertEquals("Favorite title", fromFavorite!!.title)
     }
 
     @Test
@@ -963,7 +994,7 @@ class GalleryServiceTest {
 
             // 第二次：出现历史行 → enrichHistoryDetail 走 getDetailCached，
             // 命中直开路径回填的同一缓存条目（同 gid 两路径只打一次上游）。
-            `when`(h.history.findByGid(GID)).thenReturn(historyRow())
+            `when`(h.history.findAllByGid(GID)).thenReturn(listOf(historyRow()))
             val enriched = h.service.getGalleryDetail(GID, TOKEN)
 
             assertNotNull(enriched)
@@ -991,9 +1022,9 @@ class GalleryServiceTest {
     @Test
     fun `detail with a blank token falls through to the favorite row`() {
         val h = harness()
-        `when`(h.downloads.findByGid(GID)).thenReturn(null)
-        `when`(h.history.findByGid(GID)).thenReturn(null)
-        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow())
+        `when`(h.downloads.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.history.findAllByGid(GID)).thenReturn(emptyList())
+        `when`(h.favorites.findAllByGid(GID)).thenReturn(listOf(favoriteRow()))
         `when`(h.galleryLookup.resolvePageCount(GID)).thenReturn(null)
 
         val detail = h.service.getGalleryDetail(GID, "   ")

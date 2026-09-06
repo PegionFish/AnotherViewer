@@ -253,12 +253,15 @@ class SyncService(
         val incomingDevice = incoming.deviceId.ifEmpty { pushDeviceId }
         val incomingPlatform = platformOf(incomingDevice)
         val naturalKey = incoming.gid.toString()
-        val raw = favoriteRepository.findByGid(incoming.gid)
-        val existing = ownedBy(raw, username) { it.username }
+        // A7-3（P1-1）：gid 查找 List 化——同 gid 多行（历史脏数据/属主并存）时单实体
+        // 派生查询会抛 IncorrectResultSizeDataAccessException 毒化整条 push；属主行
+        // 取自己的行或 NULL 行，他人已占则不插不覆盖（与旧 raw==null 守卫逐字等价）。
+        val rows = favoriteRepository.findAllByGid(incoming.gid)
+        val existing = rows.firstOrNull { it.username == null || it.username == username }
         if (existing == null) {
             // No own record: store the incoming row, tombstones included, so
             // deletions propagate to other devices (contract §4.1).
-            if (raw == null) {
+            if (rows.isEmpty()) {
                 favoriteRepository.save(incoming.toFavoriteEntity(username))
                 recordProvenance(username, TAG_FAVORITE, naturalKey, incomingDevice)
             }
@@ -317,8 +320,9 @@ class SyncService(
         val incomingDevice = incoming.deviceId.ifEmpty { pushDeviceId }
         val incomingPlatform = platformOf(incomingDevice)
         val naturalKey = incoming.gid.toString()
-        val raw = historyRepository.findByGid(incoming.gid)
-        val existing = ownedBy(raw, username) { it.username }
+        // A7-3（P1-1）：gid 查找 List 化（见 mergeFavorite）。
+        val rows = historyRepository.findAllByGid(incoming.gid)
+        val existing = rows.firstOrNull { it.username == null || it.username == username }
         if (incoming.deleted) {
             // 软删: 不真删行，bump lastModified 使 since>0 的增量 pull 能取到墓碑。
             // tombstone 实体：删除任何策略下传播（§3.8），v1 行为保持不变。
@@ -327,7 +331,7 @@ class SyncService(
                 existing.lastModified = maxOf(existing.lastModified, incoming.lastModified)
                 historyRepository.save(existing)
                 recordProvenance(username, TAG_HISTORY, naturalKey, incomingDevice)
-            } else if (raw == null) {
+            } else if (rows.isEmpty()) {
                 // 未知 gid 也存墓碑，删除同样能传播到其他设备
                 historyRepository.save(incoming.toHistoryEntity(username))
                 recordProvenance(username, TAG_HISTORY, naturalKey, incomingDevice)
@@ -335,7 +339,7 @@ class SyncService(
             return false
         }
         if (existing == null) {
-            if (raw == null) {
+            if (rows.isEmpty()) {
                 historyRepository.save(incoming.toHistoryEntity(username))
                 recordProvenance(username, TAG_HISTORY, naturalKey, incomingDevice)
             }
@@ -377,10 +381,11 @@ class SyncService(
         val incomingDevice = incoming.deviceId.ifEmpty { pushDeviceId }
         val incomingPlatform = platformOf(incomingDevice)
         val naturalKey = incoming.gid.toString()
-        val raw = downloadRepository.findByGid(incoming.gid)
-        val existing = ownedBy(raw, username) { it.username }
+        // A7-3（P1-1）：gid 查找 List 化（见 mergeFavorite）。
+        val rows = downloadRepository.findAllByGid(incoming.gid)
+        val existing = rows.firstOrNull { it.username == null || it.username == username }
         if (existing == null) {
-            if (raw == null) {
+            if (rows.isEmpty()) {
                 downloadRepository.save(incoming.toDownloadEntity(username))
                 recordProvenance(username, TAG_DOWNLOAD, naturalKey, incomingDevice)
             }
@@ -438,8 +443,9 @@ class SyncService(
         val incomingDevice = incoming.deviceId.ifEmpty { pushDeviceId }
         val incomingPlatform = platformOf(incomingDevice)
         val naturalKey = incoming.gid.toString()
-        val raw = bookmarkRepository.findByGid(incoming.gid)
-        val existing = ownedBy(raw, username) { it.username }
+        // A7-3（P1-1）：gid 查找 List 化（见 mergeFavorite）。
+        val rows = bookmarkRepository.findAllByGid(incoming.gid)
+        val existing = rows.firstOrNull { it.username == null || it.username == username }
         if (incoming.deleted) {
             // 软删: 不真删行，bump lastModified 使 since>0 的增量 pull 能取到墓碑。
             // tombstone 实体：删除任何策略下传播（§3.8），v1 行为保持不变。
@@ -448,7 +454,7 @@ class SyncService(
                 existing.lastModified = maxOf(existing.lastModified, incoming.lastModified)
                 bookmarkRepository.save(existing)
                 recordProvenance(username, TAG_BOOKMARK, naturalKey, incomingDevice)
-            } else if (raw == null) {
+            } else if (rows.isEmpty()) {
                 // 未知 gid 也存墓碑，删除同样能传播到其他设备
                 bookmarkRepository.save(incoming.toBookmarkEntity(username))
                 recordProvenance(username, TAG_BOOKMARK, naturalKey, incomingDevice)
@@ -456,7 +462,7 @@ class SyncService(
             return false
         }
         if (existing == null) {
-            if (raw == null) {
+            if (rows.isEmpty()) {
                 bookmarkRepository.save(incoming.toBookmarkEntity(username))
                 recordProvenance(username, TAG_BOOKMARK, naturalKey, incomingDevice)
             }

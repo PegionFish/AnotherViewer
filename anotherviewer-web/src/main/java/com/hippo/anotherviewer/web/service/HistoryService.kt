@@ -16,6 +16,8 @@ class HistoryService(
     private val usernameProvider: CurrentUsernameProvider,
 ) {
 
+    private val logger = org.slf4j.LoggerFactory.getLogger(HistoryService::class.java)
+
     /**
      * When both [page] and [pageSize] are absent, returns the full history
      * (newest first) to keep the legacy callers working unchanged. Otherwise
@@ -104,7 +106,13 @@ class HistoryService(
      */
     fun addHistory(gid: Long, token: String, title: String?, titleJpn: String?,
                    thumb: String?, category: Int, rating: Float, mode: Int = 0, page: Int? = null) {
-        val existing = historyRepository.findByGid(gid)
+        // A7-3（P1-1）：gid 查找 List 化——同 gid 多行（历史脏数据/属主并存）时单实体
+        // findByGid 派生查询会抛 IncorrectResultSizeDataAccessException。属主行取
+        // 自己的行或 NULL 行；唯一/全部行都属他人 → 跳过更新也不另起一行（保持
+        // gid 全局单行模型，不跨用户改行；require_auth=false 下全员 "default" 无感知）。
+        val user = usernameProvider.currentUsername()
+        val rows = historyRepository.findAllByGid(gid)
+        val existing = rows.firstOrNull { it.username == null || it.username == user }
         if (existing != null) {
             val now = System.currentTimeMillis()
             existing.time = now
@@ -116,10 +124,17 @@ class HistoryService(
             existing.deleted = false
             // A7-1 stamping：更新不覆盖属主（行上 NULL 才落当前用户）；lastModified
             // 必须 bump——它是 App 增量 pull 看到 Web 侧阅读进度/模式变更的唯一信号。
-            if (existing.username == null) existing.username = usernameProvider.currentUsername()
+            if (existing.username == null) existing.username = user
             existing.lastModified = now
             historyRepository.save(existing)
         } else {
+            if (rows.isNotEmpty()) {
+                logger.info(
+                    "addHistory gid={}: existing row owned by another user, update skipped",
+                    gid,
+                )
+                return
+            }
             val entity = HistoryInfoEntity().apply {
                 this.gid = gid
                 this.token = token
@@ -135,7 +150,7 @@ class HistoryService(
                 this.time = System.currentTimeMillis()
                 // A7-1 stamping：新行当场落属主与同步水位（adoptNullOwnership 已短路，
                 // NULL 行不再有后续认养扫描）。
-                this.username = usernameProvider.currentUsername()
+                this.username = user
                 this.lastModified = this.time
             }
             historyRepository.save(entity)
@@ -176,7 +191,21 @@ class HistoryService(
      * （FavoriteService）降级为日志。
      */
     fun updateFavoriteSlot(gid: Long, slot: Int): Boolean {
-        val existing = historyRepository.findByGid(gid) ?: return false
+        // A7-3（P1-1）：List 化 + 属主行选择（见 addHistory）；唯一/全部行都属他人
+        // → 跳过写回并留痕，返回 false（调用方降级为日志，绝不跨用户改行）。
+        val rows = historyRepository.findAllByGid(gid)
+        val existing = rows.firstOrNull {
+            it.username == null || it.username == usernameProvider.currentUsername()
+        }
+        if (existing == null) {
+            if (rows.isNotEmpty()) {
+                logger.info(
+                    "updateFavoriteSlot gid={}: existing row owned by another user, writeback skipped",
+                    gid,
+                )
+            }
+            return false
+        }
         // A7-1：favoriteSlot 是同步可见字段——只在值实际变化时写回并 bump lastModified，
         // 无变化不产生同步流量（增量 pull 以 lastModified > since 为信号）。
         if (existing.favoriteSlot == slot) return true

@@ -66,7 +66,7 @@ class FavoriteServiceTest {
 
     @Test
     fun `category bitmask is never written to favoriteSlot`() {
-        `when`(repository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
 
         service.addFavorite(42L, "token", "Title", 512)
 
@@ -77,7 +77,7 @@ class FavoriteServiceTest {
 
     @Test
     fun `in-range slot is stored as-is`() {
-        `when`(repository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
 
         service.addFavorite(42L, "token", "Title", 512, slot = 3)
 
@@ -88,7 +88,7 @@ class FavoriteServiceTest {
 
     @Test
     fun `slot above 9 is clamped to 9`() {
-        `when`(repository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
 
         service.addFavorite(42L, "token", "Title", 0, slot = 999)
 
@@ -97,7 +97,7 @@ class FavoriteServiceTest {
 
     @Test
     fun `slot below -2 is clamped to -2`() {
-        `when`(repository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
 
         service.addFavorite(42L, "token", "Title", 0, slot = -10)
 
@@ -106,7 +106,7 @@ class FavoriteServiceTest {
 
     @Test
     fun `duplicate gid is rejected without save`() {
-        `when`(repository.findByGid(42L)).thenReturn(LocalFavoriteInfoEntity())
+        `when`(repository.findAllByGid(42L)).thenReturn(listOf(LocalFavoriteInfoEntity()))
 
         assertFalse(service.addFavorite(42L, "token", "Title", 1))
 
@@ -117,9 +117,9 @@ class FavoriteServiceTest {
 
     @Test
     fun `addFavorite stamps username and lastModified`() {
-        `when`(repository.findByGid(42L)).thenReturn(null)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L)).thenReturn(emptyList())
 
         service.addFavorite(42L, "token", "Title", 512)
 
@@ -134,9 +134,9 @@ class FavoriteServiceTest {
     @Test
     fun `removeFavorite soft-deletes with lastModified bump and resets favoriteSlot`() {
         val row = LocalFavoriteInfoEntity().apply { gid = 42L; username = "test-user"; lastModified = 5L }
-        `when`(repository.findByGid(42L)).thenReturn(row)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(listOf(row))
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L)).thenReturn(emptyList())
 
         assertTrue(service.removeFavorite(42L))
 
@@ -151,7 +151,7 @@ class FavoriteServiceTest {
     @Test
     fun `removeFavorite on an already tombstoned row is idempotent without another bump`() {
         val tombstone = LocalFavoriteInfoEntity().apply { gid = 42L; deleted = true; lastModified = 5L }
-        `when`(repository.findByGid(42L)).thenReturn(tombstone)
+        `when`(repository.findAllByGid(42L)).thenReturn(listOf(tombstone))
 
         assertTrue(service.removeFavorite(42L))
 
@@ -164,9 +164,9 @@ class FavoriteServiceTest {
         val tombstone = LocalFavoriteInfoEntity().apply {
             gid = 42L; token = "old"; title = "Old"; deleted = true; lastModified = 5L
         }
-        `when`(repository.findByGid(42L)).thenReturn(tombstone)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(listOf(tombstone))
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L)).thenReturn(emptyList())
 
         assertTrue(service.addFavorite(42L, "new-token", "New Title", 512, slot = 3))
 
@@ -184,10 +184,10 @@ class FavoriteServiceTest {
     @Test
     fun `favoriteSlot writeback skips tombstoned download rows`() {
         // D11：回写不得复活墓碑下载行。
-        `when`(repository.findByGid(42L)).thenReturn(null)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L))
-            .thenReturn(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L; deleted = true })
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L))
+            .thenReturn(listOf(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L; deleted = true }))
 
         assertTrue(service.addFavorite(42L, "token", "Title", 512))
 
@@ -200,9 +200,9 @@ class FavoriteServiceTest {
     fun `addFavorite writes the slot back to the existing history row`() {
         // 详情读取链（GalleryService 历史分支）优先历史行，不回写则重进详情
         // favoriteSlot 恒 -2。回写值须与收藏行一致（含夹紧后的 slot）。
-        `when`(repository.findByGid(42L)).thenReturn(null)
-        `when`(historyRepository.findByGid(42L))
-            .thenReturn(com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply { gid = 42L })
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(historyRepository.findAllByGid(42L))
+            .thenReturn(listOf(com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply { gid = 42L }))
 
         service.addFavorite(42L, "token", "Title", 512, slot = 999)
 
@@ -214,9 +214,9 @@ class FavoriteServiceTest {
     @Test
     fun `removeFavorite resets the history row favoriteSlot to -2`() {
         // 对称清除：取消收藏后重进详情不残留收藏态（置回未收藏）。
-        `when`(repository.findByGid(42L)).thenReturn(LocalFavoriteInfoEntity())
-        `when`(historyRepository.findByGid(42L))
-            .thenReturn(com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply { gid = 42L; favoriteSlot = 3 })
+        `when`(repository.findAllByGid(42L)).thenReturn(listOf(LocalFavoriteInfoEntity()))
+        `when`(historyRepository.findAllByGid(42L))
+            .thenReturn(listOf(com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply { gid = 42L; favoriteSlot = 3 }))
 
         assertTrue(service.removeFavorite(42L))
 
@@ -228,8 +228,8 @@ class FavoriteServiceTest {
     @Test
     fun `addFavorite without a history row does not create one`() {
         // 收藏不凭空造历史：无历史行仅记日志，historyRepository.save 不发生。
-        `when`(repository.findByGid(42L)).thenReturn(null)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
 
         assertTrue(service.addFavorite(42L, "token", "Title", 512))
 
@@ -241,10 +241,10 @@ class FavoriteServiceTest {
     fun `addFavorite writes the slot back to an existing download row`() {
         // 详情读取链 download 分支优先于 history 分支：已下载画廊的详情/下载
         // 列表以 download 行为 favoriteSlot 来源，同样必须回写。
-        `when`(repository.findByGid(42L)).thenReturn(null)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L))
-            .thenReturn(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L })
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L))
+            .thenReturn(listOf(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L }))
 
         service.addFavorite(42L, "token", "Title", 512, slot = 999)
 
@@ -255,10 +255,10 @@ class FavoriteServiceTest {
 
     @Test
     fun `removeFavorite resets the download row favoriteSlot to -2`() {
-        `when`(repository.findByGid(42L)).thenReturn(LocalFavoriteInfoEntity())
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L))
-            .thenReturn(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L; favoriteSlot = 3 })
+        `when`(repository.findAllByGid(42L)).thenReturn(listOf(LocalFavoriteInfoEntity()))
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L))
+            .thenReturn(listOf(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L; favoriteSlot = 3 }))
 
         assertTrue(service.removeFavorite(42L))
 
@@ -269,9 +269,9 @@ class FavoriteServiceTest {
 
     @Test
     fun `addFavorite without download row does not touch download repository`() {
-        `when`(repository.findByGid(42L)).thenReturn(null)
-        `when`(historyRepository.findByGid(42L)).thenReturn(null)
-        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+        `when`(repository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(historyRepository.findAllByGid(42L)).thenReturn(emptyList())
+        `when`(downloadRepository.findAllByGid(42L)).thenReturn(emptyList())
 
         assertTrue(service.addFavorite(42L, "token", "Title", 512))
 

@@ -238,7 +238,9 @@ class DownloadService(
      * 活行仍拒绝（幂等防重复添加）。
      */
     fun addDownload(request: DownloadAddRequest): Boolean {
-        val existing = downloadRepository.findByGid(request.gid)
+        // A7-3（P1-1）：List 化防同 gid 多行炸单实体派生查询；firstOrNull 与原
+        // findByGid 等价（单行模型下语义不变，多行脏数据不再毒化请求）。
+        val existing = downloadRepository.findAllByGid(request.gid).firstOrNull()
         val now = System.currentTimeMillis()
         // 2026-08-30：目录命名对齐 Android——`{gid}-{title}`（人读可辨），
         // 标题缺席回落纯 gid（旧布局兼容）。
@@ -449,7 +451,8 @@ class DownloadService(
      */
     fun completeIfVerified(gid: Long) {
         // A7-2（D9）：墓碑行不做磁盘校验「完成化」（复活表象）。
-        val entity = downloadRepository.findByGid(gid)?.takeUnless { it.deleted } ?: return
+        // A7-3（P1-1）：查找 List 化（firstOrNull 等价，多行脏数据不再毒化请求）。
+        val entity = downloadRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted } ?: return
         if (entity.state == 3) return
         val total = entity.total
         if (total <= 0) return

@@ -643,6 +643,9 @@ class SyncStrategyMatrixTest {
             val e = inv.getArgument<LocalFavoriteInfoEntity>(0); store[e.gid] = e; e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<LocalFavoriteInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv ->
@@ -661,6 +664,9 @@ class SyncStrategyMatrixTest {
             val e = inv.getArgument<HistoryInfoEntity>(0); store[e.gid] = e; e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<HistoryInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv ->
@@ -679,6 +685,9 @@ class SyncStrategyMatrixTest {
             val e = inv.getArgument<DownloadInfoEntity>(0); store[e.gid] = e; e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<DownloadInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv ->
@@ -697,6 +706,9 @@ class SyncStrategyMatrixTest {
             val e = inv.getArgument<BookmarkInfoEntity>(0); store[e.gid] = e; e
         }
         `when`(repo.findByGid(anyLong())).thenAnswer { inv -> store[inv.getArgument<Long>(0)] }
+        `when`(repo.findAllByGid(anyLong())).thenAnswer { inv ->
+            store[inv.getArgument<Long>(0)]?.let { listOf(it) } ?: emptyList<BookmarkInfoEntity>()
+        }
         `when`(repo.findAllByUsernameIsNull()).thenAnswer { store.values.filter { it.username == null } }
         `when`(repo.findAll()).thenAnswer { store.values.toList() }
         `when`(repo.findByUsername(anyString())).thenAnswer { inv ->

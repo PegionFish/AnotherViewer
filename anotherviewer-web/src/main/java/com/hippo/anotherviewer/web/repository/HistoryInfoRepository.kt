@@ -10,6 +10,12 @@ import org.springframework.data.repository.query.Param
 
 interface HistoryInfoRepository : JpaRepository<HistoryInfoEntity, Long> {
     fun findByGid(gid: Long): HistoryInfoEntity?
+    /**
+     * A7-3（P1-1）：同 gid 多行（历史脏数据/属主并存）时单实体 [findByGid] 派生查询
+     * 会抛 IncorrectResultSizeDataAccessException，毒化整条同步通道。同步仲裁与
+     * 写前查找一律走本 List 版本 + 属主/存活 firstOrNull。
+     */
+    fun findAllByGid(gid: Long): List<HistoryInfoEntity>
     /** S7: 列表端点（history/favorites/downloads）批量取阅读进度，避免逐行 findByGid 的 N+1。 */
     fun findByGidIn(gids: Collection<Long>): List<HistoryInfoEntity>
     fun findAllByOrderByTimeDesc(): List<HistoryInfoEntity>

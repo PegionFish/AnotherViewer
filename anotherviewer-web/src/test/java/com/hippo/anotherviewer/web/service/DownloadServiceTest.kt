@@ -176,7 +176,7 @@ class DownloadServiceTest {
                 id = 7L; gid = 99L; token = "tok"; total = 5; done = 2; state = 0
                 downloadDir = "dl-test-99"
             }
-            `when`(downloadRepository.findByGid(99L)).thenReturn(entity)
+            `when`(downloadRepository.findAllByGid(99L)).thenReturn(listOf(entity))
             `when`(downloadRepository.findById(7L)).thenReturn(Optional.of(entity))
             `when`(downloadRepository.save(any(DownloadInfoEntity::class.java))).thenAnswer { it.getArgument(0) }
 
@@ -231,7 +231,7 @@ class DownloadServiceTest {
 
     @Test
     fun `addDownload stamps username and lastModified on the new row`() {
-        `when`(downloadRepository.findByGid(77L)).thenReturn(null)
+        `when`(downloadRepository.findAllByGid(77L)).thenReturn(emptyList())
 
         assertTrue(service.addDownload(DownloadAddRequest(gid = 77L, token = "a1b2c3d4e5", title = "T", thumb = null)))
 
@@ -316,7 +316,7 @@ class DownloadServiceTest {
             id = 9L; gid = 91L; token = "old"; title = "Old"; state = 3; done = 7
             deleted = true
         }
-        `when`(downloadRepository.findByGid(91L)).thenReturn(tombstone)
+        `when`(downloadRepository.findAllByGid(91L)).thenReturn(listOf(tombstone))
         `when`(downloadRepository.save(any(DownloadInfoEntity::class.java))).thenAnswer { it.getArgument(0) }
 
         assertTrue(service.addDownload(DownloadAddRequest(gid = 91L, token = "new", title = "New", thumb = null)))
