@@ -173,10 +173,12 @@ Chrome/Chromium 读系统信任库，上述命令即可；**Firefox 有独立证
 | SW 注册 / 离线缓存 | ✗ | ✗ | ✗ | ✗ | ✗ |
 | 浏览器「安装」入口 | 无安装项；「添加到主屏幕」退化为网页快捷方式（非 standalone） | 无安装图标/菜单项 | 同左 | 同左 | 「添加到主屏幕/程序坞」可添加，但为普通网页快捷方式（无 SW/离线） |
 | 服务器地址配置（引导卡 / 设置页 / `/setup`） | ✓ | ✓ | ✓ | ✓ | ✓ |
-| 比例评估台 `/eval` | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 比例评估台 `/eval` | ✗（后端 `X-Frame-Options: DENY` 连同源 iframe 也拒显，取景框空白） | 同左 | 同左 | 同左 | 同左 |
 | URL 直达快捷方式（书签/主屏指向 `/eval?ratio=...` 等） | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-结论：**功能层全绿**，受损的只有安装层（SW/离线/standalone）。要安装层，走第 4 节轨道 B（或第 3 节轨道 A 兜底）。
+结论：功能层除 `/eval` 外全绿，受损的还有安装层（SW/离线/standalone）。要安装层与 `/eval`，走第 4 节轨道 B（或第 3 节轨道 A 兜底——但轨道 A 的 flag 只解决安全上下文，**不解 `X-Frame-Options`**，故轨道 A 下 `/eval` 仍不可用）。
+
+> **根因与修复面（INT-4 实测，2026-09-06）**：后端 `SecurityConfig.kt`（M-4 加固）对文档响应固定发 `X-Frame-Options: DENY` 与 `Content-Security-Policy: … connect-src 'self' …`。前者使 `/eval` 的同源 iframe 被浏览器拒显；后者会拦掉远程模式 fetch 与 `/setup` 对非同源主机的「测试连接」。**两处均属平台代码，按红线记录不改**；轨道 B 的反代在代理层做了两处最小放宽（`X-Frame-Options: SAMEORIGIN` + CSP 原策略 `connect-src` 追加 `http: https:`，见 `deploy/caddy-anotherviewer.conf` 头注释），8443 轨道下上述能力全部恢复。
 
 ## 7. 远程模式边界
 
@@ -186,3 +188,5 @@ Chrome/Chromium 读系统信任库，上述命令即可；**Firefox 有独立证
 - **WS**：`ANOTHERVIEWER_WS_ORIGINS` 默认 `*`，远程模式通常无需改动。
 - **图片端点边界**：`<img>` 标签无法携带 `Authorization` 头——目标服务器 `require_auth=true` 时，**远程模式下的图片端点不可用**（既有边界，与 PWA 无关）；`require_auth=false` 时正常。
 - **主题同步**：外壳与 iframe 同源、共享 localStorage（登录态/主题键互通），但两者是**两个独立的 Pinia 实例**——在外壳改主题不会即时传导进 iframe；主题请在 **iframe 内**的设置中切换（现状行为，不修）。
+- **安全响应头（必须经轨道 B 反代）**：见第 6 节根因说明——反代需把 `X-Frame-Options` 改写为 `SAMEORIGIN`、CSP `connect-src` 追加 `http: https:`，否则 `/eval` 与远程模式不可用（`deploy/caddy-anotherviewer.conf` 已内置；nginx 等价指令见 `docs/deployment.md` 附录）。
+- **离线壳需二次加载预热**：SW 的 install 只预缓存壳入口（`/`、`/index.html`、manifest、图标），内容哈希 JS/CSS 在首次受控 fetch 时才入壳缓存——**首次访问后立即断网 reload 会白屏**，第二次在线加载后离线壳才完整可用（SW 设计使然，非缺陷）。

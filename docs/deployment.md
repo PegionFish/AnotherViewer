@@ -318,6 +318,15 @@ PWA 安装层（Service Worker、浏览器「安装」入口）要求**安全上
 
 > 与 `deploy/Caddyfile` 的分工：那份面向公网域名（Caddy 自动获取 Let's Encrypt 证书，监听 443）；本节用的是 `deploy/caddy-anotherviewer.conf`（LAN 无域名，mkcert 证书，监听 8443），二选一。
 
+### 0. 安全响应头改写（PWA 必需，conf 已内置）
+
+后端 `SecurityConfig.kt`（M-4 加固）对文档响应固定发 `X-Frame-Options: DENY` 与 `Content-Security-Policy: … connect-src 'self' …`。两者会分别废掉 PWA 两个能力：**`/eval` 比例评估台**（DENY 连同源 iframe 也拒显）与**远程模式 + `/setup` 跨主机探活**（`connect-src 'self'` 在浏览器层拦截跨源 fetch，CORS 配置再对也无效，INT-4 实测）。这两处属平台代码，按红线记录不改——由本轨道的反代在代理层覆盖响应头做两处**最小放宽**（`deploy/caddy-anotherviewer.conf` 的 `header` 块已内置）：
+
+- `X-Frame-Options: DENY` → `SAMEORIGIN`（仅放开同源 framing，`/eval` 的 iframe 与外壳同源，够用）；
+- CSP 原策略逐项保留，`connect-src` 由 `'self' ws: wss:` 追加为 `'self' http: https: ws: wss:`（放行任意 LAN serverBase；威胁模型=私有网络单用户，与 `ANOTHERVIEWER_CORS_ORIGINS=*` 同一取决策）。
+
+回滚：删掉 conf 里的 `header` 块 reload 即恢复后端原头。若将来后端自行放宽这两处（记录在案的建议：`frameOptions().sameOrigin()` + CSP `connect-src` 追加 `http: https:`），删掉反代改写即可，双层不会打架。
+
 ### 1. 生成证书（mkcert）
 
 141 上安装 mkcert（Arch：`sudo pacman -S mkcert nss`；Debian/Ubuntu：`sudo apt install mkcert libnss3-tools`；Windows/macOS 见 `scripts/gen-lan-cert.sh` 报错提示），然后：
@@ -398,6 +407,11 @@ server {
         # WebSocket 升级（/ws SockJS）
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection $connection_upgrade;
+        # 安全响应头改写（PWA 必需，见「0. 安全响应头改写」；与 Caddy conf 的 header 块等价）
+        proxy_hide_header X-Frame-Options;
+        add_header X-Frame-Options SAMEORIGIN always;
+        proxy_hide_header Content-Security-Policy;
+        add_header Content-Security-Policy "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' http: https: ws: wss:; font-src 'self' data:; object-src 'none'; base-uri 'self'; form-action 'self'" always;
     }
 }
 ```
