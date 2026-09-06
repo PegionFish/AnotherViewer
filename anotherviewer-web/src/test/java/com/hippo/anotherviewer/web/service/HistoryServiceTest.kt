@@ -12,6 +12,7 @@ import com.hippo.anotherviewer.web.argThatK
 import com.hippo.anotherviewer.web.captureK
 import com.hippo.anotherviewer.web.eq
 import org.springframework.data.domain.PageImpl
+import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 
 class HistoryServiceTest {
@@ -233,41 +234,88 @@ class HistoryServiceTest {
     }
 
     @Test
-    fun `q filter runs in memory without pagination params`() {
-        `when`(historyRepository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(entity(3, 3000, "Futanari Story"), entity(2, 2000, "Plain"), entity(1, 1000, "Futa and More")))
+    fun `q filter is answered by DB paging without a full-table load`() {
+        // P2: q 子串过滤下沉 DB（LIKE + DB 分页）——不再 findAllByOrderByTimeDesc
+        // 不分页全表载入；total = DB 匹配总数，信封与旧内存路径一致。
+        val pageable = PageRequest.of(0, 50)
+        `when`(historyRepository.findLiveByTitleOrTitleJpnContainingPaged("futa", pageable))
+            .thenReturn(
+                PageImpl(
+                    listOf(entity(3, 3000, "Futanari Story"), entity(1, 1000, "Futa and More")),
+                    pageable,
+                    2,
+                )
+            )
 
         val response = historyService.listHistory(q = "futa")
 
         assertEquals(listOf(3L, 1L), response.history.map { it.gid })
         assertEquals(2, response.total)
-        verify(historyRepository).findAllByOrderByTimeDesc()
-        verify(historyRepository, never()).findHistoryPaged(any(Pageable::class.java))
+        verify(historyRepository).findLiveByTitleOrTitleJpnContainingPaged("futa", pageable)
+        verify(historyRepository, never()).findAllByOrderByTimeDesc()
     }
 
     @Test
-    fun `q filter honours memory pagination with match count as total`() {
-        // 仓库按时间倒序返回（最新在前），内存路径保持该顺序。
-        `when`(historyRepository.findAllByOrderByTimeDesc())
-            .thenReturn((5L downTo 1L).map { entity(it, it * 1000) })
+    fun `q filter honours DB pagination with match count as total`() {
+        // 0 基页码透传 DB（page=1 → PageRequest.of(1, 2)），total = 匹配总数 5。
+        val pageable = PageRequest.of(1, 2)
+        `when`(historyRepository.findLiveByTitleOrTitleJpnContainingPaged("Title", pageable))
+            .thenReturn(
+                PageImpl(
+                    listOf(entity(3, 3000, "Title 3"), entity(2, 2000, "Title 2")),
+                    pageable,
+                    5,
+                )
+            )
 
         val response = historyService.listHistory(page = 1, pageSize = 2, q = "Title")
 
-        // 0 基页码：drop(2).take(2)，total = 匹配数 5。
         assertEquals(listOf(3L, 2L), response.history.map { it.gid })
         assertEquals(5, response.total)
-        verify(historyRepository, never()).findHistoryPaged(any(Pageable::class.java))
+        verify(historyRepository).findLiveByTitleOrTitleJpnContainingPaged("Title", pageable)
+        verify(historyRepository, never()).findAllByOrderByTimeDesc()
     }
 
     @Test
-    fun `regex filter matches title or titleJpn`() {
-        `when`(historyRepository.findAllByOrderByTimeDesc())
+    fun `regex filter runs only on the DB pre-filtered set`() {
+        // P2: regex 保内存语义，但先推字面种子 "futa"（来自 (?i)^futa）做 DB LIKE
+        // 预过滤，不再全表载入；titleJpn 命中同样生效。
+        `when`(historyRepository.findLiveByTitleOrTitleJpnContaining("futa"))
             .thenReturn(listOf(entity(1, 3000, "Plain", "フタナリ"), entity(2, 2000, "Futanari Story")))
 
         val response = historyService.listHistory(q = "(?i)^futa", regex = true)
 
         assertEquals(listOf(2L), response.history.map { it.gid })
         assertEquals(1, response.total)
+        verify(historyRepository).findLiveByTitleOrTitleJpnContaining("futa")
+        verify(historyRepository, never()).findAllByOrderByTimeDesc()
+    }
+
+    @Test
+    fun `regex without derivable literal seed falls back to the legacy full-set path`() {
+        // 顶层交替（a|b）无公共保证字面 → 种子为 null，回退存量全量路径（语义优先）。
+        `when`(historyRepository.findAllByOrderByTimeDesc())
+            .thenReturn(listOf(entity(1, 3000, "alpha"), entity(2, 2000, "bravo")))
+
+        val response = historyService.listHistory(q = "alpha|bravo", regex = true)
+
+        assertEquals(listOf(1L, 2L), response.history.map { it.gid })
+        assertEquals(2, response.total)
+    }
+
+    @Test
+    fun `regex literal seed extraction stays conservative`() {
+        // 种子必须是「任何匹配都必然包含」的字面串：量词可缺席的尾字符要丢、
+        // 组/类内容不取、顶层交替直接放弃（null）——偏长会漏配。
+        assertEquals("futa", regexLiteralSeed("(?i)^futa"))
+        assertEquals("tle", regexLiteralSeed("T.tle"))
+        assertEquals("colo", regexLiteralSeed("colou?r"))
+        assertEquals("uta", regexLiteralSeed("[Ff]uta"))
+        assertEquals("c", regexLiteralSeed("(ab)*c"))
+        assertEquals("hello", regexLiteralSeed("hello"))
+        assertNull(regexLiteralSeed("alpha|bravo"))
+        assertNull(regexLiteralSeed(".*"))
+        assertNull(regexLiteralSeed(""))
     }
 
     @Test
@@ -277,18 +325,22 @@ class HistoryServiceTest {
         assertThrows(IllegalArgumentException::class.java) {
             historyService.listHistory(q = "(", regex = true)
         }
+        // 非法正则在进 DB 之前抛出，不触发任何全表查询。
+        verify(historyRepository, never()).findAllByOrderByTimeDesc()
     }
 
     @Test
     fun `regex takes precedence over substring when regex is true`() {
-        `when`(historyRepository.findAllByOrderByTimeDesc())
+        // 种子 "tle"（来自 T.tle）做 DB 预过滤；内存 regex 精确过滤——
+        // "T.tle" 作为子串不匹配任何 title，作为正则命中 "Title 1"。
+        `when`(historyRepository.findLiveByTitleOrTitleJpnContaining("tle"))
             .thenReturn(listOf(entity(1, 3000, "Title 1"), entity(2, 2000, "Plain")))
 
-        // "T.tle" 作为子串不匹配任何 title；作为正则 T+任意字符+tle 命中 "Title 1"。
         val response = historyService.listHistory(q = "T.tle", regex = true)
 
         assertEquals(listOf(1L), response.history.map { it.gid })
         assertEquals(1, response.total)
+        verify(historyRepository, never()).findAllByOrderByTimeDesc()
     }
 
     @Test

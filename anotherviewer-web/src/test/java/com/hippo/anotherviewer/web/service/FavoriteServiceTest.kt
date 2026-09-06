@@ -16,6 +16,8 @@ import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
+import org.springframework.data.domain.PageImpl
+import org.springframework.data.domain.PageRequest
 
 /**
  * Contract tests for [FavoriteService], per audit item N-5:
@@ -184,12 +186,18 @@ class FavoriteServiceTest {
         verify(downloadRepository, never()).save(any(com.hippo.anotherviewer.web.entity.DownloadInfoEntity::class.java))
     }
 
+    // ── listFavorites（P2: slot/q 过滤 + 分页下沉 DB，不再不分页全表载入）──
+    // 槽位/墓碑/q 的筛选语义现由仓储 JPQL（findLiveBySlot*）承载；单元层钉住
+    // 参数转发、条目映射与信封兼容，JPQL 语义由 SqliteIndexDdlTest 的 JPA 切片
+    // 启动做语法校验。
+
     @Test
     fun `listFavorites with slot 0 returns only the default folder (-1 and 0)`() {
         // F-UX5: tab 0 对齐 app FavoritesScene 首签——默认夹（-1）与显式
-        // Favorites 0（0）同列，自定义夹（5）不再混入。
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(favEntity(1, 0), favEntity(2, -1), favEntity(3, 5)))
+        // Favorites 0（0）同列，自定义夹（5）不再混入（JPQL in (-1,0) 筛选）。
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(0, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0), favEntity(2, -1)), pageable, 2))
 
         val response = service.listFavorites(0, 1, 20)
 
@@ -200,8 +208,11 @@ class FavoriteServiceTest {
     @Test
     fun `listFavorites items carry the row's real favoriteSlot`() {
         // F-UX5: ♥ 徽章数据源——条目随行携带真实 slot，前端不再退回页签号。
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(favEntity(1, 0), favEntity(2, -1), favEntity(3, 5)))
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(0, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0), favEntity(2, -1)), pageable, 2))
+        `when`(repository.findLiveBySlotPaged(5, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(3, 5)), pageable, 1))
 
         val response = service.listFavorites(0, 1, 20)
 
@@ -213,8 +224,9 @@ class FavoriteServiceTest {
     fun `listFavorites items carry readProgress from history rows`() {
         // 阅读进度角标数据源：同 gid 历史行的 page 批量填充（findByGidIn 单次），
         // 无历史行的条目为 null。
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(favEntity(1, 0), favEntity(2, -1)))
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(-1, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0), favEntity(2, -1)), pageable, 2))
         val history1 = com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply {
             gid = 1L
             page = 37
@@ -230,8 +242,9 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites filters by slot`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(favEntity(1, 0), favEntity(2, -1), favEntity(3, 5)))
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(5, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(3, 5)), pageable, 1))
 
         val response = service.listFavorites(5, 1, 20)
 
@@ -240,8 +253,9 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites with negative slot returns all slots`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(favEntity(1, 0), favEntity(2, -1), favEntity(3, 5)))
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(-1, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0), favEntity(2, -1), favEntity(3, 5)), pageable, 3))
 
         val response = service.listFavorites(-1, 1, 20)
 
@@ -250,9 +264,11 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites hides tombstone rows deleted by sync`() {
-        val live = favEntity(1, 0)
-        val tombstone = favEntity(2, 3).apply { deleted = true }
-        `when`(repository.findAllByOrderByTimeDesc()).thenReturn(listOf(live, tombstone))
+        // 墓碑行（deleted=true 的同步删除记录）由 JPQL deleted = false 排除——
+        // mock 只回存活行，钉住「墓碑不进 REST 列表」契约（对齐 HistoryService）。
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(0, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0)), pageable, 1))
 
         val response = service.listFavorites(0, 1, 20)
 
@@ -262,9 +278,10 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites tombstones do not count into pagination`() {
-        val live = favEntity(1, 0)
-        val tombstone = favEntity(2, 3).apply { deleted = true }
-        `when`(repository.findAllByOrderByTimeDesc()).thenReturn(listOf(live, tombstone))
+        // total/分页只按存活行计（R4-17）：全夹墓碑 → 空页 + totalPages 0。
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(3, pageable))
+            .thenReturn(PageImpl(emptyList(), pageable, 0))
 
         val response = service.listFavorites(3, 1, 20)
 
@@ -274,8 +291,9 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites with only tombstones returns an empty list`() {
-        val tombstone = favEntity(2, 3).apply { deleted = true }
-        `when`(repository.findAllByOrderByTimeDesc()).thenReturn(listOf(tombstone))
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(0, pageable))
+            .thenReturn(PageImpl(emptyList(), pageable, 0))
 
         val response = service.listFavorites(0, 1, 20)
 
@@ -285,30 +303,31 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites q filters by case-insensitive substring on title`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(
-                favEntity(1, 0, "Futanari Story"),
-                favEntity(2, 0, "Plain"),
-                favEntity(3, 0, "Futa and More"),
-            ))
+        // q 下沉 DB（LIKE）：total/分页按匹配后行数计。
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotAndTitlePaged(0, "futa", pageable))
+            .thenReturn(
+                PageImpl(
+                    listOf(favEntity(1, 0, "Futanari Story"), favEntity(3, 0, "Futa and More")),
+                    pageable,
+                    2,
+                )
+            )
 
         val response = service.listFavorites(0, 1, 20, q = "futa")
 
         assertEquals(listOf(1L, 3L), response.favorites.map { it.gid })
         assertEquals(2, response.favorites.size)
-        // total/分页按匹配后行数计。
         assertEquals(1, response.totalPages)
     }
 
     @Test
     fun `listFavorites q matches titleJpn and keeps slot filter`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(
-                favEntity(1, 0, "Plain", "フタナリ"),
-                favEntity(2, 5, "Futanari Story"),
-            ))
+        // slot 过滤先行（与 q 同一条 JPQL）：仅默认夹（0）→ q 命中 titleJpn。
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotAndTitlePaged(0, "フタナリ", pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0, "Plain", "フタナリ")), pageable, 1))
 
-        // slot 过滤先行：仅默认夹（0）→ q 命中 titleJpn。
         val response = service.listFavorites(0, 1, 20, q = "フタナリ")
 
         assertEquals(listOf(1L), response.favorites.map { it.gid })
@@ -317,36 +336,35 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites regex matches title`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(
-                favEntity(1, 0, "Futanari Story"),
-                favEntity(2, 0, "Plain"),
-            ))
+        // regex 保内存语义，但只跑在 DB 预过滤集上：slot 已下沉 + 字面种子
+        // "futa"（来自 (?i)^futa）LIKE 窗口——不触发不分页全表载入。
+        `when`(repository.findLiveBySlotAndTitle(-1, "futa"))
+            .thenReturn(listOf(favEntity(1, 0, "Futanari Story"), favEntity(2, 0, "Plain")))
 
         val response = service.listFavorites(-1, 1, 20, q = "(?i)^futa", regex = true)
 
         assertEquals(listOf(1L), response.favorites.map { it.gid })
         assertEquals(1, response.totalPages)
+        verify(repository, never()).findAllByOrderByTimeDesc()
     }
 
     @Test
     fun `listFavorites invalid regex throws IllegalArgumentException`() {
-        `when`(repository.findAllByOrderByTimeDesc()).thenReturn(listOf(favEntity(1, 0)))
-
         assertThrows(IllegalArgumentException::class.java) {
             service.listFavorites(0, 1, 20, q = "(", regex = true)
         }
+        // 非法正则在进 DB 之前抛出，不触发任何查询。
+        verify(repository, never()).findAllByOrderByTimeDesc()
+        verify(repository, never()).findLiveBySlot(0)
     }
 
     @Test
     fun `listFavorites regex takes precedence over substring when regex is true`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(
-                favEntity(1, 0, "Title 1"),
-                favEntity(2, 0, "Plain"),
-            ))
+        // 种子 "tle"（来自 T.tle）做 DB 预过滤；内存 regex 精确过滤——
+        // "T.tle" 作为子串不匹配任何 title，作为正则命中 "Title 1"。
+        `when`(repository.findLiveBySlotAndTitle(0, "tle"))
+            .thenReturn(listOf(favEntity(1, 0, "Title 1"), favEntity(2, 0, "Plain")))
 
-        // "T.tle" 作为子串不匹配任何 title；作为正则 T+任意字符+tle 命中 "Title 1"。
         val response = service.listFavorites(0, 1, 20, q = "T.tle", regex = true)
 
         assertEquals(listOf(1L), response.favorites.map { it.gid })
@@ -354,13 +372,64 @@ class FavoriteServiceTest {
 
     @Test
     fun `listFavorites blank q falls back to unfiltered list`() {
-        `when`(repository.findAllByOrderByTimeDesc())
-            .thenReturn(listOf(favEntity(1, 0), favEntity(2, 0)))
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(0, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0), favEntity(2, 0)), pageable, 2))
 
         val response = service.listFavorites(0, 1, 20, q = "   ")
 
         assertEquals(listOf(1L, 2L), response.favorites.map { it.gid })
         assertEquals(1, response.totalPages)
+    }
+
+    @Test
+    fun `listFavorites envelope stays backward compatible and gains page pageSize total`() {
+        // W2-B2: 信封向后兼容——favorites/totalPages/currentPage 原样保留，
+        // 新增 page/pageSize/total（W3-F4 前端切换消费，旧客户端忽略不受影响）。
+        // 页大小 2 + 2 条内容 + total 7：PageImpl 对「页装得下全集」的声明会
+        // 把 total 钳到 offset+content.size，故取部分页让 7 语义成立。
+        val pageable = PageRequest.of(0, 2)
+        `when`(repository.findLiveBySlotPaged(-1, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(1, 0), favEntity(2, 0)), pageable, 7))
+
+        val response = service.listFavorites(-1, 1, 2)
+
+        assertEquals(2, response.favorites.size) // data 数组保留
+        assertEquals(4, response.totalPages)     // 既有字段语义不变
+        assertEquals(1, response.currentPage)
+        assertEquals(1, response.page)           // 新增
+        assertEquals(2, response.pageSize)
+        assertEquals(7, response.total)
+    }
+
+    @Test
+    fun `listFavorites beyond page one uses a 0-based DB page index`() {
+        // 1 起契约页码 → PageRequest.of(page - 1, size)（page=2 → 索引 1）。
+        val pageable = PageRequest.of(1, 2)
+        `when`(repository.findLiveBySlotPaged(-1, pageable))
+            .thenReturn(PageImpl(listOf(favEntity(2, 0), favEntity(3, 5)), pageable, 5))
+
+        val response = service.listFavorites(-1, 2, 2)
+
+        assertEquals(listOf(2L, 3L), response.favorites.map { it.gid })
+        assertEquals(2, response.currentPage)
+        assertEquals(3, response.totalPages)
+        assertEquals(2, response.page)
+        assertEquals(2, response.pageSize)
+    }
+
+    @Test
+    fun `listFavorites never loads the unpaged full table`() {
+        // P2 结构性断言：万行级场景下不允许出现不分页全表载入——
+        // 无 q 路径必须走 DB 分页查询（findLiveBySlotPaged）。
+        val pageable = PageRequest.of(0, 20)
+        `when`(repository.findLiveBySlotPaged(-1, pageable))
+            .thenReturn(PageImpl(emptyList(), pageable, 0))
+
+        service.listFavorites(-1, 1, 20)
+
+        verify(repository, never()).findAllByOrderByTimeDesc()
+        verify(repository).findLiveBySlotPaged(-1, pageable)
     }
 
     private fun favEntity(gid: Long, slot: Int, title: String, titleJpn: String? = null): LocalFavoriteInfoEntity {

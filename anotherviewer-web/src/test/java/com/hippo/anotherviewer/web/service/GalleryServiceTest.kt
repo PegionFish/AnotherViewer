@@ -839,4 +839,22 @@ class GalleryServiceTest {
         assertEquals("Favorite title", detail!!.title)
         verify(h.galleryLookup, never()).getDetailCached(anyLong(), anyString())
     }
+
+    @Test
+    fun `searchCache is bounded like feedCache with maximumSize 128`() {
+        // P2: 站点搜索缓存与 feedCache 对齐补 maximumSize(128)——长会话大量不同
+        // 关键词不再无限堆积。私有缓存经反射取出，灌入超限条目后强制清理，
+        // 断言上限生效。
+        val h = harness()
+        val field = GalleryService::class.java.getDeclaredField("searchCache")
+        field.isAccessible = true
+        @Suppress("UNCHECKED_CAST")
+        val cache = field.get(h.service) as com.github.benmanes.caffeine.cache.Cache<String, com.hippo.anotherviewer.web.dto.GalleryListResponse>
+
+        val response = mock(com.hippo.anotherviewer.web.dto.GalleryListResponse::class.java)
+        repeat(150) { cache.put("search-key-$it", response) }
+        cache.cleanUp()
+
+        assertEquals(128L, cache.estimatedSize())
+    }
 }

@@ -29,6 +29,34 @@ interface HistoryInfoRepository : JpaRepository<HistoryInfoEntity, Long> {
     /** DB-paginated local history filtered by category, newest first. */
     fun findByCategoryOrderByTimeDesc(category: Int, pageable: Pageable): Page<HistoryInfoEntity>
 
+    /**
+     * P2: 子串 q 过滤下沉 DB（title/titleJpn LIKE %kw%，大小写不敏感，仅存活行），
+     * time 倒序 + DB 分页——替代旧的不分页全表载入 + 内存过滤路径。
+     * 已知取舍：q 中的 LIKE 通配符（%/_）不转义，只可能放大匹配面、不会漏配，
+     * 与下方既有 keyword 先例查询保持同一行为。
+     */
+    @Query("""
+        select h from HistoryInfoEntity h
+        where h.deleted = false
+          and ( lower(h.title) like lower(concat('%', :keyword, '%'))
+             or lower(h.titleJpn) like lower(concat('%', :keyword, '%')) )
+        order by h.time desc
+    """)
+    fun findLiveByTitleOrTitleJpnContainingPaged(
+        @Param("keyword") keyword: String,
+        pageable: Pageable
+    ): Page<HistoryInfoEntity>
+
+    /** P2: 同上但不分页——仅作 regex 路径的 DB 预过滤窗口（内存 regex 只跑在该集合上）。 */
+    @Query("""
+        select h from HistoryInfoEntity h
+        where h.deleted = false
+          and ( lower(h.title) like lower(concat('%', :keyword, '%'))
+             or lower(h.titleJpn) like lower(concat('%', :keyword, '%')) )
+        order by h.time desc
+    """)
+    fun findLiveByTitleOrTitleJpnContaining(@Param("keyword") keyword: String): List<HistoryInfoEntity>
+
     /** DB-paginated local history matching keyword in title/titleJpn (LIKE %kw%, case-insensitive), newest first. */
     @Query("""
         select h from HistoryInfoEntity h

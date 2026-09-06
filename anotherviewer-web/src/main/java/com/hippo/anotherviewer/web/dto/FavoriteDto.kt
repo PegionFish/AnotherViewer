@@ -6,7 +6,14 @@ import jakarta.validation.constraints.Size
 data class FavoriteListResponse(
     val favorites: List<FavoriteItem>,
     val totalPages: Int,
-    val currentPage: Int
+    val currentPage: Int,
+    // P2/W2-B2: 新增信封字段（向后兼容——既有字段类型不变，旧客户端忽略不受
+    // 影响）：page = 回显的 1 起页码，pageSize = 实效页大小（<1 夹到 1），
+    // total = 过滤后总行数。带默认值以保持既有 3 参构造调用兼容；
+    // 前端消费切换在 W3-F4 落地。
+    val page: Int = currentPage,
+    val pageSize: Int = 20,
+    val total: Int = favorites.size,
 )
 
 data class FavoriteItem(

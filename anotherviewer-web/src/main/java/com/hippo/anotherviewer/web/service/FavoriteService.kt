@@ -5,6 +5,7 @@ import com.hippo.anotherviewer.web.dto.FavoriteListResponse
 import com.hippo.anotherviewer.web.entity.LocalFavoriteInfoEntity
 import com.hippo.anotherviewer.web.repository.LocalFavoriteInfoRepository
 import org.slf4j.LoggerFactory
+import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
 
 @Service
@@ -30,41 +31,63 @@ class FavoriteService(
      *    negative values keep the legacy total mapping instead of gaining an
      *    undocumented 4xx; no first-party client sends them (WebUI tabs are
      *    0-9).
+     *
+     * P2: slot/q filtering and pagination are pushed down to the DB
+     * (repository `findLiveBySlot*` JPQL also excludes tombstone rows) — no
+     * unpaged full-table load anymore. The regex flavor keeps its in-memory
+     * semantics but only runs over a DB pre-filtered set (slot push-down plus
+     * a conservative literal-seed LIKE window; without a derivable seed it
+     * falls back to the slot-filtered set). The response envelope stays
+     * backward compatible: `favorites`/`totalPages`/`currentPage` unchanged,
+     * new `page`/`pageSize`/`total` fields added (frontend switch lands in
+     * W3-F4; legacy clients ignore them).
      */
     fun listFavorites(slot: Int, page: Int, pageSize: Int = 20, q: String? = null, regex: Boolean = false): FavoriteListResponse {
         val startPage = page.coerceAtLeast(1)
-        // 墓碑行（deleted=true 的同步删除记录）不列进 REST 列表，对齐 HistoryService：
-        // 增量同步需要墓碑行落库（SyncService.mergeFavorite），但 /favorite/list
-        // 只呈现存活收藏；total/分页也只按存活行计（R4-17）。
-        val all = favoriteRepository.findAllByOrderByTimeDesc().filter { !it.deleted }
-        val slotFiltered = when {
-            slot == 0 -> all.filter { it.favoriteSlot == SLOT_DEFAULT_FOLDER || it.favoriteSlot == 0 }
-            slot > 0 -> all.filter { it.favoriteSlot == slot }
-            else -> all
-        }
-        // 筛选槽位（q 筛选）：q 非空时按 title/titleJpn 匹配——regex=false 为
-        // 大小写不敏感子串（contains(ignoreCase)）；regex=true 时 q 按正则解释
-        // （过滤链末端追加，slot 过滤照旧先行，total/分页只按匹配后行数计）。
-        // 非法正则抛 IllegalArgumentException → 控制器转 400 REGEX_INVALID。
+        // 旧实现 pageSize < 1 时 totalPages 计算除零（0）或产生负窗口（负数），
+        // 夹到 1 只收紧崩溃面，不影响任何合法调用（控制器默认 20）。
+        val size = pageSize.coerceAtLeast(1)
         val qFilter = q?.takeIf { it.isNotBlank() }
-        val filtered = if (qFilter != null) {
-            val matcher = if (regex) {
-                try {
-                    Regex(qFilter)
-                } catch (e: Exception) {
-                    throw IllegalArgumentException("正则表达式无效: ${e.message}")
-                }
-            } else null
-            slotFiltered.filter { entity ->
-                val t = entity.title ?: ""
-                val tj = entity.titleJpn ?: ""
-                if (matcher != null) matcher.containsMatchIn(t) || matcher.containsMatchIn(tj)
-                else t.contains(qFilter, ignoreCase = true) || tj.contains(qFilter, ignoreCase = true)
+        // 非法正则在进 DB 之前抛出（→ 控制器 400 REGEX_INVALID，行为不变）。
+        val matcher = if (qFilter != null && regex) {
+            try {
+                Regex(qFilter)
+            } catch (e: Exception) {
+                throw IllegalArgumentException("正则表达式无效: ${e.message}")
             }
-        } else slotFiltered
-        val total = filtered.size
-        val totalPages = (total + pageSize - 1) / pageSize
-        val paged = filtered.drop((startPage - 1) * pageSize).take(pageSize)
+        } else null
+        val paged: List<LocalFavoriteInfoEntity>
+        val total: Int
+        when {
+            qFilter == null -> {
+                // P2: 无 q——slot 过滤 + 分页下沉 DB（墓碑行由 JPQL deleted = false 兜底，
+                // 对齐 HistoryService：增量同步需要墓碑行落库（SyncService.mergeFavorite），
+                // /favorite/list 只呈现存活收藏，total/分页也只按存活行计（R4-17））。
+                val result = favoriteRepository.findLiveBySlotPaged(slot, PageRequest.of(startPage - 1, size))
+                paged = result.content
+                total = result.totalElements.toInt()
+            }
+            matcher == null -> {
+                // P2: 纯子串 q 下沉 DB（LIKE，大小写不敏感），slot 过滤照旧先行。
+                val result = favoriteRepository.findLiveBySlotAndTitlePaged(slot, qFilter, PageRequest.of(startPage - 1, size))
+                paged = result.content
+                total = result.totalElements.toInt()
+            }
+            else -> {
+                // regex：语义保内存，但只跑在 DB 预过滤集上（slot 已下沉 + 字面
+                // 种子 LIKE 窗口；种子推不出回退仅 slot 过滤集），total/分页按
+                // regex 匹配后行数计（与旧行为一致）。
+                val seed = regexLiteralSeed(qFilter)
+                val candidates = if (seed != null) favoriteRepository.findLiveBySlotAndTitle(slot, seed)
+                else favoriteRepository.findLiveBySlot(slot)
+                val matched = candidates.filter {
+                    matcher.containsMatchIn(it.title ?: "") || matcher.containsMatchIn(it.titleJpn ?: "")
+                }
+                paged = matched.drop((startPage - 1) * size).take(size)
+                total = matched.size
+            }
+        }
+        val totalPages = (total + size - 1) / size
         // 阅读进度批量查（findByGidIn 防 N+1）：同 gid 历史行的 page 即当前进度。
         val progressByGid = historyRepository.findByGidIn(paged.map { it.gid })
             .associate { it.gid to it.page }
@@ -85,7 +108,9 @@ class FavoriteService(
                 readProgress = progressByGid[entity.gid]
             )
         }
-        return FavoriteListResponse(items, totalPages, startPage)
+        // 信封向后兼容：favorites/totalPages/currentPage 原样保留，page/pageSize/total
+        // 为新增字段（W3-F4 前端切换消费，旧客户端忽略不受影响）。
+        return FavoriteListResponse(items, totalPages, startPage, page = startPage, pageSize = size, total = total)
     }
 
     /**

@@ -62,6 +62,7 @@ class GalleryService(
      */
     private val searchCache: Cache<String, GalleryListResponse> = Caffeine.newBuilder()
         .expireAfterWrite(2, TimeUnit.MINUTES)
+        .maximumSize(128)
         .build()
 
     /**

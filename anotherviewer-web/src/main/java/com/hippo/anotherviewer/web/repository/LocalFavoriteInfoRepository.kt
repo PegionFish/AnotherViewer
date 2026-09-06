@@ -1,7 +1,11 @@
 package com.hippo.anotherviewer.web.repository
 
 import com.hippo.anotherviewer.web.entity.LocalFavoriteInfoEntity
+import org.springframework.data.domain.Page
+import org.springframework.data.domain.Pageable
 import org.springframework.data.jpa.repository.JpaRepository
+import org.springframework.data.jpa.repository.Query
+import org.springframework.data.repository.query.Param
 import org.springframework.transaction.annotation.Transactional
 
 interface LocalFavoriteInfoRepository : JpaRepository<LocalFavoriteInfoEntity, Long> {
@@ -15,4 +19,61 @@ interface LocalFavoriteInfoRepository : JpaRepository<LocalFavoriteInfoEntity, L
     fun findByUsername(username: String): List<LocalFavoriteInfoEntity>
     @Transactional
     fun deleteByGid(gid: Long)
+
+    /**
+     * P2: 收藏列表过滤/分页下沉 DB——slot 语义见 FavoriteService.listFavorites
+     * （<0 全部；0 = 默认夹 favoriteSlot in (-1, 0)；>0 = 恰好该夹），
+     * 墓碑行（deleted = true）由 JPQL 排除，time 倒序 + DB 分页，
+     * 替代旧的不分页全表载入 + 内存过滤路径。
+     */
+    @Query("""
+        select f from LocalFavoriteInfoEntity f
+        where f.deleted = false
+          and ( :slot < 0
+             or ( :slot = 0 and f.favoriteSlot in (-1, 0) )
+             or ( :slot > 0 and f.favoriteSlot = :slot ) )
+        order by f.time desc
+    """)
+    fun findLiveBySlotPaged(@Param("slot") slot: Int, pageable: Pageable): Page<LocalFavoriteInfoEntity>
+
+    /** P2: 同 findLiveBySlotPaged + 子串 q 下沉（title/titleJpn LIKE %kw%，大小写不敏感）。 */
+    @Query("""
+        select f from LocalFavoriteInfoEntity f
+        where f.deleted = false
+          and ( :slot < 0
+             or ( :slot = 0 and f.favoriteSlot in (-1, 0) )
+             or ( :slot > 0 and f.favoriteSlot = :slot ) )
+          and ( lower(f.title) like lower(concat('%', :keyword, '%'))
+             or lower(f.titleJpn) like lower(concat('%', :keyword, '%')) )
+        order by f.time desc
+    """)
+    fun findLiveBySlotAndTitlePaged(
+        @Param("slot") slot: Int,
+        @Param("keyword") keyword: String,
+        pageable: Pageable
+    ): Page<LocalFavoriteInfoEntity>
+
+    /** P2: 同 findLiveBySlotAndTitlePaged 但不分页——仅作 regex 路径的 DB 预过滤窗口。 */
+    @Query("""
+        select f from LocalFavoriteInfoEntity f
+        where f.deleted = false
+          and ( :slot < 0
+             or ( :slot = 0 and f.favoriteSlot in (-1, 0) )
+             or ( :slot > 0 and f.favoriteSlot = :slot ) )
+          and ( lower(f.title) like lower(concat('%', :keyword, '%'))
+             or lower(f.titleJpn) like lower(concat('%', :keyword, '%')) )
+        order by f.time desc
+    """)
+    fun findLiveBySlotAndTitle(@Param("slot") slot: Int, @Param("keyword") keyword: String): List<LocalFavoriteInfoEntity>
+
+    /** P2: 仅 slot 下沉、不分页——regex 路径在推不出字面种子时的预过滤窗口（语义优先回退）。 */
+    @Query("""
+        select f from LocalFavoriteInfoEntity f
+        where f.deleted = false
+          and ( :slot < 0
+             or ( :slot = 0 and f.favoriteSlot in (-1, 0) )
+             or ( :slot > 0 and f.favoriteSlot = :slot ) )
+        order by f.time desc
+    """)
+    fun findLiveBySlot(@Param("slot") slot: Int): List<LocalFavoriteInfoEntity>
 }
