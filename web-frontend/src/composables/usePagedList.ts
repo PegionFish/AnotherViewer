@@ -1,4 +1,4 @@
-import { computed, onMounted, onUnmounted, ref, watch, type ComputedRef, type Ref } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch, type ComputedRef, type Ref } from 'vue'
 
 /**
  * 单页结果 —— 服务端分页契约的统一消费形态。`fetchPage` 负责把两种服务端
@@ -179,7 +179,16 @@ export function usePagedList<T>(options: UsePagedListOptions<T>): UsePagedList<T
   }
 
   if (options.keyboardPaging) {
+    // KeepAlive 缓存视图（DownloadView/HistoryView 等）停用期间不得后台劫持
+    // PageUp/Down（audit P1-5 同类缺陷）：onMounted 注册覆盖非缓存挂载
+    // （onActivated 仅在 KeepAlive 内触发），激活期 remove-before-add 保证
+    // 全程恰好一个监听器，停用即摘除；unmount 兜底缓存淘汰路径。
     onMounted(() => window.addEventListener('keydown', onPageKey))
+    onActivated(() => {
+      window.removeEventListener('keydown', onPageKey)
+      window.addEventListener('keydown', onPageKey)
+    })
+    onDeactivated(() => window.removeEventListener('keydown', onPageKey))
     onUnmounted(() => window.removeEventListener('keydown', onPageKey))
   }
 

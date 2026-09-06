@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { defineComponent, h } from 'vue'
+import { defineComponent, h, KeepAlive } from 'vue'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { usePagedList, type PagedListPage, type UsePagedListOptions } from '../usePagedList'
 
@@ -332,5 +332,60 @@ describe('usePagedList（服务端分页状态机，W3-C1）', () => {
     await flushPromises()
     expect(fetchPage).not.toHaveBeenCalled()
     input.remove()
+  })
+
+  it('drops the keyboard listener while deactivated inside KeepAlive (audit P1-5 class)', async () => {
+    const fetchPage = vi.fn(async (_page: number, _size: number): Promise<PagedListPage<Row>> => ({
+      items: [],
+      total: 250,
+    }))
+    let api!: ReturnType<typeof usePagedList<Row>>
+    const Host = defineComponent({
+      setup() {
+        api = usePagedList<Row>({
+          fetchPage,
+          pageSizes: [50, 100, 200],
+          initialPageSize: 50,
+          fallbackPageSize: 50,
+          keyboardPaging: true,
+        })
+        return () => h('div', String(api.currentPage.value))
+      },
+    })
+    const toggler = defineComponent({
+      data: () => ({ show: true }),
+      render(this: any) {
+        // KeepAlive 常驻，只切子节点——分支切换 KeepAlive 本身会连带卸载缓存实例，
+        // 测不出 deactivate/activate 路径。
+        return h(KeepAlive, null, {
+          default: () => (this.show ? h(Host) : h('div', 'placeholder')),
+        })
+      },
+    })
+    const wrapper = mount(toggler)
+    await api.load()
+    fetchPage.mockClear()
+
+    // 激活期正常翻页。
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))
+    await flushPromises()
+    expect(fetchPage).toHaveBeenCalledWith(2, 50)
+    fetchPage.mockClear()
+
+    // 切走（deactivate）后按键不再翻页。
+    ;(wrapper.vm as any).show = false
+    await flushPromises()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))
+    await flushPromises()
+    expect(fetchPage).not.toHaveBeenCalled()
+
+    // 切回（activate，remove-before-add 路径）恢复翻页。
+    ;(wrapper.vm as any).show = true
+    await flushPromises()
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))
+    await flushPromises()
+    expect(fetchPage).toHaveBeenCalledWith(3, 50)
+
+    wrapper.unmount()
   })
 })
