@@ -311,3 +311,168 @@ chmod -R u+rwX /opt/anotherviewer/data
 - 导出的 `.db` 文件**不含登录授权（cookies）**；登录态（`ipb_member_id` / `ipb_pass_hash` / `igneous` 等）保存在 app 内部数据目录的 `okhttp3-cookie.db` 与 shared_prefs
 - 覆盖安装 legacy 包时，登录态随应用数据目录原样保留，**无需额外操作**
 - 导入 `.db` 只迁业务表，不影响已保留的登录态
+
+## HTTPS 轨道 B（LAN 内网 HTTPS 反代）
+
+PWA 安装层（Service Worker、浏览器「安装」入口）要求**安全上下文**。生产实例 `http://192.168.6.141:8081`（systemd 服务 `anotherviewer-web`，jar 在 `/server/AnotherViewer/lib/app.jar`）保持原样不动——Android App 与既有 HTTP 客户端零扰动；另用 mkcert 本地证书 + 反代在 **:8443** 提供 HTTPS。客户端视角与安装步骤见 `docs/pwa-install.md`。
+
+> 与 `deploy/Caddyfile` 的分工：那份面向公网域名（Caddy 自动获取 Let's Encrypt 证书，监听 443）；本节用的是 `deploy/caddy-anotherviewer.conf`（LAN 无域名，mkcert 证书，监听 8443），二选一。
+
+### 1. 生成证书（mkcert）
+
+141 上安装 mkcert（Arch：`sudo pacman -S mkcert nss`；Debian/Ubuntu：`sudo apt install mkcert libnss3-tools`；Windows/macOS 见 `scripts/gen-lan-cert.sh` 报错提示），然后：
+
+```bash
+cd /server/AnotherViewer
+./scripts/gen-lan-cert.sh          # 缺省签发 192.168.6.141；可传参覆盖，如 ./scripts/gen-lan-cert.sh 192.168.6.141 av.lan
+```
+
+产物（PEM，Caddy 可直接用；`deploy/certs/` 已在 `.gitignore`，私钥不入库）：
+
+- `deploy/certs/anotherviewer-lan.pem` — 证书
+- `deploy/certs/anotherviewer-lan-key.pem` — 私钥（脚本已 `chmod 600`）
+- 根 CA：`$(mkcert -CAROOT)/rootCA.pem`，分发给各客户端安装（见 `docs/pwa-install.md` 第 4 节）
+
+可选：在 141 上执行一次 `mkcert -install`，让 141 本机的 curl/浏览器也信任该根 CA（只影响 141 本机，其他客户端仍需各自安装 rootCA.pem）。
+
+### 2. 安装 / 配置 Caddy（141）
+
+安装 Caddy（Arch：`sudo pacman -S caddy`；Debian/Ubuntu：`sudo apt install caddy`）。
+
+**方式 A：独立 systemd 实例**（不影响发行版 caddy 服务，推荐）：
+
+```bash
+sudo tee /etc/systemd/system/caddy-anotherviewer.service >/dev/null <<'EOF'
+[Unit]
+Description=Caddy (AnotherViewer LAN HTTPS 8443)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/server/AnotherViewer
+ExecStart=/usr/bin/caddy run --config /server/AnotherViewer/deploy/caddy-anotherviewer.conf
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+sudo systemctl daemon-reload
+sudo systemctl enable --now caddy-anotherviewer
+journalctl -u caddy-anotherviewer -f
+```
+
+> `tls` 的相对路径由 caddy 按工作目录解析，上面的 unit 已把 `WorkingDirectory` 固定到 `/server/AnotherViewer`；更稳妥的做法是把 `deploy/caddy-anotherviewer.conf` 中 `tls` 两行改成绝对路径。
+
+**方式 B：手工前台命令**（调试用）：
+
+```bash
+cd /server/AnotherViewer
+caddy run --config deploy/caddy-anotherviewer.conf
+```
+
+### 附录：nginx 等价 server 块
+
+不用 Caddy 时，以下 nginx 配置等价（`map` 需在 `http{}` 上下文；发行版布局放进 `/etc/nginx/conf.d/anotherviewer-lan.conf` 即可）：
+
+```nginx
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+    listen 8443 ssl;
+    server_name 192.168.6.141;
+
+    ssl_certificate     /server/AnotherViewer/deploy/certs/anotherviewer-lan.pem;
+    ssl_certificate_key /server/AnotherViewer/deploy/certs/anotherviewer-lan-key.pem;
+
+    location / {
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        # WebSocket 升级（/ws SockJS）
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $connection_upgrade;
+    }
+}
+```
+
+### 3. 证书续期
+
+mkcert 签发的证书有效期 825 天（约 27 个月）。到期特征：客户端浏览器报 `NET::ERR_CERT_DATE_INVALID`；141 上可随时查看：
+
+```bash
+openssl x509 -in /server/AnotherViewer/deploy/certs/anotherviewer-lan.pem -noout -enddate
+```
+
+重生成三步（**客户端无需重装根 CA**——根 CA 未变，只是同一根重新签发叶子证书）：
+
+```bash
+cd /server/AnotherViewer
+./scripts/gen-lan-cert.sh
+sudo systemctl restart caddy-anotherviewer
+```
+
+> 例外：若 141 重装系统或 `mkcert -CAROOT` 目录被删导致**根 CA 重建**，则四端客户端需重新安装新的 rootCA.pem。
+
+### 4. 验证与回滚
+
+```bash
+# 经 8443 反代验证（-k：curl 不信任 mkcert 根 CA；141 上做过 mkcert -install 后可去掉 -k）
+curl -sk https://localhost:8443/api/v1/health
+
+# 直连 8081 对照：行为零变化
+curl -s http://127.0.0.1:8081/api/v1/health
+```
+
+回滚：`sudo systemctl disable --now caddy-anotherviewer`（nginx 等价：删掉上面 server 块后 reload）。8081 全程未被改动，随时可停反代，Android App 与既有 HTTP 客户端零扰动。
+
+## 远程模式 CORS/WS env
+
+外壳（`https://192.168.6.141:8443`，Caddy/8443）与数据服务器（`http://192.168.6.141:8081`）不同源，即**远程模式**：API 与图片请求经 serverBase 指向 8081，浏览器会发起跨域请求，需后端 CORS 放行。后端零代码改动，全部经环境变量控制。
+
+### ANOTHERVIEWER_CORS_ORIGINS
+
+- 默认仅回环：`http://localhost:*,http://127.0.0.1:*`；逗号分隔列表，`allowedOriginPatterns` 通配匹配，支持 `*` 且 `allowCredentials=true`；**只映射 `/api/**`**。
+- 远程模式需放行外壳 origin（推荐精确列出；`*` 会放行 LAN 内任意网页，仅可信内网使用）：
+
+```bash
+sudo systemctl edit anotherviewer-web
+# 编辑器中写入：
+#   [Service]
+#   Environment=ANOTHERVIEWER_CORS_ORIGINS=http://192.168.6.141:8443
+# 可信内网偷懒写法：Environment=ANOTHERVIEWER_CORS_ORIGINS=*
+```
+
+非交互等价写法与生效：
+
+```bash
+sudo mkdir -p /etc/systemd/system/anotherviewer-web.service.d
+printf '[Service]\nEnvironment=ANOTHERVIEWER_CORS_ORIGINS=*\n' \
+  | sudo tee /etc/systemd/system/anotherviewer-web.service.d/10-cors.conf >/dev/null
+sudo systemctl daemon-reload
+sudo systemctl restart anotherviewer-web
+```
+
+**回滚 = 删 drop-in**（恢复默认仅回环）：
+
+```bash
+sudo rm /etc/systemd/system/anotherviewer-web.service.d/10-cors.conf
+sudo systemctl daemon-reload && sudo systemctl restart anotherviewer-web
+```
+
+### ANOTHERVIEWER_WS_ORIGINS
+
+WebSocket/SockJS 端点（`/ws`）的来源校验，默认 `*`——远程模式**通常无需设置**；仅当要收紧 WS 来源时才按上面同样的 drop-in 方式配置（如 `Environment=ANOTHERVIEWER_WS_ORIGINS=https://192.168.6.141:8443`，改完同样 `daemon-reload` + `restart`）。
+
+### 排障提示
+
+浏览器 DevTools console 中区分两类失败：
+
+- **API 请求报 CORS 错**（`Access-Control-Allow-Origin` 缺失/不匹配，对象是 `/api/v1/...` 的 fetch/XHR）→ 查 `ANOTHERVIEWER_CORS_ORIGINS` 是否放行了外壳 origin。
+- **SockJS 握手失败 / WebSocket 连接失败**（`/ws` 相关，`info` 请求或 `WebSocket connection to ... failed`）→ 查 `ANOTHERVIEWER_WS_ORIGINS`（默认 `*` 一般不会失败；仅收紧后需检查）。

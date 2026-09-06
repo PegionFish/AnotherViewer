@@ -63,3 +63,6 @@ web-frontend/e2e/test-results/
 
 # zip 发布包产物
 /dist/
+
+# mkcert 内网 HTTPS 证书与私钥（轨道 B，由 scripts/gen-lan-cert.sh 生成）——私钥/证书产物一律不入库
+deploy/certs/
