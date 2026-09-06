@@ -3,12 +3,14 @@ import type { InternalAxiosRequestConfig } from 'axios'
 import type { Router } from 'vue-router'
 import client, {
   EhUnavailableError,
+  applyServerBase,
   isEhUnavailableError,
   isOfflineError,
   isOfflinePayload,
   OfflineError,
 } from '@/api/client'
 import router from '@/router'
+import { SERVER_BASE_KEY } from '@/stores/server'
 
 describe('isOfflinePayload', () => {
   it('recognizes the SW offline marker as an object payload', () => {
@@ -65,6 +67,7 @@ describe('EhUnavailableError — EH 熔断（plan-2026-08-30 §3.2/§4.1）', ()
   })
 })
 
+<<<<<<< HEAD
 /** Adapter rejecting with a bare axios-shaped error (the interceptor's input). */
 type RejectingAdapter = (config: InternalAxiosRequestConfig) => Promise<unknown>
 
@@ -164,5 +167,41 @@ describe('401 拦截器 — 会话失效收口（audit P2）', () => {
     expect(replaceSpy).not.toHaveBeenCalled()
     expect(localStorage.getItem('token')).toBe('stale-token')
     expect(localStorage.getItem('username')).toBe('bob')
+  })
+})
+
+describe('client.defaults.baseURL — server base 派生（plan-2026-09-06-pwa §3.1）', () => {
+  beforeEach(() => {
+    localStorage.removeItem(SERVER_BASE_KEY)
+  })
+
+  afterEach(() => {
+    localStorage.removeItem(SERVER_BASE_KEY)
+    applyServerBase()
+  })
+
+  it('defaults to the same-origin /api/v1 when no server base is persisted', () => {
+    // Module load happens with empty storage in this fresh test environment,
+    // so the axios singleton must carry the legacy literal.
+    expect(localStorage.getItem(SERVER_BASE_KEY)).toBeNull()
+    expect(client.defaults.baseURL).toBe('/api/v1')
+  })
+
+  it('re-derives an absolute baseURL after persisting a server base', () => {
+    localStorage.setItem(SERVER_BASE_KEY, 'http://192.168.6.141:8081')
+
+    applyServerBase()
+
+    expect(client.defaults.baseURL).toBe('http://192.168.6.141:8081/api/v1')
+  })
+
+  it('falls back to the same-origin baseURL once the persisted base is cleared', () => {
+    localStorage.setItem(SERVER_BASE_KEY, 'http://192.168.6.141:8081')
+    applyServerBase()
+    localStorage.removeItem(SERVER_BASE_KEY)
+
+    applyServerBase()
+
+    expect(client.defaults.baseURL).toBe('/api/v1')
   })
 })

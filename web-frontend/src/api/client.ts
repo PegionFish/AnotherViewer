@@ -1,8 +1,12 @@
 import axios, { type InternalAxiosRequestConfig } from 'axios'
 import { markDown, EH_UNAVAILABLE_MESSAGE } from '@/stores/availability'
+import { apiBaseUrl } from '@/stores/server'
 
 const client = axios.create({
-  baseURL: '/api/v1',
+  // Derived from the persisted server base (PWA §3.1): '' → same-origin
+  // '/api/v1', otherwise `${base}/api/v1`. Evaluated once at module load —
+  // switching servers always goes through a full page reload.
+  baseURL: apiBaseUrl(),
   timeout: 30000,
   headers: {
     'Content-Type': 'application/json',
@@ -17,6 +21,11 @@ const client = axios.create({
  */
 const liveControllers = new Set<AbortController>()
 const controllerOfConfig = new WeakMap<InternalAxiosRequestConfig, AbortController>()
+
+/** Re-derive baseURL from the persisted server base (reset/test seam). */
+export function applyServerBase(): void {
+  client.defaults.baseURL = apiBaseUrl()
+}
 
 client.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
