@@ -539,6 +539,19 @@ function saveLocalProgress(id: number, page: number): void {
 }
 
 /**
+ * 深链页参解析（W1-F1）：vue-router 4.5 的可选参数（`/reader/:gid/:page?`）
+ * 缺省时 `route.params.page` 是 `''`（空串）而非 `undefined`——`Number('') === 0`
+ * 且有限，会把「无页参进入」劫持成深链第 0 页，盖掉 readProgress / localStorage
+ * 兜底。统一空串语义：仅当值是字符串、去空白后非空、且能解析为有限数字时才
+ * 视为深链；空串/缺失/非有限一律返回 null（无深链）。
+ */
+function parseDeepLinkPage(raw: unknown): number | null {
+  if (typeof raw !== 'string' || raw.trim() === '') return null
+  const page = Number(raw)
+  return Number.isFinite(page) ? page : null
+}
+
+/**
  * W4① 恢复优先级：深链路由参数 > detail.readProgress > 0。
  *
  * detail 来源缺失时（旧服务器不下发字段 / detail 拉取失败 / 无 token 无法
@@ -550,8 +563,8 @@ function resolveStartPage(
   rawDeepLink: unknown,
   serverProgress: number | null | undefined,
 ): number {
-  const linked = Number(rawDeepLink)
-  if (Number.isFinite(linked)) return Math.max(0, Math.floor(linked))
+  const linked = parseDeepLinkPage(rawDeepLink)
+  if (linked !== null) return Math.max(0, Math.floor(linked))
   if (
     typeof serverProgress === 'number' &&
     Number.isFinite(serverProgress) &&
@@ -769,12 +782,14 @@ watch(
 // page without reloading the gallery. Echoes of our own route-sync replace
 // are skipped via the target === currentPage guard; page changes that arrive
 // mid-load are picked up by `load()` reading `route.params.page`.
+// W1-F1: 空串页参（可选参数缺省，如深链 /12 后返回裸 /reader/:gid）与
+// 非有限值一样视为无深链——不跳页，保持当前进度。
 watch(
   () => route.params.page,
   (page) => {
     if (loadState.value !== 'ready') return
-    const target = Number(page)
-    if (!Number.isFinite(target) || target === currentPage.value) return
+    const target = parseDeepLinkPage(page)
+    if (target === null || target === currentPage.value) return
     currentPage.value = Math.min(Math.max(target, 0), Math.max(0, totalPages.value - 1))
   },
 )

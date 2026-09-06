@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { reactive } from 'vue'
 import ReaderView from '../ReaderView.vue'
 import { galleryApi } from '@/api/gallery'
 import { usePreferencesStore } from '@/stores/preferences'
@@ -11,12 +12,16 @@ const { pushMock, replaceMock, backMock, routeParams, routeQuery } = vi.hoisted(
   pushMock: vi.fn(),
   replaceMock: vi.fn(),
   backMock: vi.fn(),
-  routeParams: { gid: '123456', page: undefined as string | undefined },
+  // W1-F1: 真实路由 `/reader/:gid/:page?`（vue-router 4.5）缺省页参给出的是
+  // `''`（空串）而非 undefined——mock 必须镜像，否则守不住空串语义的回归。
+  routeParams: { gid: '123456', page: '' },
   routeQuery: { token: undefined as string | undefined },
 }))
 
 vi.mock('vue-router', () => ({
-  useRoute: () => ({ params: routeParams, query: routeQuery }),
+  // reactive(params)（HomeView spec 同款）：params 变更能触发视图内的
+  // route watcher；测试经由同一缓存代理写入（见 setRoutePage）。
+  useRoute: () => ({ params: reactive(routeParams), query: routeQuery }),
   useRouter: () => ({ push: pushMock, replace: replaceMock, back: backMock }),
 }))
 
@@ -132,7 +137,7 @@ describe('ReaderView F1 — history writeback (POST /gallery/history/{gid})', ()
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     // afterEach 的 restoreAllMocks 会清掉 hoisted mock 的实现，逐例重置。
     replaceMock.mockReset()
     replaceMock.mockResolvedValue(undefined)
@@ -293,7 +298,7 @@ describe('ReaderView 统一阅读器 — detail 失败仍打开（degraded open�
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset()
     replaceMock.mockResolvedValue(undefined)
     pushMock.mockReset()
@@ -387,7 +392,7 @@ describe('ReaderView (T-F2) — keyboard navigation', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
   })
 
@@ -502,7 +507,7 @@ describe('ReaderView (A7) — 缩放按键统一语义', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
   })
 
@@ -580,7 +585,7 @@ describe('ReaderView (T-F2) — dual-page spread index calculation', () => {
   it('steps whole spreads in dual mode: cover alone, then paired jumps', async () => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
     setReaderSettings({ direction: 'ltr', pageMode: 'dual', brightness: 0 })
 
@@ -627,7 +632,7 @@ describe('ReaderView (T-F2) — dual-page spread index calculation', () => {
   it('refuses to step past the final partial spread in dual mode', async () => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
     setReaderSettings({ direction: 'ltr', pageMode: 'dual', brightness: 0 })
 
@@ -663,7 +668,7 @@ describe('ReaderView (T-F2) — auto-play timer', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
   })
 
@@ -789,7 +794,7 @@ describe('ReaderView — P-B 入口 token 透传（plan-2026-08-30 §3.4.0）', 
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     routeQuery.token = undefined
     replaceMock.mockReset().mockResolvedValue(undefined)
     vi.mocked(galleryApi.getDetail).mockReset()
@@ -931,7 +936,7 @@ describe('ReaderView W4 — 阅读进度恢复（初始页优先级）', () => {
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
     vi.mocked(galleryApi.getDetail).mockReset()
     vi.mocked(galleryApi.addHistory).mockReset()
@@ -1007,7 +1012,7 @@ describe('ReaderView W4 — 回写 payload 携带 page（防抖策略不变）',
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
     vi.mocked(galleryApi.addHistory).mockReset()
     vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
@@ -1063,7 +1068,7 @@ describe('ReaderView W4 — 降级态 localStorage 读写（readProgress:{gid}�
   beforeEach(() => {
     setActivePinia(createPinia())
     routeParams.gid = '123456'
-    delete routeParams.page
+    routeParams.page = ''
     replaceMock.mockReset().mockResolvedValue(undefined)
     vi.mocked(galleryApi.getDetail).mockReset()
     vi.mocked(galleryApi.addHistory).mockReset()
@@ -1130,5 +1135,80 @@ describe('ReaderView W4 — 降级态 localStorage 读写（readProgress:{gid}�
     window.dispatchEvent(new Event('pagehide'))
     await flushPromises()
     expect(localStorage.getItem(PROGRESS_KEY)).toBe('8')
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * W1-F1 回归 — 空串页参守卫：vue-router 4.5 可选参数 `/reader/:gid/:page?`
+ * 缺省时 route.params.page 是 `''`（非 undefined），`Number('') === 0` 曾把
+ * 无页参进入劫持成深链第 0 页，readProgress / localStorage 兜底永不生效。
+ * 此前的 mock 用 `delete routeParams.page`（key 缺失 → NaN → 跳过深链分支），
+ * 与真实路由不符——现 beforeEach 统一镜像 `page = ''`。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/** 模拟导航后的页参变更：必须经 reactive 缓存代理写入（与 mock 工厂同一
+ *  proxy），raw 赋值不经过 set 陷阱、不会触发组件内的路由 watcher。 */
+function setRoutePage(page: string): void {
+  reactive(routeParams).page = page
+}
+
+describe("ReaderView W1-F1 — 空串页参守卫（可选参数缺省 = ''）", () => {
+  let wrapper: VueWrapper | undefined
+
+  async function mountReader(overrides: Record<string, unknown> = {}): Promise<VueWrapper> {
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture(overrides))
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    const mounted = mount(ReaderView)
+    await flushPromises()
+    return mounted
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    routeParams.gid = '123456'
+    routeParams.page = '' // 镜像真实路由：无页参 → ''（非 undefined）
+    replaceMock.mockReset().mockResolvedValue(undefined)
+    vi.mocked(galleryApi.getDetail).mockReset()
+    vi.mocked(galleryApi.addHistory).mockReset()
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    localStorage.clear()
+    vi.restoreAllMocks()
+  })
+
+  it("treats an empty page param ('') as no deep link — readProgress restores the position", async () => {
+    // 回归主体：/reader/123456（无页参）+ readProgress=12 → 起始页 12，
+    // 不再被 Number('') === 0 劫持到第 0 页。
+    wrapper = await mountReader({ readProgress: 12 })
+    expect(wrapper.find('.image-reader-stub').text()).toBe('12')
+  })
+
+  it('keeps honoring an explicit deep link — page=30 still wins over readProgress', async () => {
+    // 深链语义保持不变：显式页参（含 '0'）优先于已存进度。
+    routeParams.page = '30'
+    wrapper = await mountReader({ readProgress: 12 })
+    expect(wrapper.find('.image-reader-stub').text()).toBe('30')
+  })
+
+  it("watcher: an empty page param (back-nav to the bare route) does not jump pages", async () => {
+    routeParams.page = '30'
+    wrapper = await mountReader()
+    expect(wrapper.find('.image-reader-stub').text()).toBe('30')
+
+    // 深链 /30 后返回裸 /reader/123456：可选参数复位成 ''——视为无深链，
+    // 保持当前位置，不得跳到第 0 页。
+    setRoutePage('')
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.find('.image-reader-stub').text()).toBe('30')
+
+    // 对照：真实页参变更仍照常跳页。
+    setRoutePage('7')
+    await flushPromises()
+    expect(wrapper.find('.image-reader-stub').text()).toBe('7')
   })
 })
