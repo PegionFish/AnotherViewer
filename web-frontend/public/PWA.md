@@ -14,17 +14,18 @@
 
 ## 2. 缓存策略（sw.js）
 
-所有缓存以 `CACHE_NAME`（当前 `anotherviewer-v1`）为前缀。**发版需要作废旧缓存时，bump 该常量**（如 `anotherviewer-v2`），activate 阶段会自动删除所有旧前缀缓存。
+所有缓存以 `CACHE_NAME`（当前 `anotherviewer-v3`）为前缀。**发版需要作废旧缓存时，bump 该常量**（如 `anotherviewer-v4`），activate 阶段会自动删除所有旧前缀缓存。
 
 | 请求类型 | 策略 | 缓存名 | 说明 |
 | --- | --- | --- | --- |
 | App Shell（`/`、`/index.html`、manifest、图标） | install 时预缓存 | `*-shell` | Vite 产物带内容 hash，运行时首次命中后写入 shell 缓存（CacheFirst，hash 名不可变，可安全长缓存） |
 | 导航请求（SPA 路由） | NetworkFirst → 回退已缓存 shell | `*-shell` | 在线时刷新最新 HTML；离线时任意已访问路由可打开 |
 | API GET（`/api/*`） | NetworkFirst → 回退缓存（30 分钟 TTL） | `*-api` | 画廊列表/详情在线保持最新；写入时打时间戳，**离线仅回退 30 分钟内的缓存**（`API_MAX_AGE_MS`），过期条目直接清除；离线且无新鲜缓存时返回可解析 JSON：`{"error":"offline",...}`（HTTP 503），供应用层展示友好离线态 |
+| 跨域 API（GET && pathname `/api/`，远程模式后端） | NetworkFirst → 回退缓存（30 分钟 TTL，与同源一致） | `*-api` | 仅按 pathname 匹配（v3 起不再限制同源）：跨域 cors 响应（axios/fetch）与同源同策略；`<img>` no-cors 的 opaque 响应已被图片规则（规则 2）截走，不会进入本分支 |
 | 图片（`/api/v1/image/*` 及所有 image 请求） | CacheFirst + 过期淘汰 | `*-images` | 上限 500 条 / 30 天；每次写入调用 `navigator.storage.estimate()`，用量超过配额 80% 时上限减半，主动释放空间 |
 | 同源静态资源（hashed JS/CSS/字体） | CacheFirst | `*-shell` | 内容寻址，永久安全 |
 
-不拦截：非 GET 请求、WebSocket（`/ws`）、Range 请求、跨域非图片请求。
+不拦截：非 GET 请求、WebSocket（`/ws`）、Range 请求、跨域非图片且非 `/api/` 前缀的请求。
 
 ## 3. 更新流程（SW 版本迭代）
 
@@ -64,7 +65,7 @@
 
 - [ ] 在线浏览若干画廊（列表 + 详情 + 阅读若干页图片）
 - [ ] DevTools → Application → Service Workers：确认 sw.js 状态 activated & running
-- [ ] DevTools → Application → Cache Storage：确认 `anotherviewer-v1-shell` / `-api` / `-images` 均有内容
+- [ ] DevTools → Application → Cache Storage：确认 `anotherviewer-v3-shell` / `-api` / `-images` 均有内容
 - [ ] 开启飞行模式（或 DevTools 勾选 Offline）
 - [ ] 重新打开应用 → 首页/已访问路由可加载（shell 回退）
 - [ ] 进入之前浏览过的画廊详情 → 元数据可显示（API 缓存回退，需在 30 分钟 TTL 内；超时则返回 503 JSON）
@@ -95,3 +96,4 @@
 - iOS 上"添加到主屏幕"时图标的抓取不经过页面的 SW，需在线完成安装。
 - 离线时登录态接口（401）仍会触发跳转 `/login`；离线登录需后端支持，不在 3.3 范围。
 - 应用层"友好离线提示 UI"（如离线横幅）由视图层实现，SW 仅保证返回可解析的 503 JSON。
+- 远程模式离线依赖目标服务器的 API 响应可缓存：跨域 cors 响应（带 `Access-Control-Allow-Origin` 等头的 fetch/XHR）可按同源策略写入 `*-api` 缓存（NetworkFirst + 30 分钟 TTL）；`<img>` no-cors 的 opaque 图片响应走图片分支（`*-images`）。目标服务器不返回可缓存响应时，对应数据离线不可用。

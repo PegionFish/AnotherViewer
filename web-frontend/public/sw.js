@@ -9,7 +9,11 @@
  *   - API responses (/api/*): NetworkFirst with cache fallback, so gallery
  *     lists stay fresh online but remain readable offline; cached entries
  *     carry a timestamp and are only served within API_MAX_AGE_MS (30 min),
- *     stale entries are evicted instead of being served indefinitely.
+ *     stale entries are evicted instead of being served indefinitely. The
+ *     rule matches by pathname only, so cross-origin /api/ requests
+ *     (remote-mode backends returning CORS responses) get the exact same
+ *     NetworkFirst treatment as same-origin ones; opaque responses (<img>
+ *     no-cors) never reach this branch because the image rule runs first.
  *   - Images: CacheFirst with expiration (max 500 entries, 30 days) and
  *     quota-aware eviction — navigator.storage.estimate() is checked on
  *     every insert and the entry budget halves above 80% of the origin
@@ -23,9 +27,10 @@
 
 'use strict'
 
-// v1→v2：阅读器页面模式默认值变更（dual→auto）+ 本地设置迁移。升版强制
-// 所有客户端在下次 activate 时丢弃旧 shell/图片缓存，确保新壳生效。
-const CACHE_NAME = 'anotherviewer-v2'
+// v2→v3：API 分支去掉 origin 门，跨域 /api/ 请求（远程模式后端返回的
+// cors 响应）与同源一致走 NetworkFirst 缓存。升版强制所有客户端在下次
+// activate 时丢弃旧版本缓存，让新的跨域 API 缓存策略在全新命名空间生效。
+const CACHE_NAME = 'anotherviewer-v3'
 
 const SHELL_CACHE = `${CACHE_NAME}-shell`
 const API_CACHE = `${CACHE_NAME}-api`
@@ -132,8 +137,12 @@ self.addEventListener('fetch', (event) => {
   }
 
   // 3. API GETs (images excluded by rule 2) — NetworkFirst with cache
-  //    fallback and a 30-minute freshness window.
-  if (url.origin === self.location.origin && url.pathname.startsWith('/api/')) {
+  //    fallback and a 30-minute freshness window. Matched by pathname only,
+  //    so cross-origin /api/ calls (remote-mode backends, CORS responses)
+  //    follow the same policy as same-origin ones. Opaque <img> responses
+  //    cannot land here: destination image / image pathnames are captured
+  //    by rule 2 first.
+  if (url.pathname.startsWith('/api/')) {
     event.respondWith(networkFirstApi(request))
     return
   }
