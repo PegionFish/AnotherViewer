@@ -6,10 +6,12 @@ import HomeView from '../HomeView.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
 import { galleryApi } from '@/api/gallery'
+import { authApi } from '@/api/auth'
 import { siteApi } from '@/api/site'
 import { preferencesApi } from '@/api/preferences'
 import { usePreferencesStore } from '@/stores/preferences'
 import { availability, markUnknown } from '@/stores/availability'
+import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 import type { Preferences } from '@/api/preferences'
 import type { GalleryInfo, GalleryListResponse, TopListItem } from '@/types'
 
@@ -33,6 +35,10 @@ vi.mock('@/api/gallery', () => ({
     getQuickSearches: vi.fn(),
     createQuickSearch: vi.fn(),
   },
+}))
+
+vi.mock('@/api/auth', () => ({
+  authApi: { ehSession: vi.fn() },
 }))
 
 vi.mock('@/api/preferences', () => ({
@@ -112,7 +118,14 @@ describe('HomeView (首页)', () => {
     availability.lastReason = null
     availability.lastLoadedAt = null
     markUnknown()
+    setPrivacyMaskEnabled(false)
     vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
+    vi.mocked(authApi.ehSession).mockResolvedValue({
+      signedIn: false,
+      expired: false,
+      gallerySite: 0,
+      cookies: [],
+    })
     // Default: preferences resolve with the grid layout (the pre-migration
     // tests below can override per case).
     vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'grid' }))
@@ -123,6 +136,7 @@ describe('HomeView (首页)', () => {
   })
 
   afterEach(() => {
+    setPrivacyMaskEnabled(false)
     wrapper?.unmount()
     vi.clearAllMocks()
   })
@@ -130,6 +144,7 @@ describe('HomeView (首页)', () => {
   async function mountHome(list: GalleryInfo[]) {
     vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: list, total: list.length })
     wrapper = mount(HomeView)
+    await flushPromises()
     await flushPromises()
     return wrapper
   }
@@ -155,6 +170,15 @@ describe('HomeView (首页)', () => {
     expect(pushMock).toHaveBeenCalledWith('/search')
   })
 
+  it('guides the EH session config to the merged settings page (A5-1)', async () => {
+    await mountHome([])
+
+    const link = wrapper.find('.home__empty-eh-link')
+    expect(link.exists()).toBe(true)
+    await link.trigger('click')
+    expect(pushMock).toHaveBeenCalledWith('/settings/server/eh')
+  })
+
   it('hides the login CTA when already authenticated', async () => {
     localStorage.setItem('token', 'test-token')
     await mountHome([])
@@ -170,73 +194,72 @@ describe('HomeView (首页)', () => {
     expect(ctaButton('去搜索')).toBeUndefined()
   })
 
-  it('renders the full list when no viewport geometry is available (fallback)', async () => {
-    const items = Array.from({ length: 120 }, (_, i) =>
-      gallery({ gid: i + 1, title: `G${i + 1}` }),
-    )
-    await mountHome(items)
+  /* ---------------- A4 单列密信息行（AppListRow，瀑布流出局） ---------------- */
 
-    // Headless environments expose zero clientHeight — the virtual window
-    // stays off and every gallery is rendered, like before the feature.
-    expect(wrapper.findAll('.app-card')).toHaveLength(120)
+  it('renders gallery rows as single-column AppListRow rows (A4 — no grid/waterfall)', async () => {
+    await mountHome([
+      gallery({ gid: 1, title: 'Gallery One', titleJpn: '日本語一', pages: 10, category: 2 }),
+      gallery({ gid: 2, title: 'Gallery Two', titleJpn: '', pages: 0, category: 2 }),
+    ])
+
+    const rows = wrapper.findAll('.app-list-row')
+    expect(rows).toHaveLength(2)
+    expect(rows[0].find('.app-list-row__title').text()).toBe('Gallery One')
+    // 日文标题作为副题（打码关闭时）。
+    expect(rows[0].find('.app-list-row__subtitle').text()).toBe('日本語一')
+    // 元信息行：分类 chip + 页数（pages ≤ 0 不渲染页数角标）。
+    expect(rows[0].find('.app-list-row__meta .category-chip').exists()).toBe(true)
+    expect(rows[0].find('.home__row-pages').text()).toBe('10P')
+    expect(rows[1].find('.home__row-pages').exists()).toBe(false)
+    // 旧瀑布流/网格形态（GalleryList/GridCard）退场。
+    expect(wrapper.find('.gallery-grid__cell').exists()).toBe(false)
+    expect(wrapper.find('.gallery-list__row').exists()).toBe(false)
+    expect(wrapper.find('.app-card').exists()).toBe(false)
   })
 
-  it('virtualizes the grid: renders only the visible rows plus overscan', async () => {
-    // Grid math under test (list mode uses a fixed card-height estimate).
-    // Grid mode now comes from preferences, not localStorage (B-1).
-    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'grid' }))
-    const items = Array.from({ length: 200 }, (_, i) =>
-      gallery({ gid: i + 1, title: `G${i + 1}` }),
-    )
-    await mountHome(items)
+  it('routes row titles through maskedTitle — masking on shows only #<gid> (privacy red line)', async () => {
+    setPrivacyMaskEnabled(true)
+    await mountHome([gallery({ gid: 7, title: 'Secret Title', titleJpn: '秘密のタイトル' })])
 
-    const scroller = wrapper.find('.fast-scroller__container')
-    expect(scroller.exists()).toBe(true)
-    const el = scroller.element
-    // 500px wide / 120px min column → 4 columns; 600px viewport → 3.2 rows.
-    // scrollTop 1875px → row 10; window = rows 7..17 with 3 overscan rows.
-    Object.defineProperty(el, 'clientHeight', { value: 600, configurable: true })
-    Object.defineProperty(el, 'clientWidth', { value: 500, configurable: true })
-    Object.defineProperty(el, 'scrollTop', { value: 1875, configurable: true })
-    // Keep the load-more sentinel quiet (ContentLayout's scroller handler
-    // compares scrollTop + clientHeight against scrollHeight).
-    Object.defineProperty(el, 'scrollHeight', { value: 20000, configurable: true })
-
-    window.dispatchEvent(new Event('resize'))
-    await flushPromises()
-    el.dispatchEvent(new Event('scroll'))
-    await flushPromises()
-
-    const cards = wrapper.findAll('.app-card')
-    // Rows 7..17 × 4 columns = 40 cards, far fewer than the 200 galleries.
-    expect(cards).toHaveLength(40)
-    // Window starts at item index 28 (gid 29); items far below stay unmounted.
-    expect(cards[0].text()).toContain('G29')
-    expect(wrapper.text()).not.toContain('G150')
-
-    // The spacers preserve the full 50-row scroll geometry around the window
-    // (7 rows above, 10 window rows, 33 rows below × 187.5px row height).
-    const spacers = wrapper.findAll('.home__virtual-spacer')
-    expect(spacers).toHaveLength(2)
-    expect(spacers[0].attributes('style')).toContain('1312.5px')
-    expect(spacers[1].attributes('style')).toContain('6187.5px')
+    const row = wrapper.find('.app-list-row')
+    expect(row.find('.app-list-row__title').text()).toBe('#7')
+    // 打码开启时日文副题一并隐藏（同 GalleryCard 的 !privacyMaskEnabled 守卫）。
+    expect(row.find('.app-list-row__subtitle').exists()).toBe(false)
   })
+
+  it('opens the gallery detail from the thumbnail click zone (A4)', async () => {
+    await mountHome([gallery({ gid: 42, token: 'abc123' })])
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/42', query: { token: 'abc123' } })
+  })
+
+  it('opens the reader directly from the row body click zone (A4)', async () => {
+    await mountHome([gallery({ gid: 7, token: 'tok7' })])
+
+    await wrapper.find('.app-list-row').trigger('click')
+    expect(pushMock).toHaveBeenCalledWith({ path: '/reader/7', query: { token: 'tok7' } })
+  })
+
+  /* -------------------------------- feed mode ------------------------------ */
 
   it('loads the popular feed through galleryApi.feed when ?feed=popular', async () => {
     routeMock.query = { feed: 'popular' }
     feedListMock.mockResolvedValue({ success: true, data: [gallery()], total: 1 })
     wrapper = mount(HomeView)
     await flushPromises()
+    await flushPromises()
 
     expect(galleryApi.feed).toHaveBeenCalledWith('popular', 0, 25)
     expect(galleryApi.search).not.toHaveBeenCalled()
-    expect(wrapper.find('.app-card').exists()).toBe(true)
+    expect(wrapper.find('.app-list-row').exists()).toBe(true)
   })
 
   it('loads the subscription feed when ?feed=subscription', async () => {
     routeMock.query = { feed: 'subscription' }
     feedListMock.mockResolvedValue({ success: true, data: [gallery()], total: 1 })
     wrapper = mount(HomeView)
+    await flushPromises()
     await flushPromises()
 
     expect(galleryApi.feed).toHaveBeenCalledWith('subscription', 0, 25)
@@ -255,6 +278,7 @@ describe('HomeView (首页)', () => {
     })
     wrapper = mount(HomeView)
     await flushPromises()
+    await flushPromises()
 
     expect(galleryApi.feed).toHaveBeenCalledWith('toplist', 0, 25)
     expect(galleryApi.search).not.toHaveBeenCalled()
@@ -263,8 +287,10 @@ describe('HomeView (首页)', () => {
     expect(rows[0].text()).toContain('parody:one piece')
     expect(rows[0].text()).toContain('999')
     expect(rows[1].text()).toContain('language:chinese')
-    // The gallery grid is not rendered in toplist mode.
-    expect(wrapper.find('.app-card').exists()).toBe(false)
+    // The gallery list is not rendered in toplist mode.
+    expect(wrapper.find('.app-list-row').exists()).toBe(false)
+    // toplist 无上游分页（total=返回行数）——分页条不渲染。
+    expect(wrapper.find('[data-testid="home-pagination"]').exists()).toBe(false)
   })
 
   it('keeps the search path when no feed query is present', async () => {
@@ -276,16 +302,18 @@ describe('HomeView (首页)', () => {
     expect(galleryApi.feed).not.toHaveBeenCalled()
   })
 
-  it('reloads page 0 with the new mode when the feed query changes', async () => {
+  it('reloads page 1 with the new mode when the feed query changes', async () => {
     routeMock.query = { feed: 'subscription' }
     feedListMock.mockResolvedValue({ success: true, data: [gallery()], total: 1 })
     wrapper = mount(HomeView)
+    await flushPromises()
     await flushPromises()
     expect(galleryApi.feed).toHaveBeenCalledWith('subscription', 0, 25)
 
     // Mutate through Vue's cached proxy so the query watcher re-fires
     // (raw mutation of routeMock would bypass reactivity).
     reactive(routeMock).query = { feed: 'toplist' }
+    await flushPromises()
     await flushPromises()
     expect(galleryApi.feed).toHaveBeenLastCalledWith('toplist', 0, 25)
   })
@@ -325,7 +353,7 @@ describe('HomeView (首页)', () => {
     expect(galleryApi.search).toHaveBeenCalledWith('female:big', undefined, 0, 25, undefined)
   })
 
-  it('debounces rapid filter edits into a single search (C6)', async () => {
+  it('debounces rapid filter edits into a single filtered search (C6)', async () => {
     vi.useFakeTimers()
     await mountHome([gallery()])
     vi.mocked(galleryApi.search).mockClear()
@@ -336,7 +364,10 @@ describe('HomeView (首页)', () => {
     await vi.advanceTimersByTimeAsync(400)
     expect(galleryApi.search).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(200)
+    await flushPromises()
     expect(galleryApi.search).toHaveBeenCalledTimes(1)
+    // 筛选参数随请求透传（A4：仅形态切换，参数语义不变），回第 1 页。
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 0, 25, { sort: 3 })
     vi.useRealTimers()
   })
 
@@ -369,38 +400,149 @@ describe('HomeView (首页)', () => {
     // 成功后对话框关闭。
     expect(document.querySelector('.dialog-scrim')).toBeNull()
   })
+})
 
-  it('resets loadingMore when an in-flight append is superseded by a new search (F5)', async () => {
-    // Page 0 resolves; the page-1 append hangs until the test releases it.
-    let releaseAppend: (value: GalleryListResponse) => void = () => {}
-    vi.mocked(galleryApi.search).mockImplementation(
-      (_kw?: string, _category?: number, page?: number): Promise<GalleryListResponse> => {
-        if ((page ?? 0) === 0) {
-          return Promise.resolve({ success: true, data: [gallery()], total: 50 })
-        }
-        return new Promise<GalleryListResponse>((resolve) => {
-          releaseAppend = resolve
-        })
-      },
-    )
+describe('HomeView — A4 服务端分页（分页条，usePagedList）', () => {
+  let wrapper: VueWrapper
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    pushMock.mockClear()
+    routeMock.query = {}
+    availability.state = null
+    availability.downAt = null
+    availability.lastReason = null
+    availability.lastLoadedAt = null
+    markUnknown()
+    setPrivacyMaskEnabled(false)
+    vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
+    vi.mocked(authApi.ehSession).mockResolvedValue({
+      signedIn: false,
+      expired: false,
+      gallerySite: 0,
+      cookies: [],
+    })
+    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'list' }))
+    vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
+    vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UP' })
+    vi.mocked(siteApi.probeAvailability).mockResolvedValue({ state: 'UP' })
+  })
+
+  afterEach(() => {
+    setPrivacyMaskEnabled(false)
+    wrapper?.unmount()
+    vi.clearAllMocks()
+  })
+
+  /**
+   * 按上游分页语义切片的 search mock：`page` 即 0 起 EH 页索引（视图把
+   * usePagedList 的 1 起页码减 1 直传），每页固定 25 条，total = 全集数。
+   */
+  function pagedSearch(totalRows: number) {
+    return async (
+      _kw?: string,
+      _cat?: number,
+      page = 0,
+      pageSize = 25,
+    ): Promise<GalleryListResponse> => {
+      const start = page * pageSize
+      const count = Math.max(0, Math.min(pageSize, totalRows - start))
+      return {
+        success: true,
+        data: Array.from({ length: count }, (_, i) =>
+          gallery({ gid: start + i + 1, title: `G ${start + i + 1}` }),
+        ),
+        total: totalRows,
+      }
+    }
+  }
+
+  async function mountPaged(totalRows: number): Promise<void> {
+    vi.mocked(galleryApi.search).mockImplementation(pagedSearch(totalRows))
     wrapper = mount(HomeView)
     await flushPromises()
-    expect(wrapper.find('[data-testid="content-state-content"]').exists()).toBe(true)
-
-    // 滚动近底 → 触发 append（第 2 页，挂起中）。
-    const scroller = wrapper.find('.fast-scroller__container').element as HTMLElement
-    scroller.dispatchEvent(new Event('scroll'))
     await flushPromises()
-    expect(wrapper.find('[data-testid="content-loading-more"]').exists()).toBe(true)
+  }
 
-    // 飞行中的 append 被新的搜索（replace，seq 作废旧请求）取代。
-    wrapper.findComponent(SearchBar).vm.$emit('search', 'new-keyword')
+  it('first screen loads only page 1 and shows the pagination bar (no full fetch)', async () => {
+    await mountPaged(120)
+
+    // 首屏：上游 0 起 EH 页索引 0、25 条/页，整页替换渲染。
+    expect(galleryApi.search).toHaveBeenCalledTimes(1)
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 0, 25, undefined)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(25)
+    expect(wrapper.text()).toContain('G 1')
+    // 第 2 页内容从未请求（服务端分页替代无限滚动/虚拟窗口）。
+    expect(wrapper.text()).not.toContain('G 26')
+    // 分页条：第 1 / 5 页 · 120 条。
+    const bar = wrapper.find('[data-testid="home-pagination"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 120 条')
+  })
+
+  it('hides the pagination bar when total <= pageSize (Android 语义)', async () => {
+    vi.mocked(galleryApi.search).mockResolvedValue({
+      success: true,
+      data: [gallery()],
+      total: 1,
+    })
+    wrapper = mount(HomeView)
+    await flushPromises()
     await flushPromises()
 
-    // 释放被作废的 append——loadingMore 必须复位（页脚 spinner 消失）。
-    releaseAppend({ success: true, data: [], total: 0 })
+    expect(wrapper.find('[data-testid="home-pagination"]').exists()).toBe(false)
+  })
+
+  it('jumps to a page via the page buttons (whole-page replace)', async () => {
+    await mountPaged(120)
+
+    const bar = () => wrapper.find('[data-testid="home-pagination"]')
+    await bar()
+      .findAll('.pagination-bar__page')
+      .find((b) => b.text() === '2')!
+      .trigger('click')
     await flushPromises()
-    expect(wrapper.find('[data-testid="content-loading-more"]').exists()).toBe(false)
+    await flushPromises()
+
+    // usePagedList 页码 2 → 上游 0 起 EH 页索引 1。
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 1, 25, undefined)
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(25)
+    expect(wrapper.text()).toContain('G 26')
+    expect(bar().find('.pagination-bar__info').text()).toBe('第 2 / 5 页 · 120 条')
+    expect(bar().find('.pagination-bar__page--active').text()).toBe('2')
+  })
+
+  it('jumps through the page input (钳制到页码窗口)', async () => {
+    await mountPaged(120)
+
+    const input = wrapper.find('.pagination-bar__input')
+    await input.setValue(5)
+    await wrapper.find('.pagination-bar__btn').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 4, 25, undefined)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 5 / 5 页 · 120 条')
+    // 末页只剩 20 条——整页替换（不再是追加语义）。
+    expect(wrapper.findAll('.app-list-row')).toHaveLength(20)
+    expect(wrapper.text()).toContain('G 120')
+  })
+
+  it('pages with keyboard PageDown / PageUp (PC)', async () => {
+    await mountPaged(120)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown', cancelable: true }))
+    await flushPromises()
+    await flushPromises()
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 1, 25, undefined)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 2 / 5 页 · 120 条')
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp', cancelable: true }))
+    await flushPromises()
+    await flushPromises()
+    expect(galleryApi.search).toHaveBeenLastCalledWith(undefined, undefined, 0, 25, undefined)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 120 条')
   })
 })
 
@@ -412,9 +554,23 @@ describe('HomeView (B-1 localStorage → preferences listMode migration)', () =>
     localStorage.clear()
     pushMock.mockClear()
     routeMock.query = {}
+    availability.state = null
+    availability.downAt = null
+    availability.lastReason = null
+    availability.lastLoadedAt = null
+    markUnknown()
+    setPrivacyMaskEnabled(false)
     vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
     vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: [gallery()], total: 1 })
+    vi.mocked(authApi.ehSession).mockResolvedValue({
+      signedIn: false,
+      expired: false,
+      gallerySite: 0,
+      cookies: [],
+    })
     vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
+    vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UP' })
+    vi.mocked(siteApi.probeAvailability).mockResolvedValue({ state: 'UP' })
   })
 
   afterEach(() => {
@@ -504,7 +660,14 @@ describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
     availability.lastReason = null
     availability.lastLoadedAt = null
     markUnknown()
+    setPrivacyMaskEnabled(false)
     vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
+    vi.mocked(authApi.ehSession).mockResolvedValue({
+      signedIn: false,
+      expired: false,
+      gallerySite: 0,
+      cookies: [],
+    })
     vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ listMode: 'grid' }))
     vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
     vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UNKNOWN' })
@@ -576,7 +739,7 @@ describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
     await flushPromises()
     await flushPromises()
 
-    // 探测成功 → 状态 UP → 横幅消失 + 父视图刷新（再次加载第 0 页）。
+    // 探测成功 → 状态 UP → 横幅消失 + 父视图刷新（静默重载第 1 页）。
     expect(wrapper.find('[data-testid="availability-banner"]').exists()).toBe(false)
     expect(galleryApi.search).toHaveBeenCalledTimes(2)
   })

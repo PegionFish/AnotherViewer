@@ -34,10 +34,10 @@
         @remove-filter-chip="onRemoveFilterChip"
         @clear-filter-chips="onClearFilters"
       />
-      <!-- Wave-1 1a: anchored PC filter popover, coexists with the viewMode
-           toggle (P2 stitching). keywordMode + save-quick-search wiring
-           mirrors SearchView (plan-2026-09-05 C3 — the radio and the save
-           action were dead without it). -->
+      <!-- Wave-1 1a: anchored PC filter popover, coexists with the search
+           input (keywordMode + save-quick-search wiring mirrors SearchView,
+           plan-2026-09-05 C3 — the radio and the save action were dead
+           without it). -->
       <FilterPanel
         v-model:open="filterPanelOpen"
         v-model:keyword-mode="keywordMode"
@@ -48,20 +48,82 @@
       />
     </div>
 
+    <!-- 分页条（A4 定案，W3-F1）：与下载/历史页同构的固定分页导航——页码
+         窗口 + 前后页 + 跳页。上游（EH 站点列表）固定每页 25 条、没有条数
+         档位，故不提供条/页下拉。total ≤ pageSize 隐藏（Android
+         PaginationIndicator 语义）；toplist 无上游分页（total=返回行数），
+         同样不渲染。固定在滚动区上方、吃浮动搜索条清理位。 -->
+    <nav
+      v-if="showPagination"
+      class="pagination-bar home__pagination"
+      data-testid="home-pagination"
+      aria-label="首页分页"
+    >
+      <span class="pagination-bar__info">
+        第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
+      </span>
+      <span class="pagination-bar__pages" role="group" aria-label="页码">
+        <button
+          type="button"
+          class="pagination-bar__page"
+          :disabled="currentPage <= 1"
+          aria-label="上一页"
+          @click="jumpToPage(currentPage - 1)"
+        >
+          ‹
+        </button>
+        <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+          <button
+            v-if="item !== '…'"
+            type="button"
+            class="pagination-bar__page"
+            :class="{ 'pagination-bar__page--active': item === currentPage }"
+            :aria-current="item === currentPage ? 'page' : undefined"
+            :aria-label="`第 ${item} 页`"
+            @click="jumpToPage(item)"
+          >
+            {{ item }}
+          </button>
+          <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+        </template>
+        <button
+          type="button"
+          class="pagination-bar__page"
+          :disabled="currentPage >= totalPages"
+          aria-label="下一页"
+          @click="jumpToPage(currentPage + 1)"
+        >
+          ›
+        </button>
+      </span>
+      <span class="pagination-bar__jump">
+        <input
+          v-model.number="jumpInput"
+          class="pagination-bar__input"
+          type="number"
+          min="1"
+          :max="totalPages"
+          :aria-label="`跳页（1 至 ${totalPages}）`"
+          @keyup.enter="jumpToPage()"
+          placeholder="页"
+        />
+        <button type="button" class="pagination-bar__btn" @click="jumpToPage()">
+          跳页
+        </button>
+      </span>
+    </nav>
+
     <!-- ContentLayout: loading spinner / sadpanda empty tip / error retry /
-         pull-to-refresh header / infinite-paging footer / FastScroller. -->
+         pull-to-refresh header（无限滚动页脚已随 A4 分页退役）. -->
     <ContentLayout
       ref="contentLayoutRef"
       class="home__content"
       :state="contentState"
       :refreshing="refreshing"
-      :loading-more="loadingMore"
-      :has-more="hasMore"
       empty-text="这里什么都没有"
       :error-text="errorText"
       @update:refreshing="refreshing = $event"
       @refresh="onRefresh"
-      @load-more="onLoadMore"
       @retry="onRefresh"
     >
       <template #empty>
@@ -92,7 +154,7 @@
         </p>
       </template>
       <!-- Toplist feed: lightweight ranked rows (rank + tag + value).
-           Feed mode replaces the virtualized gallery grid entirely. -->
+           Feed mode replaces the gallery list entirely. -->
       <div v-if="feedMode === 'toplist'" class="home__toplist">
         <!-- 打码模式下后端把 value 替换为 #gid、href 清空——行退化为不可点的
              div（href 为空时不渲染 <a>，避免点击原地刷新）。 -->
@@ -111,30 +173,36 @@
           <span class="home__toplist-value">{{ item.value }}</span>
         </component>
       </div>
-      <!-- Virtualized gallery list: only the rows intersecting the viewport
-           (+ overscan) are mounted; the spacers above/below preserve the full
-           scroll height so the scrollbar and the load-more footer (rendered
-           after the slot by ContentLayout) keep working. GalleryList (B-1)
-           renders the grid/list form from `prefs.general.listMode` and owns
-           the view-mode toggle. -->
-      <div v-else ref="virtualHostRef" class="home__virtual">
-        <div
-          class="home__virtual-spacer"
-          :style="{ height: `${topSpacerHeight}px` }"
-          aria-hidden="true"
-        />
-        <GalleryList :items="visibleGalleries" @select="openGallery" />
-        <div
-          class="home__virtual-spacer"
-          :style="{ height: `${bottomSpacerHeight}px` }"
-          aria-hidden="true"
-        />
+      <!-- A4 定案（W3-F1）：与下载/历史页完全同构的全宽单列密信息行——共享
+           AppListRow（缩略图→详情 / 主体→直接阅读 的行内点击分区），整页
+           替换渲染当前页。虚拟窗口数学（spacers/measure/overscan）随分页
+           退役——单页 ≤ 上游上限，无需窗口化。 -->
+      <div v-else class="home__list" :class="{ 'home__list--bar': showPagination }">
+        <AppListRow
+          v-for="row in rows"
+          :key="row.gallery.gid"
+          :id="row.gallery.gid"
+          :gid="row.gallery.gid"
+          :title="displayTitle(row.gallery)"
+          :subtitle="displaySubtitle(row.gallery)"
+          :thumb="row.gallery.thumb"
+          @open="openDetail"
+          @read="openReader"
+        >
+          <!-- 元信息行：分类 chip + 页数（元数据优先，对齐 GalleryCard）。 -->
+          <template #meta>
+            <CategoryChip v-if="row.chip" :category="row.chip" />
+            <span v-if="row.gallery.pages > 0" class="home__row-pages">
+              {{ row.gallery.pages }}P
+            </span>
+          </template>
+        </AppListRow>
       </div>
     </ContentLayout>
 
     <!-- FAB pair: primary = back to top (Android `v_go_to`), secondary =
          refresh. The cluster once expanded speed-dial style, but after the
-         list/grid toggle moved into GalleryList's toolbar (B-1) only refresh
+         list/grid toggle retired with the waterfall (A4) only refresh
          remained — a single action behind an expand step is pure friction,
          so both FABs are permanently visible (FabLayout alwaysVisible). -->
     <FabLayout
@@ -190,26 +258,41 @@
 <script setup lang="ts">
 /**
  * HomeView — the gallery list screen (S1), replicating Android `HomeScene` +
- * `GalleryListScene`: a floating SearchBar over an auto-column gallery list,
- * pull-to-refresh, infinite paging, empty/error tips and the bottom-right
- * FabLayout cluster.
+ * `GalleryListScene`: a floating SearchBar over the A4 single-column dense
+ * info rows, pagination bar, pull-to-refresh, empty/error tips and the
+ * bottom-right FabLayout cluster.
+ *
+ * A4 定案（W3-F1）：瀑布流/无限滚动出局——所有列表视图完全参照下载页逻辑，
+ * 全宽单列密信息行（共享 `AppListRow`：缩略图→详情 / 主体→直接阅读 的行内
+ * 点击分区）+ 分页导航（共享 `usePagedList` 状态机，整页替换渲染）。
+ *
+ * 数据源（W1-B1 翻转后）：空关键词 = 站点最新列表。上游（EH 站点列表）固定
+ * 每页 25 条，服务端 `total = 结果页数 × 25`——usePagedList 的 1 起页码换算
+ * 成上游 0 起 EH 页索引直传（offset 形态；条数档位只有 25 一档，分页条不做
+ * 条数切换）。feed 模式（?feed=，frozen 契约）与搜索/筛选参数透传保持，仅
+ * 形态切换；toplist 是无分页的排行行（tag/value/href），由独立 pagedList
+ * 实例驱动。
  *
  * Composition (all frozen-contract components):
- * - `SearchBar`   — controlled state machine (normal → search → search-list);
- *                   quick searches load as suggestion rows, mirroring the
- *                   Android quick-search entries in the suggestion list.
+ * - `SearchBar`     — controlled state machine (normal → search → search-list);
+ *                     quick searches load as suggestion rows, mirroring the
+ *                     Android quick-search entries in the suggestion list.
+ * - `FilterPanel`   — anchored PC filter popover (keywordMode + save-quick-
+ *                     search wiring mirrors SearchView).
  * - `ContentLayout` — ViewTransition states (loading / content / empty /
- *                   error), pull-to-refresh header (v-model:refreshing),
- *                   `load-more` footer paging, sadpanda tip retry.
- * - `GalleryList` — shared grid/list renderer (B-1): consumes
- *                   `prefs.general.listMode` and owns the view-mode toggle;
- *                   grid column count is width-derived, never hardcoded
- *                   (contracts/responsive-strategy.md §4).
- * - `FabLayout`   — primary go-to-top + secondary refresh.
+ *                     error), pull-to-refresh header (v-model:refreshing),
+ *                     sadpanda tip retry.
+ * - `AppListRow`    — shared single-column row skeleton (W3-C1): thumb /
+ *                     title / subtitle / meta slot; title 消费方先经
+ *                     `maskedTitle` 脱敏（隐私红线）。
+ * - `usePagedList`  — server pagination state machine (W3-C1): page window /
+ *                     jump / stale guard; view states stay in this host via
+ *                     onLoadStart/onSuccess/onError hooks.
+ * - `FabLayout`     — primary go-to-top + secondary refresh.
  *
- * The list/grid mode lives in server preferences (`general.listMode`). The
- * legacy localStorage persistence is migrated once on first load (B-1): the
- * stored value is written into preferences and the key then removed.
+ * KeepAlive（App.vue 列表缓存按 fullPath 分实例）：页码还原语义 = 页码
+ * （currentPage 随组件实例存续）+ 页内滚动（滚动容器 DOM 随 KeepAlive 保留
+ * scrollTop），从阅读器/详情返回即还原，无需额外逻辑。
  */
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -217,13 +300,16 @@ import { authApi } from '@/api/auth'
 import { galleryApi, type FeedMode } from '@/api/gallery'
 import { isOfflineError, isEhUnavailableError } from '@/api/client'
 import { availability, loadAvailability, markDown } from '@/stores/availability'
+import { usePagedList } from '@/composables/usePagedList'
+import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
 import AvailabilityBanner from '@/components/common/AvailabilityBanner.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
+import CategoryChip from '@/components/atoms/CategoryChip.vue'
+import AppListRow from '@/components/gallery/AppListRow.vue'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
-import GalleryList, { resolveListMode } from '@/components/gallery/GalleryList.vue'
 import type { SearchFilters } from '@/api/gallery'
 import {
   filterChips,
@@ -234,21 +320,31 @@ import {
 } from '@/components/search/searchFilters'
 import { useAuthStore } from '@/stores/auth'
 import { usePreferencesStore } from '@/stores/preferences'
-import type {
-  ContentState,
-  FabAction,
-  GalleryInfo,
-  NormalSearchMode,
-  SearchBarState,
-  SearchSuggestion,
+import {
+  CATEGORY_BIT_VALUES,
+  CATEGORY_BY_BIT,
+  CATEGORY_LABELS,
+  CATEGORY_ORDER,
+  type ContentState,
+  type FabAction,
+  type GalleryCategory,
+  type GalleryInfo,
+  type NormalSearchMode,
+  type SearchBarState,
+  type SearchSuggestion,
 } from '@/types/components'
 import type { TopListItem } from '@/types'
 
 /** ContentLayout's view states (frozen `ContentState` + its `error` extra). */
 type HomeContentState = ContentState | 'error'
 
-/** AnotherViewer's default gallery page size. */
+/**
+ * 上游（EH 站点列表）固定每页 25 条（服务端 total = 结果页数 × 25）——分页
+ * 档位只有这一档，分页条不提供条/页切换；fetchPage 里把 1 起页码换算成上游
+ * 0 起 EH 页索引（page - 1）。
+ */
 const PAGE_SIZE = 25
+const PAGE_SIZES = [PAGE_SIZE] as const
 
 /** Keyword mode → QuickSearchDto mode number (SearchView 同款映射，W3 R4-10). */
 const MODE_TO_NUM: Readonly<Record<NormalSearchMode, number>> = {
@@ -296,144 +392,191 @@ const feedTitle = computed(() => (feedMode.value ? FEED_TITLES[feedMode.value] :
 
 /* -------------------------------- list state ---------------------------- */
 
-const galleries = ref<GalleryInfo[]>([])
-const topList = ref<TopListItem[]>([])
-const page = ref(0)
-const total = ref(0)
-const fetchedPages = ref(0)
-const noMoreData = ref(false)
 const contentState = ref<HomeContentState>('loading')
 const refreshing = ref(false)
-const loadingMore = ref(false)
 /** Error-state copy; switched to an offline tip when the SW reports 503 offline. */
 const errorText = ref('加载失败，请稍后重试')
 const contentLayoutRef = ref<InstanceType<typeof ContentLayout> | null>(null)
 
-/** Monotonic request guard — stale responses (fast refresh / search) drop. */
-let requestSeq = 0
+/* ------------------------- Wave-1 1a search filters ---------------------- */
 
-/** Append-with-dedupe by gid — bumped galleries can reappear across pages. */
-function appendDeduped<T extends { gid: number | string | null }>(
-  existing: T[],
-  fresh: T[],
-): { items: T[]; noMore: boolean } {
-  const seen = new Set(existing.map((g) => g.gid))
-  const added = fresh.filter((g) => !seen.has(g.gid))
-  return { items: [...existing, ...added], noMore: fresh.length === 0 || added.length === 0 }
+const filterPanelOpen = ref(false)
+const activeFilters = ref<SearchFilters>({})
+const activeFilterChips = computed<FilterChip[]>(() => filterChips(activeFilters.value))
+
+/** Keyword search mode (FilterPanel radio, C3 wiring — mirrors SearchView). */
+const keywordMode = ref<NormalSearchMode>('normal')
+
+/* --------------------------------- search ------------------------------- */
+
+const searchState = ref<SearchBarState>('normal')
+const keyword = ref('')
+const appliedKeyword = ref('')
+
+/**
+ * 搜索请求关键词：keyword mode 的 `uploader:`/`tag:` 前缀在请求时合成
+ * （SearchView `composedKeyword` 同款；subscription 与 normal 同义落回普通
+ * 搜索），输入框内保持用户原文。
+ */
+function composedSearchKeyword(): string | undefined {
+  const q = appliedKeyword.value
+  if (!q) return undefined
+  if (keywordMode.value === 'uploader') return `uploader:${q}`
+  if (keywordMode.value === 'tag') return `tag:${q}`
+  return q
+}
+
+/* ------------------------------ paged lists ------------------------------ */
+
+/** Shared error shaping for both paged sources（EH 熔断 / 离线 / 通用）. */
+function applyLoadError(error: unknown): void {
+  if (isEhUnavailableError(error)) {
+    // EH 熔断（§0）：列表端点不携带 HTTP 错误码（success:false + cause），
+    // 由视图落 DOWN 标记 + 专属文案——服务器已短路，只读本地内容。
+    markDown()
+    errorText.value = 'EH 平台当前不可达，仅显示本地内容'
+  } else {
+    errorText.value = isOfflineError(error) ? '当前离线，且无本地缓存可用' : '加载失败，请稍后重试'
+  }
 }
 
 /**
- * Commit a fetched page onto a gid-keyed list and drive the shared
- * page/total/fetched/no-more bookkeeping for both the search and feed paths.
- * Returns the resulting list so the caller can assign its ref.
+ * 分页状态机（W3-C1 usePagedList）：页码 / 跳页 / PC 页码窗口 / stale 竞态
+ * 守卫。fetchPage 闭包读取当前 feed/关键词/筛选（重载时总是取最新值），
+ * 把 1 起页码换算成搜索/ feed 端点的 0 起页参数（page - 1；上游固定
+ * 25 条/页，条数档位单一）。视图四态机与错误文案留在本视图，经 onLoadStart
+ * / onSuccess / onError 钩子接线。
+ *
+ * PC 键盘翻页不交给 composable 的 keyboardPaging（它无条件挂 window）——
+ * toplist 模式无分页，键盘处理留在本视图按模式豁免（见 onPageKey）。
  */
-function commitPage<T extends { gid: number | string | null }>(
-  current: T[],
-  next: T[],
-  target: number,
-  count: number,
-  mode: 'replace' | 'append',
-): T[] {
-  page.value = target
-  total.value = count
-  if (mode === 'replace') {
-    fetchedPages.value = 1
-    noMoreData.value = next.length === 0
-    return next
-  }
-  const { items, noMore } = appendDeduped(current, next)
-  if (noMore) noMoreData.value = true
-  else fetchedPages.value += 1
-  return items
-}
-
-async function loadPage(target: number, mode: 'replace' | 'append'): Promise<void> {
-  const seq = ++requestSeq
-  if (mode === 'append') loadingMore.value = true
-  try {
+const {
+  items: galleries,
+  total,
+  currentPage,
+  totalPages,
+  paginationVisible,
+  pageWindow,
+  jumpInput,
+  load: loadGalleryPage,
+  jumpToPage,
+} = usePagedList<GalleryInfo>({
+  fetchPage: async (page, size) => {
     // Feed mode drives the data source; the search keyword is ignored there
     // (frozen feed contract — subscription/popular mirror search's envelope).
     const feed = feedMode.value
-    if (feed === 'toplist') {
-      const res = await galleryApi.feed('toplist', target, PAGE_SIZE)
-      if (seq !== requestSeq) return
-      topList.value = commitPage(topList.value, res.data, target, res.total, mode)
-    } else if (feed) {
-      const res = await galleryApi.feed(feed, target, PAGE_SIZE)
-      if (seq !== requestSeq) return
-      galleries.value = commitPage(galleries.value, res.data, target, res.total, mode)
-    } else {
-      const res = await galleryApi.search(
-        composedSearchKeyword(),
-        undefined,
-        target,
-        PAGE_SIZE,
-        isFilterActive(activeFilters.value) ? activeFilters.value : undefined,
-      )
-      if (seq !== requestSeq) return
-      galleries.value = commitPage(galleries.value, res.data, target, res.total, mode)
+    if (feed && feed !== 'toplist') {
+      const res = await galleryApi.feed(feed, page - 1, size)
+      return { items: res.data, total: res.total }
     }
-    contentState.value = (feed === 'toplist' ? topList.value : galleries.value).length > 0 ? 'content' : 'empty'
-  } catch (error) {
-    if (seq !== requestSeq) return
+    const res = await galleryApi.search(
+      composedSearchKeyword(),
+      undefined,
+      page - 1,
+      size,
+      isFilterActive(activeFilters.value) ? activeFilters.value : undefined,
+    )
+    return { items: res.data, total: res.total }
+  },
+  pageSizes: PAGE_SIZES,
+  initialPageSize: PAGE_SIZE,
+  fallbackPageSize: PAGE_SIZE,
+  onLoadStart: () => {
+    contentState.value = 'loading'
+  },
+  onSuccess: (result) => {
+    contentState.value = result.items.length > 0 ? 'content' : 'empty'
+    contentLayoutRef.value?.scrollToTop()
+  },
+  onError: (error) => {
     console.error('[HomeView] 加载画廊列表失败', error)
-    // Append failures keep the loaded content; replace failures show the
-    // error tip (retry button re-triggers a refresh).
-    if (mode === 'replace') {
-      if (isEhUnavailableError(error)) {
-        // EH 熔断（§0）：列表端点不携带 HTTP 错误码（success:false + cause），
-        // 由视图落 DOWN 标记 + 专属文案——服务器已短路，只读本地内容。
-        markDown()
-        errorText.value = 'EH 平台当前不可达，仅显示本地内容'
-      } else {
-        errorText.value = isOfflineError(error) ? '当前离线，且无本地缓存可用' : '加载失败，请稍后重试'
-      }
-      contentState.value = 'error'
-    }
-  } finally {
-    // F5: 无条件复位——append 被后续 replace 作废（seq 过期）时也必须松开
-    // loadingMore，否则页脚 spinner 永久卡死（对照 DownloadView.loadMore）。
-    if (mode === 'append') loadingMore.value = false
-  }
+    applyLoadError(error)
+    // 首屏失败（无内容）→ 错误态（retry 重新加载）；翻页失败保留已载内容。
+    if (galleries.value.length === 0) contentState.value = 'error'
+  },
+})
+
+/**
+ * Toplist 独立分页实例：排行行（tag/value/href）不是 GalleryInfo，且上游
+ * toplist 无分页语义（total = 返回行数 → 分页条永不出现），只借状态机的
+ * stale 守卫与钩子接线。键盘翻页不启用。
+ */
+const {
+  items: topList,
+  load: loadToplistPage,
+} = usePagedList<TopListItem>({
+  fetchPage: async (page, size) => {
+    const res = await galleryApi.feed('toplist', page - 1, size)
+    return { items: res.data, total: res.total }
+  },
+  pageSizes: PAGE_SIZES,
+  initialPageSize: PAGE_SIZE,
+  fallbackPageSize: PAGE_SIZE,
+  onLoadStart: () => {
+    contentState.value = 'loading'
+  },
+  onSuccess: (result) => {
+    contentState.value = result.items.length > 0 ? 'content' : 'empty'
+    contentLayoutRef.value?.scrollToTop()
+  },
+  onError: (error) => {
+    console.error('[HomeView] 加载排行榜失败', error)
+    applyLoadError(error)
+    if (topList.value.length === 0) contentState.value = 'error'
+  },
+})
+
+/** 视图层加载入口：按当前模式选择数据源，回第 1 页。 */
+function loadFirstPage(): Promise<void> {
+  return feedMode.value === 'toplist' ? loadToplistPage(1) : loadGalleryPage(1)
 }
 
 /** Pull-to-refresh / error retry / empty tip retry / FAB refresh. */
 async function onRefresh(): Promise<void> {
-  if (contentState.value === 'content' && galleries.value.length > 0) {
+  const hasContent =
+    feedMode.value === 'toplist' ? topList.value.length > 0 : galleries.value.length > 0
+  if (contentState.value === 'content' && hasContent) {
     // Keep the list visible under the parked refresh header (Android
-    // RefreshLayout behavior), then snap back to the top.
+    // RefreshLayout behavior); silent reload keeps the state machine off the
+    // loading tip, onSuccess snaps back to the top.
     refreshing.value = true
     try {
-      await loadPage(0, 'replace')
+      await (feedMode.value === 'toplist'
+        ? loadToplistPage(1, { silent: true })
+        : loadGalleryPage(1, { silent: true }))
     } finally {
       refreshing.value = false
     }
-    contentLayoutRef.value?.scrollToTop()
   } else {
     refreshing.value = false
     contentState.value = 'loading'
-    await loadPage(0, 'replace')
+    await loadFirstPage()
   }
 }
 
-/** ContentLayout scrolled near the bottom — fetch and append the next page. */
-function onLoadMore(): void {
-  if (contentState.value !== 'content' || refreshing.value || loadingMore.value) return
-  if (noMoreData.value) return
-  if (fetchedPages.value * PAGE_SIZE >= total.value) return
-  void loadPage(page.value + 1, 'append')
+/** PC 键盘翻页（PageUp/PageDown，PC 端惯例）——INPUT/SELECT/TEXTAREA 聚焦
+ *  豁免；toplist 模式无分页，整体豁免（不发给画廊实例的静默翻页请求）；
+ *  KeepAlive 停用态整体豁免（监听器随实例常驻，不能后台劫持按键，audit P1-5 同类）。 */
+function onPageKey(event: KeyboardEvent): void {
+  if (feedMode.value === 'toplist' || !viewActive) return
+  const target = event.target as HTMLElement | null
+  if (
+    target &&
+    (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA')
+  ) {
+    return
+  }
+  if (event.key === 'PageDown') {
+    event.preventDefault()
+    if (currentPage.value < totalPages.value) jumpToPage(currentPage.value + 1)
+  } else if (event.key === 'PageUp') {
+    event.preventDefault()
+    if (currentPage.value > 1) jumpToPage(currentPage.value - 1)
+  }
 }
 
-/**
- * 是否还有下一页——与 onLoadMore 的判定保持同一口径，喂给 ContentLayout 的
- * 「加载更多」兜底按钮（B3；自动滚动加载照旧）。
- */
-const hasMore = computed(() => !noMoreData.value && fetchedPages.value * PAGE_SIZE < total.value)
-
-function openGallery(gallery: GalleryInfo): void {
-  const query = gallery.token ? { token: gallery.token } : undefined
-  void router.push({ path: `/gallery/${gallery.gid}`, query })
-}
+/** 分页条可见性：total 超过一页才显示；toplist 无上游分页，不渲染。 */
+const showPagination = computed(() => feedMode.value !== 'toplist' && paginationVisible.value)
 
 /* ------------------------- empty-state guided CTA ----------------------- */
 
@@ -455,7 +598,8 @@ const ehSessionChecked = ref(false)
 
 /** Empty state: guide to the EH session config when the session isn't synced. */
 function goEhSession(): void {
-  void router.push('/admin/eh')
+  // A5-1：/admin 并入 /settings 分组——EH 会话页现居 /settings/server/eh。
+  void router.push('/settings/server/eh')
 }
 
 /** Probe the EH session state once on mount; failures keep the hint visible. */
@@ -470,14 +614,7 @@ async function checkEhSession(): Promise<void> {
   }
 }
 
-/* ------------------------------ list/grid mode -------------------------- */
-
-/**
- * Active layout — same source GalleryList consumes: `prefs.general.listMode`,
- * falling back to grid while the preferences are absent (B-1 defensive read).
- * HomeView needs it for the virtual-window column/row math below.
- */
-const viewMode = computed(() => resolveListMode(preferencesStore.prefs?.general?.listMode))
+/* ------------------------------ legacy listMode migration ---------------- */
 
 /** One-shot guard for the legacy localStorage → preferences migration. */
 let legacyModeMigrated = false
@@ -486,7 +623,8 @@ let legacyModeMigrated = false
  * B-1 migration: the pre-preferences list mode lived in localStorage. Once
  * preferences are available the stored value is written into
  * `general.listMode` (debounced PUT /preferences) and the key removed —
- * exactly once, so server-side values win afterwards.
+ * exactly once, so server-side values win afterwards.（A4 单列化后本视图不再
+ * 消费 listMode，迁移保留为该遗留键的一次性清理。）
  */
 function migrateLegacyListMode(): void {
   if (legacyModeMigrated || !preferencesStore.prefs) return
@@ -503,20 +641,7 @@ function migrateLegacyListMode(): void {
 
 watch(() => preferencesStore.prefs, migrateLegacyListMode, { immediate: true })
 
-/* --------------------------------- search ------------------------------- */
-
-const searchState = ref<SearchBarState>('normal')
-const keyword = ref('')
-const appliedKeyword = ref('')
-
-/* ------------------------- Wave-1 1a search filters ---------------------- */
-
-const filterPanelOpen = ref(false)
-const activeFilters = ref<SearchFilters>({})
-const activeFilterChips = computed<FilterChip[]>(() => filterChips(activeFilters.value))
-
-/** Keyword search mode (FilterPanel radio, C3 wiring — mirrors SearchView). */
-const keywordMode = ref<NormalSearchMode>('normal')
+/* ------------------------- search filters wiring ------------------------- */
 
 /** 筛选即时搜索防抖（C6）：连续勾选 N 个分类只发一次请求。 */
 let filterDebounceTimer: ReturnType<typeof setTimeout> | undefined
@@ -547,6 +672,7 @@ function onFilterPanelSearch(): void {
   }
   void applySearch(keyword.value)
 }
+
 const suggestions = ref<SearchSuggestion[]>([])
 let quickSearchesLoaded = false
 
@@ -562,25 +688,12 @@ function leaveSearchMode(): void {
   searchState.value = 'normal'
 }
 
-/**
- * 搜索请求关键词：keyword mode 的 `uploader:`/`tag:` 前缀在请求时合成
- * （SearchView `composedKeyword` 同款；subscription 与 normal 同义落回普通
- * 搜索），输入框内保持用户原文。
- */
-function composedSearchKeyword(): string | undefined {
-  const q = appliedKeyword.value
-  if (!q) return undefined
-  if (keywordMode.value === 'uploader') return `uploader:${q}`
-  if (keywordMode.value === 'tag') return `tag:${q}`
-  return q
-}
-
-/** IME action / programmatic search — reload page 0 with the new keyword. */
+/** IME action / programmatic search — reload page 1 with the new keyword. */
 function applySearch(query: string): void {
   const q = query.trim()
-  // Frozen feed 契约：loadPage 的 feed 分支忽略关键词——静默丢词是零反馈
-  // 失败（C2）。改为 router.replace 到 `/?keyword=` 深链形态：离开 feed 态、
-  // 意图可见，并由下方 keyword watcher 真正执行搜索。
+  // Frozen feed 契约：feed 分支忽略关键词——静默丢词是零反馈失败（C2）。改为
+  // router.replace 到 `/?keyword=` 深链形态：离开 feed 态、意图可见，并由
+  // 下方 keyword watcher 真正执行搜索。
   if (feedMode.value) {
     void router.replace({ path: '/', query: q ? { keyword: q } : {} })
     return
@@ -593,8 +706,7 @@ function commitKeyword(q: string): void {
   keyword.value = q
   appliedKeyword.value = q
   searchState.value = 'normal'
-  contentState.value = 'loading'
-  void loadPage(0, 'replace')
+  void loadGalleryPage(1)
 }
 
 /**
@@ -695,10 +807,7 @@ async function saveQuickSearch(): Promise<void> {
 
 /* ---------------------------------- FABs -------------------------------- */
 
-/**
- * The list/grid toggle moved into GalleryList's sticky toolbar (B-1) — the
- * cluster keeps refresh only, so it renders always-visible (no speed-dial).
- */
+/** The list/grid toggle retired with the waterfall (A4) — refresh only. */
 const fabActions: FabAction[] = [{ id: 'refresh', icon: 'refresh-dark', label: '刷新列表' }]
 
 function onPrimaryFab(): void {
@@ -711,180 +820,78 @@ function onSecondaryFab(action: FabAction): void {
   }
 }
 
-/* ------------------------------ virtual scrolling ------------------------ */
+/* ----------------------------- row presentation -------------------------- */
+
+/** 行展示标题——脱敏在本视图完成（隐私红线：标题必经 maskedTitle）。 */
+function displayTitle(gallery: GalleryInfo): string {
+  return maskedTitle(gallery.title || gallery.titleJpn || `#${gallery.gid}`, gallery.gid)
+}
+
+/** 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）。 */
+function displaySubtitle(gallery: GalleryInfo): string | null {
+  return !privacyMaskEnabled.value && gallery.titleJpn ? gallery.titleJpn : null
+}
+
+/* -------------------------------- category ------------------------------ */
+
+/** Unknown category fallback — Android `SiteUtils.UNKNOWN` bit. */
+const CATEGORY_UNKNOWN_BIT = 0x400
+
+/** Category string → bit lookup (labels + keys), mirrors HistoryView. */
+const NAME_TO_BIT = new Map<string, number>()
+for (const key of CATEGORY_ORDER) {
+  NAME_TO_BIT.set(CATEGORY_LABELS[key].toLowerCase(), CATEGORY_BIT_VALUES[key])
+  NAME_TO_BIT.set(key, CATEGORY_BIT_VALUES[key])
+}
 
 /**
- * Lightweight windowing for the gallery list (the previous `useVirtualScroll`
- * composable had no replacement after the audit): only the rows intersecting
- * the scroller viewport (+ overscan) are handed to GalleryList, while two
- * spacer divs above/below the list preserve the full list height — scrollbar
- * geometry, the FastScroller and ContentLayout's load-more footer (which
- * reads `scrollHeight` and lives after the slot) all keep working untouched.
- *
- * Geometry mirrors the CSS sources:
- * - grid columns = `floor((width + gap) / (minColumn + gap))` — the same
- *   math as GalleryGrid's `auto-fill minmax(120px, 1fr)`, reading
- *   `--column-width-grid-middle` / `--gallery-grid-interval` from computed
- *   style so breakpoint overrides stay honored;
- * - grid row height = column width × 1.5 (GalleryCard's default 2:3 tile);
- * - list mode = `floor(width / min(width, 480px))` auto-columns (GalleryList
- *   rows, `--column-width-list-long`) × measured first-card height, falling
- *   back to the 120px 2:3 thumb + paddings estimate.
- *
- * Rows are only estimated (tiles clamp to per-gallery aspect ratios), so an
- * overscan buffer keeps the window generous; cards re-run their staggered
- * entrance reveal when they mount (GalleryGrid/GalleryList own the
- * animation). Virtualization engages only with real viewport geometry —
- * headless environments (no layout) fall back to rendering the whole list.
+ * Normalizes a backend category value to its `SiteConfig` bit value.
+ * Accepts integer bits (2), stringified bits ("2"), labels ("Artist CG") and
+ * keys ("artist_cg").
  */
-const OVERSCAN_ROWS = 3
-/** `--column-width-grid-middle` (120px) fallback when styles are unavailable. */
-const GRID_MIN_COLUMN_WIDTH = 120
-/** `--gallery-grid-interval` (0dp) fallback when styles are unavailable. */
-const GRID_GAP = 0
-/** `--column-width-list-long` (480px) fallback when styles are unavailable. */
-const LIST_MIN_COLUMN_WIDTH = 480
-/** List-mode row estimate: 120px 2:3 thumb + body padding + card margins. */
-const LIST_ROW_HEIGHT = 136
+function categoryBit(raw: number | string): number {
+  if (typeof raw === 'number') return raw
+  const trimmed = raw.trim()
+  if (trimmed !== '' && !Number.isNaN(Number(trimmed))) return Number(trimmed)
+  return NAME_TO_BIT.get(trimmed.toLowerCase()) ?? CATEGORY_UNKNOWN_BIT
+}
 
-const virtualHostRef = ref<HTMLElement | null>(null)
-const scrollTop = ref(0)
-const containerHeight = ref(0)
-const containerWidth = ref(0)
-const columns = ref(1)
-const rowHeight = ref(LIST_ROW_HEIGHT)
+/** Numeric category bit → `GalleryCategory` key (undefined when unknown). */
+function categoryKeyOf(gallery: GalleryInfo): GalleryCategory | undefined {
+  return CATEGORY_BY_BIT[categoryBit(gallery.category)]
+}
 
-let scrollEl: HTMLElement | null = null
-let scrollHandler: (() => void) | null = null
-let onWindowResize: (() => void) | null = null
-let resizeObserver: ResizeObserver | null = null
-
-const totalRows = computed(() => Math.ceil(galleries.value.length / columns.value))
-
-/** Virtualization only engages once real viewport geometry is measurable. */
-const virtualized = computed(
-  () => containerHeight.value > 0 && rowHeight.value > 0 && columns.value > 0,
+/** Per-row view models: gallery + pre-resolved chip key (v-if narrows it). */
+const rows = computed(() =>
+  galleries.value.map((gallery) => ({ gallery, chip: categoryKeyOf(gallery) })),
 )
 
-const startRow = computed(() => {
-  if (!virtualized.value) return 0
-  return Math.min(
-    Math.max(0, Math.floor(scrollTop.value / rowHeight.value) - OVERSCAN_ROWS),
-    totalRows.value,
-  )
-})
+/* --------------------------------- routing ------------------------------- */
 
-const endRow = computed(() => {
-  if (!virtualized.value) return totalRows.value
-  return Math.min(
-    totalRows.value,
-    Math.ceil((scrollTop.value + containerHeight.value) / rowHeight.value) + OVERSCAN_ROWS,
-  )
-})
-
-/** Only the windowed slice of galleries is handed to GalleryGrid. */
-const visibleGalleries = computed(() => {
-  if (!virtualized.value) return galleries.value
-  return galleries.value.slice(startRow.value * columns.value, endRow.value * columns.value)
-})
-
-/** Spacer above the windowed grid — preserves the full-height scroll geometry. */
-const topSpacerHeight = computed(() => startRow.value * rowHeight.value)
-
-/** Spacer below the windowed grid (the load-more footer sits after it). */
-const bottomSpacerHeight = computed(() => (totalRows.value - endRow.value) * rowHeight.value)
-
-/**
- * The scrollable ancestor of the slot host — ContentLayout's scroller
- * (FastScroller's container or the plain scroll div). Detected via computed
- * overflow, with the known container classes as a style-unaware fallback.
- */
-function findScroller(el: HTMLElement | null): HTMLElement | null {
-  let node = el?.parentElement ?? null
-  while (node) {
-    const overflowY = getComputedStyle(node).overflowY
-    if (
-      /(auto|scroll|overlay)/.test(overflowY) ||
-      node.classList.contains('fast-scroller__container') ||
-      node.classList.contains('content-layout__plain-scroll')
-    ) {
-      return node
-    }
-    node = node.parentElement
-  }
-  return null
+/** 缩略图点击 → 详情页（本地 token 透传）。 */
+function openDetail(gid: number): void {
+  const gallery = galleries.value.find((g) => g.gid === gid)
+  void router.push({
+    path: `/gallery/${gid}`,
+    query: gallery?.token ? { token: gallery.token } : {},
+  })
 }
 
-/** Re-derive viewport size, column count and row height from the live DOM. */
-function measure(): void {
-  const host = virtualHostRef.value
-  if (!host) return
-  const scroller = scrollEl ?? findScroller(host)
-  if (!scroller) {
-    containerHeight.value = 0
-    return
-  }
-  scrollEl = scroller
-  containerHeight.value = scroller.clientHeight
-  containerWidth.value = scroller.clientWidth
-  const style = getComputedStyle(host)
-  if (viewMode.value === 'list') {
-    // Rows auto-fill at `min(100%, --column-width-list-long)` tracks — the
-    // same math as GalleryList's `.gallery-list__rows`.
-    const listColumnWidth =
-      parseFloat(style.getPropertyValue('--column-width-list-long')) || LIST_MIN_COLUMN_WIDTH
-    const track = Math.min(containerWidth.value, listColumnWidth)
-    columns.value = Math.max(1, Math.floor(containerWidth.value / Math.max(1, track)))
-    const cardHeight = host.querySelector('.app-card')?.getBoundingClientRect().height ?? 0
-    rowHeight.value = cardHeight > 0 ? cardHeight : LIST_ROW_HEIGHT
-  } else {
-    const minColumn = parseFloat(style.getPropertyValue('--column-width-grid-middle')) || GRID_MIN_COLUMN_WIDTH
-    const gap = parseFloat(style.getPropertyValue('--gallery-grid-interval')) || GRID_GAP
-    columns.value = Math.max(1, Math.floor((containerWidth.value + gap) / (minColumn + gap)))
-    const columnWidth = (containerWidth.value - (columns.value - 1) * gap) / columns.value
-    rowHeight.value = columnWidth * 1.5
-  }
-}
-
-/** Attach scroll/resize listeners to the scroller (idempotent). */
-function attachVirtualScroll(): void {
-  detachVirtualScroll()
-  const host = virtualHostRef.value
-  if (!host) return
-  const scroller = findScroller(host)
-  if (!scroller) return
-  scrollEl = scroller
-  scrollHandler = () => {
-    scrollTop.value = scroller.scrollTop
-  }
-  scroller.addEventListener('scroll', scrollHandler, { passive: true })
-  if (typeof ResizeObserver !== 'undefined') {
-    resizeObserver = new ResizeObserver(() => measure())
-    resizeObserver.observe(scroller)
-  }
-  onWindowResize = () => measure()
-  window.addEventListener('resize', onWindowResize)
-  measure()
-}
-
-function detachVirtualScroll(): void {
-  if (scrollEl && scrollHandler) scrollEl.removeEventListener('scroll', scrollHandler)
-  if (onWindowResize) window.removeEventListener('resize', onWindowResize)
-  scrollEl = null
-  scrollHandler = null
-  onWindowResize = null
-  resizeObserver?.disconnect()
-  resizeObserver = null
-  containerHeight.value = 0
+/** 行主体点击 → 直接进统一阅读器（A4 点击分区，快速续读）。 */
+function openReader(gid: number): void {
+  const gallery = galleries.value.find((g) => g.gid === gid)
+  void router.push({
+    path: `/reader/${gid}`,
+    query: gallery?.token ? { token: gallery.token } : {},
+  })
 }
 
 /* --------------------------------- lifecycle ---------------------------- */
 
 onMounted(() => {
-  // Preferences feed the GalleryList mode and the legacy-mode migration.
-  // GalleryList would load them on its own mount, but that only happens once
-  // the first page lands (ContentLayout renders its slot in the content
-  // state) — kick the load here so the migration runs as early as possible.
+  // Preferences feed the legacy listMode migration. Kick the load here so the
+  // migration runs as early as possible (the store would otherwise stay
+  // unloaded until some view needs a live pref).
   if (!preferencesStore.prefs && !preferencesStore.loading) {
     void preferencesStore.load()
   }
@@ -895,20 +902,22 @@ onMounted(() => {
   // 与自动请求短路（服务器/拦截器）同时生效。
   void loadAvailability()
   // `?keyword=` 深链（详情页 tag/uploader 链接等，C2）：首载即执行该搜索，
-  // 复用下方唯一的 loadPage(0, 'replace') 入口。
+  // 复用下方唯一的 loadFirstPage() 入口。
   const initialKeyword =
     typeof route.query.keyword === 'string' ? route.query.keyword.trim() : ''
   if (initialKeyword) {
     keyword.value = initialKeyword
     appliedKeyword.value = initialKeyword
   }
-  void loadPage(0, 'replace')
+  void loadFirstPage()
+  window.addEventListener('keydown', onPageKey)
 })
 
 /**
  * Feed navigation (/?feed=popular → /?feed=toplist, or a feed → the plain
- * home) reuses this component instance — reload page 0 when the query
- * changes (requestSeq drops any stale in-flight page).
+ * home) reuses this component instance — reload page 1 from the new source
+ * when the query changes (the paged lists' stale guards drop any in-flight
+ * page of the previous mode).
  *
  * C2：feed 被搜索替换时（applySearch 的 router.replace 同时去掉 feed、带上
  * keyword）不在此处重载——若 keyword watcher 会执行该搜索（词变化）就交给它；
@@ -934,13 +943,7 @@ watch(
     if (!viewActive) return
     const keywordParam = route.query.keyword
     if (typeof keywordParam === 'string' && keywordParam.trim() !== appliedKeyword.value) return
-    topList.value = []
-    galleries.value = []
-    page.value = 0
-    fetchedPages.value = 0
-    noMoreData.value = false
-    contentState.value = 'loading'
-    void loadPage(0, 'replace')
+    void loadFirstPage()
   },
 )
 
@@ -958,28 +961,10 @@ watch(
   },
 )
 
-/** (Re)attach once ContentLayout swaps in the scrolling content view. */
-watch(
-  contentState,
-  (state) => {
-    if (state === 'content') {
-      void nextTick(() => attachVirtualScroll())
-    } else {
-      detachVirtualScroll()
-    }
-  },
-  { immediate: true },
-)
-
-/** List/grid toggle changes the column math — re-measure. */
-watch(viewMode, () => {
-  void nextTick(() => measure())
-})
-
 onBeforeUnmount(() => {
   if (filterDebounceTimer) clearTimeout(filterDebounceTimer)
+  window.removeEventListener('keydown', onPageKey)
   window.removeEventListener('keydown', onSaveDialogKeydown)
-  detachVirtualScroll()
 })
 </script>
 
@@ -1040,13 +1025,34 @@ onBeforeUnmount(() => {
   min-height: 0;
 }
 
-/* GalleryList's sticky toggle toolbar clears the floating SearchBar through
-   `--gallery-list-clear-top` (its grid/rows no longer carry the clearance
-   themselves). */
-.home__virtual {
-  --gallery-list-clear-top: calc(
+/* 分页条（A4）：固定在滚动区上方，吃浮动搜索条清理位（同下载/历史页的
+   常驻分页导航形态）。 */
+.home__pagination {
+  flex-shrink: 0;
+  padding-top: calc(
     var(--gallery-padding-top-search-bar) + var(--availability-offset, 0px)
   );
+}
+
+/* Single-column dense rows (A4): the row skeleton (card surface / thumb /
+   title) lives in the shared AppListRow. 无分页条时行自己清理浮动搜索条；
+   分页条可见时清理位已由上方分页条占用。 */
+.home__list {
+  padding: calc(var(--gallery-padding-top-search-bar) + var(--availability-offset, 0px))
+    var(--gallery-list-margin-h) var(--gallery-padding-bottom-fab);
+}
+
+.home__list--bar {
+  padding-top: 0;
+}
+
+/* W6 元信息行：页数角标——12sp secondary，跟在分类 chip 之后。 */
+.home__row-pages {
+  flex-shrink: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* Toplist feed rows — clear the floating SearchBar like the gallery list. */
@@ -1128,6 +1134,137 @@ onBeforeUnmount(() => {
 }
 
 .home__empty-cta--ghost:active {
+  background: var(--color-surface-activated);
+}
+
+/* ------------------------------------------------------- pagination bar --- */
+/* 与 DownloadView/HistoryView 分页条同构复刻（A4）；条/页切换不适用
+   （上游固定 25 条/页），故无 __size/__select 一族。 */
+.pagination-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing);
+  padding: 6px max(var(--gallery-list-margin-h), 4px);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-divider);
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+}
+
+.pagination-bar__info {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* PC 页码窗口：直点页码 + 省略号折叠 + 前后页。 */
+.pagination-bar__pages {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.pagination-bar__pages::-webkit-scrollbar {
+  display: none;
+}
+
+.pagination-bar__page {
+  min-width: 26px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__page:hover:not(:disabled) {
+  background: var(--color-surface-activated);
+}
+
+.pagination-bar__page:disabled {
+  color: var(--text-color-disabled, #9e9e9e);
+  cursor: default;
+}
+
+.pagination-bar__page--active {
+  background: var(--color-primary);
+  color: var(--color-primary-inverse, #fff);
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__page--active:hover {
+  background: var(--color-primary);
+}
+
+.pagination-bar__ellipsis {
+  min-width: 18px;
+  text-align: center;
+  color: var(--text-color-secondary);
+  user-select: none;
+}
+
+.pagination-bar__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.pagination-bar__input {
+  padding: 2px 6px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--card-radius);
+  background: var(--color-surface);
+  color: var(--text-color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+}
+
+.pagination-bar__input {
+  width: 52px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.pagination-bar__input::-webkit-outer-spin-button,
+.pagination-bar__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.pagination-bar__input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__btn {
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__btn:hover {
   background: var(--color-surface-activated);
 }
 
