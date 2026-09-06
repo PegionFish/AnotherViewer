@@ -171,7 +171,7 @@
           :subtitle="displaySubtitle(row.item)"
           :thumb="row.item.thumb"
           @open="openDetail"
-          @read="openReader"
+          @read="openDetail"
         >
           <!-- Favorite folder badge — heart + folder number, accent
                background; absolutely positioned corner badge anchored to the
@@ -581,15 +581,6 @@ function openDetail(gid: number): void {
   const item = favorites.value.find((entry) => entry.gid === gid)
   void router.push({
     path: `/gallery/${gid}`,
-    query: item?.token ? { token: item.token } : {},
-  })
-}
-
-/** 行主体点击 → 直接进统一阅读器（A4 点击分区，快速续读）。 */
-function openReader(gid: number): void {
-  const item = favorites.value.find((entry) => entry.gid === gid)
-  void router.push({
-    path: `/reader/${gid}`,
     query: item?.token ? { token: item.token } : {},
   })
 }

@@ -230,11 +230,11 @@ describe('HomeView (首页)', () => {
     expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/42', query: { token: 'abc123' } })
   })
 
-  it('opens the reader directly from the row body click zone (A4)', async () => {
+  it('opens the gallery detail from the row body click zone（用户定案：主体直达阅读仅下载页）', async () => {
     await mountHome([gallery({ gid: 7, token: 'tok7' })])
 
     await wrapper.find('.app-list-row').trigger('click')
-    expect(pushMock).toHaveBeenCalledWith({ path: '/reader/7', query: { token: 'tok7' } })
+    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/7', query: { token: 'tok7' } })
   })
 
   /* -------------------------------- feed mode ------------------------------ */

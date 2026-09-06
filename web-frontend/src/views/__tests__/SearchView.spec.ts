@@ -645,7 +645,7 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       }
     })
 
-    it('splits click zones: thumb → detail, row body → reader', async () => {
+    it('routes both click zones to the gallery detail（用户定案：主体直达阅读仅下载页）', async () => {
       mockResults([galleryFixture()])
       await mountView()
 
@@ -653,7 +653,7 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       expect(pushMock).toHaveBeenLastCalledWith('/gallery/1')
 
       await wrapper.find('.app-list-row__body').trigger('click')
-      expect(pushMock).toHaveBeenLastCalledWith('/reader/1')
+      expect(pushMock).toHaveBeenLastCalledWith('/gallery/1')
     })
 
     it('replaces infinite scroll with the DownloadView-style pagination bar', async () => {

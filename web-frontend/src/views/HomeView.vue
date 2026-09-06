@@ -174,9 +174,8 @@
         </component>
       </div>
       <!-- A4 定案（W3-F1）：与下载/历史页完全同构的全宽单列密信息行——共享
-           AppListRow（缩略图→详情 / 主体→直接阅读 的行内点击分区），整页
-           替换渲染当前页。虚拟窗口数学（spacers/measure/overscan）随分页
-           退役——单页 ≤ 上游上限，无需窗口化。 -->
+           AppListRow。用户定案（2026-09-07）：整行点击进 gallery 详情，
+           「主体直达阅读」为下载页专属交互。 -->
       <div v-else class="home__list" :class="{ 'home__list--bar': showPagination }">
         <AppListRow
           v-for="row in rows"
@@ -187,7 +186,7 @@
           :subtitle="displaySubtitle(row.gallery)"
           :thumb="row.gallery.thumb"
           @open="openDetail"
-          @read="openReader"
+          @read="openDetail"
         >
           <!-- 元信息行：分类 chip + 页数（元数据优先，对齐 GalleryCard）。 -->
           <template #meta>
@@ -840,15 +839,6 @@ function openDetail(gid: number): void {
   const gallery = galleries.value.find((g) => g.gid === gid)
   void router.push({
     path: `/gallery/${gid}`,
-    query: gallery?.token ? { token: gallery.token } : {},
-  })
-}
-
-/** 行主体点击 → 直接进统一阅读器（A4 点击分区，快速续读）。 */
-function openReader(gid: number): void {
-  const gallery = galleries.value.find((g) => g.gid === gid)
-  void router.push({
-    path: `/reader/${gid}`,
     query: gallery?.token ? { token: gallery.token } : {},
   })
 }

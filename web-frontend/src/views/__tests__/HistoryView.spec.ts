@@ -197,7 +197,7 @@ describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
     expect(wrapper.find('[data-testid="read-progress-badge"]').exists()).toBe(false)
   })
 
-  /* ---------------- 点击分区（A4：缩略图→详情 / 主体→阅读） ---------------- */
+  /* ---------------- 点击分区（用户定案：整行→详情，主体直达阅读仅下载页） ---------------- */
 
   it('opens the gallery detail from the thumbnail click zone', async () => {
     await mountHistory([makeHistoryItem({ gid: 42, token: 'abc123' })])
@@ -205,10 +205,10 @@ describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
     expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/42', query: { token: 'abc123' } })
   })
 
-  it('opens the reader directly from the row body click zone (A4)', async () => {
+  it('opens the gallery detail from the row body click zone', async () => {
     await mountHistory([makeHistoryItem({ gid: 7, token: 'tok7' })])
     await wrapper.find('.app-list-row').trigger('click')
-    expect(pushMock).toHaveBeenCalledWith({ path: '/reader/7', query: { token: 'tok7' } })
+    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/7', query: { token: 'tok7' } })
   })
 
   it('omits the token query when the history row carries none (P-A)', async () => {

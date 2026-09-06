@@ -208,7 +208,7 @@
             :subtitle="displaySubtitle(gallery)"
             :thumb="gallery.thumb"
             @open="openGallery"
-            @read="openReader"
+            @read="openGallery"
           >
             <template #meta>
               <CategoryChip v-if="chip" :category="chip" />
@@ -694,11 +694,6 @@ async function onRefresh(): Promise<void> {
 /** 缩略图点击 → 详情页（AppListRow `open` 分区）。 */
 function openGallery(gid: number): void {
   router.push(`/gallery/${gid}`)
-}
-
-/** 行主体点击 → 直接进统一阅读器（AppListRow `read` 分区，下载页同语义）。 */
-function openReader(gid: number): void {
-  router.push(`/reader/${gid}`)
 }
 
 /* ----------------------------- row presentation -------------------------- */
