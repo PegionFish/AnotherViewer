@@ -67,7 +67,6 @@ describe('EhUnavailableError — EH 熔断（plan-2026-08-30 §3.2/§4.1）', ()
   })
 })
 
-<<<<<<< HEAD
 /** Adapter rejecting with a bare axios-shaped error (the interceptor's input). */
 type RejectingAdapter = (config: InternalAxiosRequestConfig) => Promise<unknown>
 
