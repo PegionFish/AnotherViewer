@@ -11,14 +11,19 @@ import SearchView from '../SearchView.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
+import ContentLayout from '@/components/layout/ContentLayout.vue'
+import GalleryCard from '@/components/gallery/GalleryCard.vue'
 import { galleryApi } from '@/api/gallery'
 import { preferencesApi } from '@/api/preferences'
 import type { SearchFilters } from '@/api/gallery'
 import type { Preferences } from '@/api/preferences'
+import type { GalleryInfo } from '@/types'
 import { ADVANCE_SEARCH_BITS } from '@/types/components'
+import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 import { KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
 
 const HISTORY_KEY = 'anotherviewer-search-history'
+const VIEW_MODE_KEY = 'anotherviewer-search-view-mode'
 
 const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }))
 
@@ -582,6 +587,127 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f' }))
       await flushPromises()
       expect(panel.props('open')).toBe(true)
+    })
+  })
+
+  describe('W3-F2 — 单列分页列表 (A4)', () => {
+    /** Minimal GalleryInfo row for the results list. */
+    function galleryFixture(overrides: Partial<GalleryInfo> = {}): GalleryInfo {
+      return {
+        gid: 1,
+        token: 'tok',
+        title: 'Test Gallery',
+        titleJpn: 'テストギャラリー',
+        thumb: 'https://example.com/t.jpg',
+        category: 1,
+        posted: '2026-01-01 00:00',
+        uploader: 'someone',
+        rating: 4.5,
+        rated: false,
+        simpleLanguage: 'Chinese',
+        simpleTags: ['tag one'],
+        thumbWidth: 250,
+        thumbHeight: 354,
+        pages: 20,
+        favoriteSlot: -1,
+        favoriteName: '',
+        ...overrides,
+      }
+    }
+
+    function mockResults(items: GalleryInfo[], total = items.length): void {
+      vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: items, total })
+    }
+
+    it('renders one shared AppListRow per result and no GalleryCard', async () => {
+      mockResults([galleryFixture(), galleryFixture({ gid: 2 })])
+      await mountView()
+
+      expect(wrapper.findAll('.app-list-row')).toHaveLength(2)
+      expect(wrapper.findComponent(GalleryCard).exists()).toBe(false)
+      // 打码关闭 → 标题原文，副题 = 日文标题。
+      expect(wrapper.find('.app-list-row__title').text()).toBe('Test Gallery')
+      expect(wrapper.find('.app-list-row__subtitle').text()).toBe('テストギャラリー')
+      // meta 行：页数 + 评分星。
+      expect(wrapper.find('.search-item__pages').text()).toBe('20P')
+      expect(wrapper.find('.app-list-row__meta').exists()).toBe(true)
+    })
+
+    it('routes the row title through maskedTitle (mask on → #gid, no leaks)', async () => {
+      mockResults([galleryFixture()])
+      setPrivacyMaskEnabled(true)
+      try {
+        await mountView()
+
+        expect(wrapper.find('.app-list-row__title').text()).toBe('#1')
+        // 打码开启：日文副题与标签一律隐藏（与 GalleryCard 门控一致）。
+        expect(wrapper.find('.app-list-row__subtitle').exists()).toBe(false)
+        expect(wrapper.findAll('.search-item__tag')).toHaveLength(0)
+      } finally {
+        setPrivacyMaskEnabled(false)
+      }
+    })
+
+    it('splits click zones: thumb → detail, row body → reader', async () => {
+      mockResults([galleryFixture()])
+      await mountView()
+
+      await wrapper.find('.app-list-row__thumb').trigger('click')
+      expect(pushMock).toHaveBeenLastCalledWith('/gallery/1')
+
+      await wrapper.find('.app-list-row__body').trigger('click')
+      expect(pushMock).toHaveBeenLastCalledWith('/reader/1')
+    })
+
+    it('replaces infinite scroll with the DownloadView-style pagination bar', async () => {
+      mockResults([galleryFixture()], 100) // 4 upstream pages × 25
+      await mountView()
+
+      const bar = wrapper.find('[data-testid="search-pagination"]')
+      expect(bar.exists()).toBe(true)
+      expect(bar.text()).toContain('第 1 / 4 页 · 100 条')
+
+      // 直点第 2 页 → 上游 0 基页码 1、每页固定 25。
+      await bar.find('button[aria-label="第 2 页"]').trigger('click')
+      await flushPromises()
+      const calls = vi.mocked(galleryApi.search).mock.calls
+      expect(calls[calls.length - 1][2]).toBe(1)
+      expect(calls[calls.length - 1][3]).toBe(25)
+
+      // 无限滚动退役：ContentLayout 不再收到 hasMore，load-more 事件无消费者。
+      const layout = wrapper.findComponent(ContentLayout)
+      expect(layout.props('hasMore')).toBeFalsy()
+      expect(layout.props('loadingMore')).toBeFalsy()
+      const before = vi.mocked(galleryApi.search).mock.calls.length
+      layout.vm.$emit('load-more')
+      await flushPromises()
+      expect(vi.mocked(galleryApi.search).mock.calls.length).toBe(before)
+    })
+
+    it('jumps to a page through the pagination input', async () => {
+      mockResults([galleryFixture({ gid: 3 })], 100)
+      await mountView()
+
+      const input = wrapper.find('.pagination-bar__input')
+      await input.setValue(3)
+      await input.trigger('keyup.enter')
+      await flushPromises()
+
+      const calls = vi.mocked(galleryApi.search).mock.calls
+      expect(calls[calls.length - 1][2]).toBe(2) // 1-based 3 → 0-based 2
+      expect(calls[calls.length - 1][3]).toBe(25)
+    })
+
+    it('retires the view-mode toggle: stale localStorage key is ignored, UI gone', async () => {
+      localStorage.setItem(VIEW_MODE_KEY, JSON.stringify('list'))
+      await mountView()
+
+      // 迁移 = 忽略旧值：键不被读取也不被改写。
+      expect(localStorage.getItem(VIEW_MODE_KEY)).toBe(JSON.stringify('list'))
+      expect(wrapper.find('.results-bar__modes').exists()).toBe(false)
+      // FAB 不再有 list/grid 切换动作。
+      const actions = wrapper.findComponent(FabLayout).props('actions') as Array<{ id: string }>
+      expect(actions.map((action) => action.id)).toEqual(['save-quick', 'manage-quick'])
     })
   })
 })

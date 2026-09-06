@@ -12,11 +12,16 @@
                        min rating + scope + advanced options; the legacy
                        search panel is retired and removed from the repo
                        (W4 cleanup; only the Android widget remains);
-    ContentLayout    — results with pull-to-refresh + infinite paging;
-    GalleryCard      — gallery card in list/grid mode (auto-column grid per
-                       contracts/responsive-strategy.md §4);
+    ContentLayout    — results with pull-to-refresh (W3-F2 A4: infinite
+                       paging retired in favor of the pagination bar);
+    AppListRow       — shared single-column dense info row (W3-C1): thumb →
+                       detail / body → reader click partitions; the row title
+                       is masked here via `maskedTitle` (隐私红线不动);
+    pagination bar   — DownloadView-aligned pager (page window + prev/next +
+                       jump). Upstream search is fixed at 25 rows/page (total
+                       = upstream pages × 25) so there is no page-size switch;
     FabLayout        — primary FAB opens the FilterPanel, secondary FABs
-                       manage quick searches and toggle list/grid.
+                       manage quick searches.
 
   Query composition mirrors Android `formatListUrlBuilder`:
     - categories use POSITIVE semantics here and are converted to the
@@ -46,8 +51,16 @@
     anotherviewer-search-history   — recent keyword searches (capped by
                                      prefs.general.recentSearchMax, default 10,
                                      0 disables recording);
-    anotherviewer-quick-searches   — user presets (seeded from GET /gallery/quick-search);
-    anotherviewer-search-view-mode — results layout ('grid' | 'list').
+    anotherviewer-quick-searches   — user presets (seeded from GET /gallery/quick-search).
+                                     The legacy `anotherviewer-search-view-mode`
+                                     key is no longer read or written (W3-F2 A4:
+                                     single-column list only — stale values on
+                                     old devices are simply ignored).
+
+  KeepAlive (W3-F2 A4): page restore semantics = page number + in-page scroll.
+  The page number lives in the component instance (usePagedList state) so it
+  survives deactivation; the in-page scroll offset is restored by
+  ContentLayout's scrollMemory (keyed by fullPath).
 -->
 <template>
   <div class="search-scene">
@@ -105,61 +118,133 @@
         />
       </div>
 
-      <!-- Results meta bar: total + page + list/grid toggle. -->
-      <div v-if="contentState === 'content'" class="results-bar">
-        <span class="results-bar__meta">
-          {{ total }} {{ total === 1 ? 'gallery' : 'galleries' }} · page {{ page + 1 }}
+      <!-- 分页条（W3-F2 A4：完全参照下载页逻辑；上游搜索固定 25 条/页，
+           total = 上游页数×25，因此没有条数切换——仅页码窗口 + 前后页 +
+           跳页）。页码状态在组件实例里，KeepAlive 停用/还原即「页码+页内
+           滚动」（页内滚动由 ContentLayout scrollMemory 还原）。 -->
+      <nav
+        v-if="paginationVisible"
+        class="pagination-bar"
+        data-testid="search-pagination"
+        aria-label="搜索分页"
+      >
+        <span class="pagination-bar__info">
+          第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
         </span>
-        <div class="results-bar__modes" role="radiogroup" aria-label="Results layout">
+        <span class="pagination-bar__pages" role="group" aria-label="页码">
           <button
             type="button"
-            class="results-bar__mode"
-            role="radio"
-            :aria-checked="viewMode === 'grid'"
-            aria-label="Grid view"
-            @click="setViewMode('grid')"
+            class="pagination-bar__page"
+            :disabled="currentPage <= 1"
+            aria-label="上一页"
+            @click="jumpToPage(currentPage - 1)"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M3 3h8v8H3zm10 0h8v8h-8zM3 13h8v8H3zm10 0h8v8h-8z" />
-            </svg>
+            ‹
           </button>
+          <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+            <button
+              v-if="item !== '…'"
+              type="button"
+              class="pagination-bar__page"
+              :class="{ 'pagination-bar__page--active': item === currentPage }"
+              :aria-current="item === currentPage ? 'page' : undefined"
+              :aria-label="`第 ${item} 页`"
+              @click="jumpToPage(item)"
+            >
+              {{ item }}
+            </button>
+            <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+          </template>
           <button
             type="button"
-            class="results-bar__mode"
-            role="radio"
-            :aria-checked="viewMode === 'list'"
-            aria-label="List view"
-            @click="setViewMode('list')"
+            class="pagination-bar__page"
+            :disabled="currentPage >= totalPages"
+            aria-label="下一页"
+            @click="jumpToPage(currentPage + 1)"
           >
-            <svg viewBox="0 0 24 24" aria-hidden="true">
-              <path d="M3 5h18v3H3zm0 5.5h18v3H3zM3 16h18v3H3z" />
-            </svg>
+            ›
           </button>
-        </div>
-      </div>
+        </span>
+        <span class="pagination-bar__jump">
+          <input
+            v-model.number="jumpInput"
+            class="pagination-bar__input"
+            type="number"
+            min="1"
+            :max="totalPages"
+            :aria-label="`跳页（1 至 ${totalPages}）`"
+            @keyup.enter="jumpToPage()"
+            placeholder="页"
+          />
+          <button type="button" class="pagination-bar__btn" @click="jumpToPage()">
+            跳页
+          </button>
+        </span>
+      </nav>
 
-      <!-- Results: pull-to-refresh + infinite paging via ContentLayout. -->
+      <!-- Results: pull-to-refresh via ContentLayout. W3-F2 (A4): the infinite
+           scroll footer is retired — pages swap wholesale from the bar above. -->
       <ContentLayout
         ref="contentRef"
         class="search-scene__content"
         :state="contentState"
         :refreshing="refreshing"
-        :loading-more="loadingMore"
         empty-text="No galleries found — adjust the filters and try again"
         error-text="Search failed — check the connection and retry"
         @update:refreshing="refreshing = $event"
         @refresh="onRefresh"
-        @load-more="onLoadMore"
         @retry="onRefresh"
       >
-        <div class="results" :class="`results--${viewMode}`">
-          <GalleryCard
-            v-for="gallery in galleries"
+        <!-- 单列密信息行（A4）：AppListRow 点击分区 = 缩略图→详情、主体→阅读。
+             标题在本视图经 maskedTitle 脱敏后下发（红线）。搜索无多选，`menu`
+             （长按/右键）不接线。 -->
+        <div class="results">
+          <AppListRow
+            v-for="{ gallery, chip } in rows"
             :key="gallery.gid"
-            :gallery="gallery"
-            :mode="viewMode"
-            @click="openGallery"
-          />
+            :id="gallery.gid"
+            :gid="gallery.gid"
+            :title="displayTitle(gallery)"
+            :subtitle="displaySubtitle(gallery)"
+            :thumb="gallery.thumb"
+            @open="openGallery"
+            @read="openReader"
+          >
+            <template #meta>
+              <CategoryChip v-if="chip" :category="chip" />
+              <!-- W5: 阅读进度角标顶替页数文案（GalleryCard 同语义）。 -->
+              <span
+                v-if="showReadProgressBadge(gallery)"
+                class="search-item__read-progress"
+                data-testid="read-progress-badge"
+              >
+                {{ readProgressLabel(gallery) }}
+              </span>
+              <span v-else-if="gallery.pages > 0" class="search-item__pages">
+                {{ gallery.pages }}P
+              </span>
+              <RatingStars :rating="gallery.rating" />
+            </template>
+
+            <!-- Preference-gated info switches (B-2) + tags, mirroring the
+                 GalleryCard list form；打码开启时 uploader/tags 一律隐藏。 -->
+            <div
+              v-if="
+                showUploader(gallery) || showPostedTime(gallery) || rowTags(gallery).length > 0
+              "
+              class="search-item__extra"
+            >
+              <span v-if="showUploader(gallery)" class="search-item__uploader">
+                {{ gallery.uploader }}
+              </span>
+              <span v-if="showPostedTime(gallery)" class="search-item__posted">
+                {{ gallery.posted }}
+              </span>
+              <span v-for="tag in rowTags(gallery)" :key="tag" class="search-item__tag">
+                {{ tag }}
+              </span>
+            </div>
+          </AppListRow>
         </div>
       </ContentLayout>
 
@@ -267,7 +352,7 @@ import type {
   SearchBarState,
   SearchSuggestion,
 } from '@/types/components'
-import { CATEGORY_ORDER } from '@/types/components'
+import { CATEGORY_BY_BIT, CATEGORY_ORDER } from '@/types/components'
 import type { QuickSearch } from '@/types'
 import { galleryApi } from '@/api/gallery'
 import type { SearchFilters, SearchSortOrder } from '@/api/gallery'
@@ -275,11 +360,15 @@ import type { GeneralPreferences } from '@/api/preferences'
 import { useAuthStore } from '@/stores/auth'
 import { useThemeStore } from '@/stores/theme'
 import { usePreferencesStore } from '@/stores/preferences'
+import { usePagedList } from '@/composables/usePagedList'
+import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
 import NavigationDrawer, { DEFAULT_NAV_ITEMS } from '@/components/layout/NavigationDrawer.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
-import GalleryCard from '@/components/gallery/GalleryCard.vue'
+import AppListRow from '@/components/gallery/AppListRow.vue'
+import CategoryChip from '@/components/atoms/CategoryChip.vue'
+import RatingStars from '@/components/atoms/RatingStars.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import type { FilterChip } from '@/components/search/searchFilters'
@@ -302,7 +391,11 @@ const preferencesStore = usePreferencesStore()
 const PAGE_SIZE = 25
 const HISTORY_KEY = 'anotherviewer-search-history'
 const QUICK_SEARCH_KEY = 'anotherviewer-quick-searches'
-const VIEW_MODE_KEY = 'anotherviewer-search-view-mode'
+/**
+ * W3-F2 (A4): the legacy `anotherviewer-search-view-mode` key is retired —
+ * the view is single-column only. Stale values on existing devices are left
+ * untouched and simply ignored (no migration read).
+ */
 /**
  * Recent-search cap — `prefs.general.recentSearchMax` (Wave-1 1b key, added
  * by A3). The preferences schema may not carry it yet, so it is read with
@@ -412,13 +505,13 @@ function applyFilters(next: SearchFilters): void {
 /** Chip × — drop that one filter and re-run the search. */
 function onRemoveFilterChip(chipId: string): void {
   applyFilters(removeFilterChip(activeFilters.value, chipId))
-  void runSearch(0)
+  void runSearch()
 }
 
 /** Chip-row Clear — reset every filter and re-run the search. */
 function onClearFilters(): void {
   applyFilters({})
-  void runSearch(0)
+  void runSearch()
 }
 
 /** FilterPanel primary action — commit with the SearchBar's current text. */
@@ -430,15 +523,57 @@ function onFilterPanelSearch(): void {
 // Results.
 const contentRef = ref<InstanceType<typeof ContentLayout> | null>(null)
 const contentState = ref<'loading' | 'content' | 'empty' | 'error'>('loading')
-const galleries = ref<GalleryInfo[]>([])
-const total = ref(0)
-const page = ref(0)
 const refreshing = ref(false)
-const loadingMore = ref(false)
-/** Monotonic request guard — stale responses (fast successive searches /
-    pull-to-refresh) are discarded. */
-let requestSeq = 0
-const viewMode = ref<'grid' | 'list'>(readStorage<'grid' | 'list'>(VIEW_MODE_KEY) ?? 'grid')
+
+/* --- W3-F2 (A4): paged single-column list (DownloadView-aligned) ---------
+   usePagedList owns page / jump / page window / stale-race guard. fetchPage
+   adapts the upstream offset form: usePagedList pages are 1-based while
+   `galleryApi.search` is 0-based (the backend then reports
+   total = upstream pages × 25). Upstream is fixed at 25 rows/page, so there
+   is deliberately no page-size switch (single-tier pageSizes). */
+const {
+  items: galleries,
+  total,
+  currentPage,
+  totalPages,
+  paginationVisible,
+  pageWindow,
+  jumpInput,
+  load: loadPage,
+  jumpToPage,
+} = usePagedList<GalleryInfo>({
+  fetchPage: async (page, size) => {
+    const response = await galleryApi.search(
+      composedKeyword(),
+      categoryParam(),
+      page - 1, // 1-based composable page → 0-based upstream page (offset 形态).
+      size,
+      activeFilters.value,
+    )
+    return { items: response.data, total: response.total }
+  },
+  pageSizes: [PAGE_SIZE],
+  initialPageSize: PAGE_SIZE,
+  fallbackPageSize: PAGE_SIZE,
+  onLoadStart: () => {
+    // 完全参照下载页：每次非静默加载整页替换，先切 loading 态。
+    contentState.value = 'loading'
+  },
+  onSuccess: (result) => {
+    contentState.value = result.items.length === 0 ? 'empty' : 'content'
+    contentRef.value?.scrollToTop()
+  },
+  onError: (error) => {
+    console.error('[SearchView] search failed', error)
+    // 无内容可展示时落错误态；翻页/刷新失败保留旧页并以 snackbar 提示
+    // （usePagedList 的替换语义保证失败不覆盖 items）。
+    if (galleries.value.length === 0) {
+      contentState.value = 'error'
+    } else {
+      showSnack('Failed to load this page')
+    }
+  },
+})
 
 // History + quick searches.
 const history = ref<string[]>(readStorage<string[]>(HISTORY_KEY) ?? [])
@@ -451,15 +586,11 @@ const snack = ref('')
 let snackTimer: number | undefined
 
 const fabExpanded = ref(false)
-const fabActions = computed<FabAction[]>(() => [
-  {
-    id: 'toggle-view',
-    icon: viewMode.value === 'grid' ? 'reorder' : 'book-open',
-    label: viewMode.value === 'grid' ? 'Switch to list view' : 'Switch to grid view',
-  },
+/** W3-F2 (A4): the list/grid toggle action is retired with the view modes. */
+const fabActions: FabAction[] = [
   { id: 'save-quick', icon: 'plus-dark', label: 'Save quick search' },
   { id: 'manage-quick', icon: 'book-open', label: 'Quick searches' },
-])
+]
 
 /* ------------------------------ suggestions ----------------------------- */
 
@@ -533,49 +664,13 @@ function categoryParam(): number | undefined {
 
 /* -------------------------------- search -------------------------------- */
 
-async function runSearch(target: number, append = false): Promise<void> {
-  const seq = ++requestSeq
-  if (append) {
-    if (loadingMore.value) return
-    loadingMore.value = true
-  } else if (galleries.value.length === 0) {
-    contentState.value = 'loading'
-  }
-  try {
-    const response = await galleryApi.search(
-      composedKeyword(),
-      categoryParam(),
-      target,
-      PAGE_SIZE,
-      activeFilters.value,
-    )
-    if (seq !== requestSeq) return
-    if (append) {
-      // Dedupe by gid — bumped galleries can reappear across pages.
-      const seen = new Set(galleries.value.map((g) => g.gid))
-      galleries.value = [...galleries.value, ...response.data.filter((g) => !seen.has(g.gid))]
-    } else {
-      galleries.value = response.data
-    }
-    total.value = response.total
-    page.value = target
-    contentState.value = galleries.value.length === 0 ? 'empty' : 'content'
-  } catch (error) {
-    if (seq !== requestSeq) return
-    console.error('[SearchView] search failed', error)
-    if (append) {
-      showSnack('Failed to load the next page')
-    } else {
-      contentState.value = 'error'
-    }
-  } finally {
-    if (seq !== requestSeq) return
-    refreshing.value = false
-    loadingMore.value = false
-  }
+/** Search/filter commit entry point — always reloads page 1 (loadPage is the
+    usePagedList entry; the stale-race guard lives inside the composable). */
+function runSearch(): Promise<void> {
+  return loadPage(1)
 }
 
-/** Commit a search: record history, collapse the input, reload page 0. */
+/** Commit a search: record history, collapse the input, reload page 1. */
 function commitSearch(raw: string | null | undefined): void {
   const q = (raw ?? '').trim()
   activeQuery.value = q
@@ -584,24 +679,98 @@ function commitSearch(raw: string | null | undefined): void {
   searchTitle.value = q || 'Search'
   filterPanelOpen.value = false
   fabExpanded.value = false
-  contentRef.value?.scrollToTop()
-  void runSearch(0)
+  void runSearch()
 }
 
-function onRefresh(): void {
-  void runSearch(0)
+/** Pull-to-refresh — silent reload keeps the current list visible (the
+    refreshing header parks via v-model; ContentLayout's spinner is not used). */
+async function onRefresh(): Promise<void> {
+  await loadPage(1, { silent: true })
+  refreshing.value = false
 }
 
-const hasMore = computed<boolean>(() => galleries.value.length < total.value)
+/* ------------------------- AppListRow click zones ------------------------ */
 
-function onLoadMore(): void {
-  if (hasMore.value && !refreshing.value) {
-    void runSearch(page.value + 1, true)
-  }
+/** 缩略图点击 → 详情页（AppListRow `open` 分区）。 */
+function openGallery(gid: number): void {
+  router.push(`/gallery/${gid}`)
 }
 
-function openGallery(gallery: GalleryInfo): void {
-  router.push(`/gallery/${gallery.gid}`)
+/** 行主体点击 → 直接进统一阅读器（AppListRow `read` 分区，下载页同语义）。 */
+function openReader(gid: number): void {
+  router.push(`/reader/${gid}`)
+}
+
+/* ----------------------------- row presentation -------------------------- */
+
+/** 行视图模型：画廊行 + 类目 chip（未知 bit 不渲染 chip，与 GalleryCard 同）。 */
+const rows = computed(() =>
+  galleries.value.map((gallery) => ({
+    gallery,
+    chip: CATEGORY_BY_BIT[gallery.category],
+  })),
+)
+
+/**
+ * 行展示标题——脱敏在本视图完成（AppListRow 契约：消费方传入
+ * `maskedTitle(title‖titleJpn‖'Untitled')`，组件本体不碰隐私逻辑）。
+ */
+function displayTitle(gallery: GalleryInfo): string {
+  return maskedTitle(gallery.title || gallery.titleJpn || 'Untitled', gallery.gid)
+}
+
+/** 副题（日文标题）：打码开启时隐藏（GalleryCard title-jpn 同一门控）。 */
+function displaySubtitle(gallery: GalleryInfo): string | null {
+  if (privacyMaskEnabled.value) return null
+  return gallery.titleJpn || null
+}
+
+/**
+ * General-preference keys consumed by the row but still optional in the
+ * typed DTO (mirrors GalleryCard's defensive read — absent key hides the
+ * field).
+ */
+interface GeneralPrefsExtras {
+  showUploader?: boolean
+  showPostedTime?: boolean
+}
+
+const generalPrefs = computed<(GeneralPreferences & GeneralPrefsExtras) | undefined>(
+  () => preferencesStore.prefs?.general,
+)
+
+/** B-2 info switches — strictly `true` shows the field; anything else hides it.
+    隐私打码：上传者属敏感内容，一律隐藏（GalleryCard 同语义）。 */
+function showUploader(gallery: GalleryInfo): boolean {
+  return (
+    generalPrefs.value?.showUploader === true &&
+    !privacyMaskEnabled.value &&
+    Boolean(gallery.uploader)
+  )
+}
+
+function showPostedTime(gallery: GalleryInfo): boolean {
+  return generalPrefs.value?.showPostedTime === true && Boolean(gallery.posted)
+}
+
+/** 隐私打码：标签是内容关键词，一律隐藏（GalleryCard 同语义）。 */
+function rowTags(gallery: GalleryInfo): string[] {
+  return privacyMaskEnabled.value ? [] : (gallery.simpleTags ?? [])
+}
+
+/**
+ * W5 (plan-2026-09-02) — 阅读进度角标：`general.showReadProgress` 开启且
+ * `readProgress > 0` 才显示（`N/MP`，页数未知退化 `NP`），顶替页数文案。
+ */
+function readProgressLabel(gallery: GalleryInfo): string {
+  const progress = gallery.readProgress
+  if (typeof progress !== 'number' || !Number.isFinite(progress) || progress <= 0) return ''
+  const current = progress + 1
+  return gallery.pages > 0 ? `${current}/${gallery.pages}P` : `${current}P`
+}
+
+function showReadProgressBadge(gallery: GalleryInfo): boolean {
+  return generalPrefs.value?.showReadProgress === true && readProgressLabel(gallery) !== ''
 }
 
 /* --------------------------- SearchBar handlers -------------------------- */
@@ -746,14 +915,7 @@ function onFabSecondary(action: FabAction): void {
     openSaveDialog()
   } else if (action.id === 'manage-quick') {
     dialog.value = 'manage'
-  } else if (action.id === 'toggle-view') {
-    setViewMode(viewMode.value === 'grid' ? 'list' : 'grid')
   }
-}
-
-function setViewMode(mode: 'grid' | 'list'): void {
-  viewMode.value = mode
-  writeStorage(VIEW_MODE_KEY, mode)
 }
 
 /* ------------------- PC keyboard shortcuts (Wave-1 1a) ------------------- */
@@ -840,14 +1002,18 @@ onMounted(async () => {
       // Offline seed is best-effort; local presets still work.
     }
   }
-  await runSearch(0)
+  await loadPage(1)
 })
 
-/* KeepAlive guard (audit P1-5): App.vue caches SearchView, so a deactivated
-   instance must drop the window listener or it keeps hijacking `/` / `f`
-   while another view sits in front. remove-before-add keeps exactly one
-   listener across mount → activate cycles; the onMounted add above also
-   covers mounts that bypass KeepAlive (onActivated only fires within it). */
+/* KeepAlive guard (audit P1-5, W1-F3): App.vue caches SearchView, so a
+   deactivated instance must drop the window listener or it keeps hijacking
+   `/` / `f` while another view sits in front. remove-before-add keeps exactly
+   one listener across mount → activate cycles; the onMounted add above also
+   covers mounts that bypass KeepAlive (onActivated only fires within it).
+   W3-F2 note: PageUp/PageDown keyboard paging (DownloadView) is deliberately
+   NOT enabled here — usePagedList would register an unguarded window listener
+   (mounted → unmounted only) and a deactivated cached instance would swallow
+   the keys in the background, the exact bug class P1-5 fixed. */
 onActivated(() => {
   window.removeEventListener('keydown', onGlobalKeydown)
   window.addEventListener('keydown', onGlobalKeydown)
@@ -898,82 +1064,174 @@ onBeforeUnmount(() => {
   position: relative;
 }
 
-/* ------------------------------ results bar ----------------------------- */
-
-.results-bar {
+/* ------------------------------ pagination bar --------------------------- */
+/* 参照下载页分页条（label-tabs 样式语言）：页码窗口 / 前后页 / 跳页。
+   W3-F2 (A4)：上游固定 25 条/页，无条数切换下拉。 */
+.pagination-bar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  margin: 0 var(--gallery-search-bar-margin-h);
-  padding: 0 4px 6px;
+  gap: var(--spacing);
+  flex-shrink: 0;
+  padding: 6px max(var(--gallery-list-margin-h), 4px);
+  background: var(--color-bg);
+  border-bottom: 1px solid var(--color-divider);
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
 }
 
-.results-bar__meta {
-  font-size: clamp(11px, 12px, 14px);
-  letter-spacing: 0.03em;
-  color: var(--text-color-secondary);
+.pagination-bar__info {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-.results-bar__modes {
+.pagination-bar__pages {
   display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 999px;
-  background: var(--color-surface);
-}
-
-.results-bar__mode {
-  display: flex;
   align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 24px;
-  border: none;
-  border-radius: 999px;
+  gap: 2px;
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.pagination-bar__pages::-webkit-scrollbar {
+  display: none;
+}
+
+.pagination-bar__page {
+  min-width: 26px;
+  padding: 2px 5px;
+  border: 1px solid transparent;
+  border-radius: var(--card-radius);
   background: transparent;
-  color: var(--drawable-color-secondary);
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-variant-numeric: tabular-nums;
   cursor: pointer;
-  transition:
-    background-color 150ms var(--ease-decelerate-quart),
-    color 150ms var(--ease-decelerate-quart);
+  transition: background-color 140ms var(--ease-decelerate-quart);
 }
 
-.results-bar__mode svg {
-  width: 14px;
-  height: 14px;
-  fill: currentColor;
+.pagination-bar__page:hover:not(:disabled) {
+  background: var(--color-surface-activated);
 }
 
-.results-bar__mode:hover {
-  color: var(--drawable-color-primary);
+.pagination-bar__page:disabled {
+  color: var(--text-color-disabled, #9e9e9e);
+  cursor: default;
 }
 
-.results-bar__mode[aria-checked='true'] {
-  background: var(--color-background-floating);
-  color: var(--text-color-theme-primary);
-  box-shadow: 0 1px 2px var(--shadow-color);
+.pagination-bar__page--active {
+  background: var(--color-primary);
+  color: var(--color-primary-inverse, #fff);
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__page--active:hover {
+  background: var(--color-primary);
+}
+
+.pagination-bar__ellipsis {
+  min-width: 18px;
+  text-align: center;
+  color: var(--text-color-secondary);
+  user-select: none;
+}
+
+.pagination-bar__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+.pagination-bar__input {
+  padding: 2px 6px;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--card-radius);
+  background: var(--color-surface);
+  color: var(--text-color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  width: 52px;
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+.pagination-bar__input::-webkit-outer-spin-button,
+.pagination-bar__input::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.pagination-bar__input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+}
+
+.pagination-bar__btn {
+  padding: 2px 8px;
+  border: none;
+  border-radius: var(--card-radius);
+  background: transparent;
+  color: var(--color-primary);
+  font-family: inherit;
+  font-size: var(--text-super-small);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 140ms var(--ease-decelerate-quart);
+}
+
+.pagination-bar__btn:hover {
+  background: var(--color-surface-activated);
 }
 
 /* -------------------------------- results -------------------------------- */
 
+/* 单列密信息行（A4）：AppListRow 纵向堆叠，行骨架（卡片面/缩略图/标题）
+   由共享组件自带；这里只管容器留白与 FAB 避让。 */
 .results {
-  padding: 2px var(--gallery-grid-margin-h) var(--gallery-padding-bottom-fab);
+  padding: var(--gallery-list-margin-v) var(--gallery-list-margin-h)
+    var(--gallery-padding-bottom-fab);
 }
 
-/* Auto-column grids — span count derives from width ÷ column-width exactly
-   like AutoStaggeredGridLayoutManager (responsive-strategy.md §4). */
-.results--grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(var(--column-width-grid-middle), 100%), 1fr));
-  gap: var(--gallery-grid-margin-v) var(--gallery-grid-interval);
+/* ------------------------- search row info bits -------------------------- */
+
+.search-item__pages,
+.search-item__read-progress {
+  flex-shrink: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
-.results--list {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(var(--column-width-list-short), 100%), 1fr));
-  gap: var(--gallery-list-margin-v) var(--gallery-list-interval);
+.search-item__extra {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px var(--spacing);
+  min-width: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+}
+
+.search-item__uploader,
+.search-item__posted {
+  white-space: nowrap;
+}
+
+.search-item__tag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  white-space: nowrap;
 }
 
 /* -------------------------------- dialogs -------------------------------- */
