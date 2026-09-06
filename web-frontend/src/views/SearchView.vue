@@ -255,7 +255,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import type {
   AdvanceSearchOptions,
@@ -843,7 +843,22 @@ onMounted(async () => {
   await runSearch(0)
 })
 
+/* KeepAlive guard (audit P1-5): App.vue caches SearchView, so a deactivated
+   instance must drop the window listener or it keeps hijacking `/` / `f`
+   while another view sits in front. remove-before-add keeps exactly one
+   listener across mount → activate cycles; the onMounted add above also
+   covers mounts that bypass KeepAlive (onActivated only fires within it). */
+onActivated(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
+  window.addEventListener('keydown', onGlobalKeydown)
+})
+
+onDeactivated(() => {
+  window.removeEventListener('keydown', onGlobalKeydown)
+})
+
 onBeforeUnmount(() => {
+  // Cache-evicted instances unmount without a deactivate pass.
   window.removeEventListener('keydown', onGlobalKeydown)
   if (snackTimer) window.clearTimeout(snackTimer)
 })

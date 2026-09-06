@@ -16,6 +16,7 @@ import { preferencesApi } from '@/api/preferences'
 import type { SearchFilters } from '@/api/gallery'
 import type { Preferences } from '@/api/preferences'
 import { ADVANCE_SEARCH_BITS } from '@/types/components'
+import { KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
 
 const HISTORY_KEY = 'anotherviewer-search-history'
 
@@ -511,6 +512,76 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       expect(wrapper.findComponent(FilterPanel).props('open')).toBe(false)
       expect(wrapper.findComponent(SearchBar).props('state')).toBe('normal')
       textarea.remove()
+    })
+  })
+
+  describe('KeepAlive 全局键停用守卫 (audit P1-5)', () => {
+    /** A stand-in for another route view (uncached side of the KeepAlive). */
+    const OtherView = defineComponent({ name: 'OtherView', render: () => h('div') })
+
+    /** Mount SearchView inside a real <KeepAlive> so activated/deactivated fire. */
+    async function mountCachedView() {
+      const current = shallowRef<Component>(SearchView)
+      const Host = defineComponent({
+        setup() {
+          return () => h(KeepAlive, () => h(current.value))
+        },
+      })
+      wrapper = mount(Host)
+      await flushPromises()
+      return current
+    }
+
+    /** Component wrappers must be captured while SearchView is still rendered. */
+    function viewParts() {
+      return {
+        panel: wrapper.findComponent(FilterPanel),
+        bar: wrapper.findComponent(SearchBar),
+      }
+    }
+
+    it('deactivated instance ignores "/" and "f" — no toggle, no preventDefault', async () => {
+      const current = await mountCachedView()
+      const { panel, bar } = viewParts()
+
+      // Sanity while active: "f" toggles the panel and is swallowed.
+      const activeF = new KeyboardEvent('keydown', { key: 'f', cancelable: true })
+      window.dispatchEvent(activeF)
+      await flushPromises()
+      expect(activeF.defaultPrevented).toBe(true)
+      expect(panel.props('open')).toBe(true)
+
+      // Leave the view → KeepAlive deactivates (instance stays cached).
+      current.value = OtherView
+      await flushPromises()
+
+      const deactivatedF = new KeyboardEvent('keydown', { key: 'F', cancelable: true })
+      window.dispatchEvent(deactivatedF)
+      const deactivatedSlash = new KeyboardEvent('keydown', { key: '/', cancelable: true })
+      window.dispatchEvent(deactivatedSlash)
+      await flushPromises()
+
+      expect(deactivatedF.defaultPrevented).toBe(false)
+      expect(deactivatedSlash.defaultPrevented).toBe(false)
+      expect(panel.props('open')).toBe(true)
+      expect(bar.props('state')).toBe('normal')
+    })
+
+    it('re-activating the cached instance restores the shortcuts', async () => {
+      const current = await mountCachedView()
+      const { panel } = viewParts()
+
+      current.value = OtherView
+      await flushPromises()
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f' }))
+      await flushPromises()
+      expect(panel.props('open')).toBe(false)
+
+      current.value = SearchView
+      await flushPromises()
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'f' }))
+      await flushPromises()
+      expect(panel.props('open')).toBe(true)
     })
   })
 })
