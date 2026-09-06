@@ -58,7 +58,7 @@ class GalleryService(
     /**
      * P2: 站点搜索结果缓存（2min），key = buildSearchUrl 产物。查询在
      * availability.isBlocked() 之前（DOWN 命中缓存照常返回陈旧内容）；
-     * 空关键词的本地历史快路径不经此缓存，仅站点请求路径（含空关键词兜底）使用。
+     * 空关键词（首页）与关键词搜索共用站点请求路径，本地历史回退不经此缓存。
      */
     private val searchCache: Cache<String, GalleryListResponse> = Caffeine.newBuilder()
         .expireAfterWrite(2, TimeUnit.MINUTES)
@@ -79,8 +79,11 @@ class GalleryService(
 
     /**
      * Real Gallery Site search via the core list parser (SiteEngine.getGalleryList).
-     * The history-based in-memory filter is kept only as a fallback for empty
-     * keywords, where there is nothing to search upstream for.
+     * A1 home-page flip: a blank keyword IS the home page — the site latest
+     * list (host root path, no login needed) is served first, exactly like the
+     * Android home page. [searchLocalHistory] is kept only as the blank-keyword
+     * fallback for when the site is DOWN (blocked short-circuit or upstream
+     * failure), so offline local content stays usable.
      *
      * `category` is the f_cats exclusion bitmask exactly as the frontend sends
      * it (see web-frontend SearchView `categoryParam()`), so it reaches the
@@ -101,8 +104,10 @@ class GalleryService(
      *    [disableLanguageFilter] -> `f_sfl=on`, [disableUploaderFilter] -> `f_sfu=on`,
      *    [disableTagFilter] -> `f_sft=on`
      *
-     * E2E-6 failure semantics preserved: an unreachable site surfaces
-     * `success=false` with empty data — never fabricated fallback results.
+     * E2E-6 failure semantics preserved for keyword searches: an unreachable
+     * site surfaces `success=false` with empty data — never fabricated
+     * fallback results. The blank-keyword home path is the deliberate
+     * exception: DOWN there degrades to [searchLocalHistory] instead.
      */
     fun searchGallery(
         keyword: String?,
@@ -126,10 +131,10 @@ class GalleryService(
         disableTagFilter: Boolean = false
     ): GalleryListResponse {
         if (keyword.isNullOrBlank()) {
-            // 空 keyword：先给本地历史（浏览回看），历史为空则回退站点最新列表
-            // （Android 首页 = 站点根路径最新画廊，无需登录）。回退失败按 E2E-6 语义 success=false。
-            val local = searchLocalHistory(keyword, category, page, pageSize)
-            if (local.data.isNotEmpty()) return local
+            // A1 首页语义翻转：空 keyword = 首页 = 站点最新列表优先（Android 首页 =
+            // 站点根路径最新画廊，无需登录），高级筛选参数原样进入站点 URL。
+            // EH DOWN（isBlocked 短路或上游异常）回退本地历史（E2E-6「只读本地
+            // 内容仍可用」），首页本地链路不受影响。
             return try {
                 val url = buildSearchUrl(
                     "", category, page, sort, pageMin, pageMax, minRating,
@@ -141,9 +146,9 @@ class GalleryService(
                 // P2: 缓存查询在 isBlocked() 之前——DOWN 期间命中缓存照常返回陈旧内容。
                 searchCache.getIfPresent(url)?.let { return it }
                 if (availability.isBlocked()) {
-                    // EH DOWN：跳过站点兜底（秒回，不触网），首页本地链路不受影响。
-                    logger.debug("Gallery latest-list fallback skipped: EH unavailable (empty keyword, no local history)")
-                    return ehBlockedListResponse()
+                    // EH DOWN：跳过站点请求（秒回，不触网），回退本地历史浏览。
+                    logger.debug("Gallery latest list skipped: EH unavailable (empty keyword)")
+                    return searchLocalHistory(keyword, category, page, pageSize)
                 }
                 val result = SiteEngine.getGalleryList(null, client, url, ListUrlBuilder.MODE_NORMAL)
                 val items = result.galleryInfoList.map { it.toDto() }
@@ -154,7 +159,8 @@ class GalleryService(
                 response
             } catch (e: Exception) {
                 logger.warn("Gallery Site latest list failed (empty keyword)", e)
-                GalleryListResponse(success = false, data = emptyList(), total = 0)
+                // 上游异常同样回退本地历史：首页永不硬失败（E2E-6 本地可用语义）。
+                searchLocalHistory(keyword, category, page, pageSize)
             }
         }
 
@@ -365,7 +371,7 @@ class GalleryService(
         return builder.build()
     }
 
-    /** Local history fallback (empty keyword): DB-paginated, newest first. */
+    /** Local history fallback (blank keyword, EH DOWN / upstream failure): DB-paginated, newest first. */
     private fun searchLocalHistory(keyword: String?, category: Int?, page: Int, pageSize: Int): GalleryListResponse {
         val pageable = PageRequest.of(page.coerceAtLeast(0), pageSize.coerceAtLeast(1))
         val result = when {

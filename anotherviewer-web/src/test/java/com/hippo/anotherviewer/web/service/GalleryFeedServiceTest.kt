@@ -36,14 +36,17 @@ class GalleryFeedServiceTest {
 
     private data class Harness(val service: GalleryService, val client: OkHttpClient, val availability: EhAvailabilityService, val serverConfig: ServerConfigService)
 
-    private fun harness(serverConfig: ServerConfigService = mock(ServerConfigService::class.java)): Harness {
+    private fun harness(
+        serverConfig: ServerConfigService = mock(ServerConfigService::class.java),
+        historyRepository: com.hippo.anotherviewer.web.repository.HistoryInfoRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java),
+    ): Harness {
         val sessionManager = mock(SiteSessionManager::class.java)
         val client = OkHttpClient()
         `when`(sessionManager.okHttpClient).thenReturn(client)
         val availability = EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000)
         return Harness(
             GalleryService(
-                mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java),
+                historyRepository,
                 mock(com.hippo.anotherviewer.web.repository.QuickSearchRepository::class.java),
                 mock(com.hippo.anotherviewer.web.repository.GalleryTagsRepository::class.java),
                 mock(com.hippo.anotherviewer.web.repository.LocalFavoriteInfoRepository::class.java),
@@ -337,28 +340,98 @@ class GalleryFeedServiceTest {
                 1,
             )
         )
-        val sessionManager = mock(SiteSessionManager::class.java)
-        `when`(sessionManager.okHttpClient).thenReturn(OkHttpClient())
-        val availability = EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000)
+        val (service, _, availability) = harness(historyRepository = historyRepository)
         availability.recordFailure("connect timed out")
-        val service = GalleryService(
-            historyRepository,
-            mock(com.hippo.anotherviewer.web.repository.QuickSearchRepository::class.java),
-            mock(com.hippo.anotherviewer.web.repository.GalleryTagsRepository::class.java),
-            mock(com.hippo.anotherviewer.web.repository.LocalFavoriteInfoRepository::class.java),
-            sessionManager,
-            mock(com.hippo.anotherviewer.web.repository.DownloadInfoRepository::class.java),
-            com.hippo.anotherviewer.web.config.SiteCoreConfigProperties(),
-            mock(GalleryLookupService::class.java),
-            availability,
-            mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
 
-        val response = service.searchGallery(null, null, 0, 20)
+        mockStatic(SiteEngine::class.java).use { engine ->
+            val response = service.searchGallery(null, null, 0, 20)
 
-        assertTrue(response.success)
-        assertEquals(1, response.data.size)
-        assertEquals("Local", response.data[0].title)
+            assertTrue(response.success)
+            assertEquals(1, response.data.size)
+            assertEquals("Local", response.data[0].title)
+            // A1: DOWN 时空关键词回退本地历史（E2E-6 本地可用），且零上游请求。
+            engine.verifyNoInteractions()
+        }
+    }
+
+    @Test
+    fun `blank keyword serves the site latest list when EH is up even with local history`() {
+        // A1 首页语义翻转：EH 可达时空关键词 = 站点最新列表优先（Android 首页语义），
+        // 本地历史不再抢占首页；DOWN / 上游异常才回退本地历史。
+        val historyRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
+        `when`(historyRepository.findHistoryPaged(any())).thenReturn(
+            PageImpl(
+                listOf(com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply {
+                    gid = 1L
+                    token = "t1"
+                    title = "Local"
+                }),
+                org.springframework.data.domain.PageRequest.of(0, 20),
+                1,
+            )
+        )
+        val (service, client) = harness(historyRepository = historyRepository)
+        val siteResult = GalleryListParser.Result().apply {
+            pages = 2
+            galleryInfoList = listOf(
+                GalleryInfo().apply { gid = 9L; token = "tok9"; title = "Site Latest" }
+            )
+        }
+        mockStatic(SiteEngine::class.java).use { engine ->
+            engine.`when`<GalleryListParser.Result> {
+                SiteEngine.getGalleryList(any(), any(), anyString(), anyInt())
+            }.thenReturn(siteResult)
+
+            val response = service.searchGallery(null, null, 0, 20)
+
+            assertTrue(response.success)
+            assertEquals(1, response.data.size)
+            assertEquals(9L, response.data[0].gid)
+            assertEquals("Site Latest", response.data[0].title)
+            assertEquals(50, response.total)
+            // 空 keyword 的站点 URL = host 根路径（Android 首页同款），无需登录。
+            engine.verify {
+                SiteEngine.getGalleryList(null, client, SiteUrl.getHost(), ListUrlBuilder.MODE_NORMAL)
+            }
+            // 站点可达时本地历史完全不参与。
+            org.mockito.Mockito.verify(historyRepository, org.mockito.Mockito.never()).findHistoryPaged(any())
+        }
+    }
+
+    @Test
+    fun `blank keyword with advanced filters reaches the site search url`() {
+        // 顺带修复的回归钉：空关键词 + 高级筛选参数（f_*）必须原样进入站点 URL，
+        // 不得被本地历史分支吞掉。
+        val (service, client) = harness()
+        val siteResult = GalleryListParser.Result().apply {
+            galleryInfoList = listOf(GalleryInfo().apply { gid = 3L; token = "tok3"; title = "Filtered" })
+        }
+        // 与 searchGallery 同参构建的预期站点 URL：f_* 在位，空 keyword 不发 f_search。
+        val expectedUrl = service.buildSearchUrl("", null, 0, 0, 2, null, 3, false, true, false, false)
+        assertTrue(expectedUrl.contains("advsearch=1"))
+        assertTrue(expectedUrl.contains("f_stags=on"))
+        assertTrue(expectedUrl.contains("f_sr=on"))
+        assertTrue(expectedUrl.contains("f_srdd=3"))
+        assertTrue(expectedUrl.contains("f_sp=on"))
+        assertTrue(expectedUrl.contains("f_spf=2"))
+        assertFalse(expectedUrl.contains("f_search"))
+
+        mockStatic(SiteEngine::class.java).use { engine ->
+            engine.`when`<GalleryListParser.Result> {
+                SiteEngine.getGalleryList(any(), any(), anyString(), anyInt())
+            }.thenReturn(siteResult)
+
+            val response = service.searchGallery(
+                null, null, 0, 20,
+                minRating = 3, searchTags = true, pageMin = 2
+            )
+
+            assertTrue(response.success)
+            assertEquals("Filtered", response.data[0].title)
+            engine.verify {
+                SiteEngine.getGalleryList(null, client, expectedUrl, ListUrlBuilder.MODE_NORMAL)
+            }
+        }
     }
 
     @Test

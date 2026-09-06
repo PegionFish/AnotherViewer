@@ -1,17 +1,22 @@
 package com.hippo.anotherviewer.web.service
 
+import com.hippo.anotherviewer.client.SiteEngine
 import com.hippo.anotherviewer.client.SiteUrl
 import com.hippo.anotherviewer.client.data.ListUrlBuilder
+import com.hippo.anotherviewer.client.parser.GalleryListParser
 import com.hippo.anotherviewer.web.any
 import okhttp3.OkHttpClient
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentMatchers.anyInt
+import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
-import org.springframework.data.domain.Page
+import org.mockito.Mockito.mockStatic
 import org.springframework.data.domain.PageImpl
+import java.io.IOException
 
 /**
  * Pins the WebUI search → Gallery Site URL mapping for the extended search
@@ -26,7 +31,9 @@ import org.springframework.data.domain.PageImpl
  *  - default behavior staying bit-for-bit unchanged when no extended param
  *    is given,
  *  - E2E-6 failure semantics (unreachable site -> success=false, empty data;
- *    never fabricated fallback results).
+ *    never fabricated fallback results) for keyword searches — the blank-keyword
+ *    home page is the deliberate exception: while the site is DOWN it degrades
+ *    to local history instead.
  */
 class GallerySearchUrlTest {
 
@@ -299,12 +306,65 @@ class GallerySearchUrlTest {
     }
 
     @Test
-    fun `blank keyword with local history answers from the DB without a site round-trip`() {
+    fun `blank keyword answers from local history without a site round-trip while blocked`() {
         val historyRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
-        // Non-empty history: the home page serves browsing history locally.
+        // Non-empty history: while the site is DOWN the home page degrades to
+        // browsing history (E2E-6 local-usability semantics, A1 blank-keyword
+        // fallback).
         `when`(historyRepository.findHistoryPaged(any())).thenReturn(
             PageImpl(
-                listOf(com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply { gid = 1L }),
+                listOf(
+                    com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply {
+                        gid = 1L
+                        token = "t1"
+                        title = "Local"
+                    }
+                ),
+                org.springframework.data.domain.PageRequest.of(0, 20),
+                1,
+            )
+        )
+        val sessionManager = mock(SiteSessionManager::class.java)
+        `when`(sessionManager.okHttpClient).thenReturn(OkHttpClient())
+        val availability = EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000)
+        availability.recordFailure("connect timed out")
+        val service = GalleryService(
+            historyRepository,
+            mock(com.hippo.anotherviewer.web.repository.QuickSearchRepository::class.java),
+            mock(com.hippo.anotherviewer.web.repository.GalleryTagsRepository::class.java),
+            mock(com.hippo.anotherviewer.web.repository.LocalFavoriteInfoRepository::class.java),
+            sessionManager,
+            mock(com.hippo.anotherviewer.web.repository.DownloadInfoRepository::class.java),
+            com.hippo.anotherviewer.web.config.SiteCoreConfigProperties(),
+            mock(GalleryLookupService::class.java),
+            availability,
+            mock(DownloadDirIndex::class.java),
+            mock(ServerConfigService::class.java),        )
+
+        mockStatic(SiteEngine::class.java).use { engine ->
+            val response = service.searchGallery(null, null, 0, 20)
+
+            assertTrue(response.success)
+            assertEquals("Local", response.data[0].title)
+            org.mockito.Mockito.verify(historyRepository).findHistoryPaged(any())
+            // DOWN：零上游请求，秒回本地。
+            engine.verifyNoInteractions()
+        }
+    }
+
+    @Test
+    fun `blank keyword falls back to local history when the site fetch fails`() {
+        val historyRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
+        // EH 可达但上游请求抛异常：空关键词回退本地历史（首页不硬失败）。
+        `when`(historyRepository.findHistoryPaged(any())).thenReturn(
+            PageImpl(
+                listOf(
+                    com.hippo.anotherviewer.web.entity.HistoryInfoEntity().apply {
+                        gid = 7L
+                        token = "t7"
+                        title = "Local"
+                    }
+                ),
                 org.springframework.data.domain.PageRequest.of(0, 20),
                 1,
             )
@@ -324,36 +384,16 @@ class GallerySearchUrlTest {
             mock(DownloadDirIndex::class.java),
             mock(ServerConfigService::class.java),        )
 
-        val response = service.searchGallery(null, null, 0, 20)
+        mockStatic(SiteEngine::class.java).use { engine ->
+            engine.`when`<GalleryListParser.Result> {
+                SiteEngine.getGalleryList(any(), any(), anyString(), anyInt())
+            }.thenThrow(IOException("unreachable"))
 
-        assertTrue(response.success)
-        org.mockito.Mockito.verify(historyRepository).findHistoryPaged(any())
-    }
+            val response = service.searchGallery(null, null, 0, 20)
 
-    @Test
-    fun `blank keyword with empty history falls back to the site latest list`() {
-        val historyRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
-        `when`(historyRepository.findHistoryPaged(any())).thenReturn(Page.empty())
-        val sessionManager = mock(SiteSessionManager::class.java)
-        `when`(sessionManager.okHttpClient).thenReturn(OkHttpClient())
-        val service = GalleryService(
-            historyRepository,
-            mock(com.hippo.anotherviewer.web.repository.QuickSearchRepository::class.java),
-            mock(com.hippo.anotherviewer.web.repository.GalleryTagsRepository::class.java),
-            mock(com.hippo.anotherviewer.web.repository.LocalFavoriteInfoRepository::class.java),
-            sessionManager,
-            mock(com.hippo.anotherviewer.web.repository.DownloadInfoRepository::class.java),
-            com.hippo.anotherviewer.web.config.SiteCoreConfigProperties(),
-            mock(GalleryLookupService::class.java),
-            EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000),
-            mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
-
-        // 历史为空 → 回退站点最新列表；沙箱内站点不可达 → E2E-6 语义 success=false（证明确实触网回退）。
-        val response = service.searchGallery(null, null, 0, 20)
-
-        assertFalse(response.success, "empty history must trigger the site fallback, which fails offline")
-        assertTrue(response.data.isEmpty())
+            assertTrue(response.success, "blank keyword must degrade to local history on upstream failure")
+            assertEquals("Local", response.data[0].title)
+        }
     }
 
     // ------------------------------------------------------------------
