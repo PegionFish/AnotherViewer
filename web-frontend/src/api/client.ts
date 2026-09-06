@@ -1,4 +1,4 @@
-import axios from 'axios'
+import axios, { type InternalAxiosRequestConfig } from 'axios'
 import { markDown, EH_UNAVAILABLE_MESSAGE } from '@/stores/availability'
 
 const client = axios.create({
@@ -9,13 +9,78 @@ const client = axios.create({
   },
 })
 
+/**
+ * AbortControllers of in-flight requests (audit P2). A 401 means the session
+ * is dead: every other pending request would 401 the same way, so they are
+ * swept (aborted) instead of trickling in one error each. Controllers are
+ * keyed off the request config via a WeakMap (no config mutation, GC-friendly).
+ */
+const liveControllers = new Set<AbortController>()
+const controllerOfConfig = new WeakMap<InternalAxiosRequestConfig, AbortController>()
+
 client.interceptors.request.use((config) => {
   const token = localStorage.getItem('token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
+  // Track the request for the 401 sweep unless the caller manages its own
+  // cancellation (axios honours signals attached in request interceptors).
+  if (!config.signal) {
+    const controller = new AbortController()
+    config.signal = controller.signal
+    controllerOfConfig.set(config, controller)
+    liveControllers.add(controller)
+  }
   return config
 })
+
+/** Drop a settled request's controller from the in-flight set. */
+function releaseInflight(config: InternalAxiosRequestConfig | undefined): void {
+  const controller = config && controllerOfConfig.get(config)
+  if (controller) {
+    controllerOfConfig.delete(config)
+    liveControllers.delete(controller)
+  }
+}
+
+/** Abort every in-flight request (session-death sweep on 401). */
+function cancelInflight(): void {
+  for (const controller of liveControllers) controller.abort()
+  liveControllers.clear()
+}
+
+/**
+ * Session-death handling (audit P2): clear credentials and route to Login
+ * keeping the current location in `?redirect=` (SPA navigation instead of the
+ * old hard `window.location.href` reload). The flag collapses a burst of
+ * concurrent 401s into a single redirect; it releases once navigation settles
+ * so a later session expiry redirects again. The router is imported lazily —
+ * a static import would make every view spec that mocks 'vue-router' crash at
+ * load time (views transitively import this module).
+ */
+let redirectingToLogin = false
+
+function handleUnauthorized(): void {
+  localStorage.removeItem('token')
+  localStorage.removeItem('username')
+  cancelInflight()
+  if (redirectingToLogin) return
+  redirectingToLogin = true
+  void import('@/router')
+    .then(({ default: router }) => {
+      const current = router.currentRoute.value
+      // Already sitting on Login (e.g. a stray expired-session request while
+      // on the login screen): no self-redirect, no pointless redirect query.
+      if (current.name === 'Login') return undefined
+      return router.replace({ name: 'Login', query: { redirect: current.fullPath } })
+    })
+    .catch(() => {
+      // Navigation can legitimately fail during teardown — never global-error.
+    })
+    .finally(() => {
+      redirectingToLogin = false
+    })
+}
 
 /** Thrown when the service worker reports offline with no cached data. */
 export class OfflineError extends Error {
@@ -77,12 +142,16 @@ export function isEhUnavailableError(error: unknown): error is EhUnavailableErro
 }
 
 client.interceptors.response.use(
-  (response) => response,
+  (response) => {
+    releaseInflight(response.config)
+    return response
+  },
   (error) => {
+    releaseInflight(error?.config)
+    // Session death: clear credentials, cancel the other in-flight requests
+    // and route to Login with a redirect query (handleUnauthorized above).
     if (error.response?.status === 401) {
-      localStorage.removeItem('token')
-      localStorage.removeItem('username')
-      window.location.href = '/login'
+      handleUnauthorized()
     }
     // The service worker answers 503 + {error:'offline'} when offline and
     // nothing is cached (sw.js). Surface it as a typed error so views can

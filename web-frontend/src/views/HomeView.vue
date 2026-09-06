@@ -899,9 +899,20 @@ onMounted(() => {
 let viewActive = true
 onActivated(() => {
   viewActive = true
+  // KeepAlive 停用守卫（audit P2，W1-F3/P1-5 同类）：保存对话框开着离开时，
+  // Escape 监听已在停用时摘除——重新激活且对话框仍开着则摘后重挂
+  // （remove-before-add，对齐 SearchView P1-5 模式）。
+  if (saveDialogOpen.value) {
+    window.removeEventListener('keydown', onSaveDialogKeydown)
+    window.addEventListener('keydown', onSaveDialogKeydown)
+  }
 })
 onDeactivated(() => {
   viewActive = false
+  // 停用即摘 Escape 监听、作废筛选即时搜索的防抖时钟（重新勾选会重排）；
+  // 卸载清理由下方 onBeforeUnmount 兜底（缓存淘汰不经过 deactivated）。
+  if (filterDebounceTimer) clearTimeout(filterDebounceTimer)
+  window.removeEventListener('keydown', onSaveDialogKeydown)
 })
 
 watch(

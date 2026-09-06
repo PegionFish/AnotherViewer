@@ -234,7 +234,7 @@
  * 打码开启时一并隐藏（同 GalleryCard 的 `!privacyMaskEnabled` 守卫）。
  * R4-6: 无标题画廊以 `#<gid>` 展示。
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { historyApi } from '@/api/history'
 import type { HistoryItem } from '@/api/history'
@@ -559,6 +559,24 @@ watch(showClearDialog, (open) => {
   }
 })
 
+/* KeepAlive 停用守卫（audit P2，W1-F3/P1-5 同类）：App.vue 缓存本视图——
+   对话框开着离开（如点进详情）时，window Escape 监听会随缓存实例残留并在
+   后台误关对话框。停用即摘除；重新激活且对话框仍开着时摘后重挂
+   （remove-before-add，对齐 SearchView P1-5 模式）。防抖时钟一并在停用时
+   作废（重新输入会重排时钟）；卸载清理由下方 onUnmounted 兜底（缓存淘汰
+   不经过 deactivated）。 */
+onActivated(() => {
+  if (showClearDialog.value) {
+    window.removeEventListener('keydown', onDialogKeydown)
+    window.addEventListener('keydown', onDialogKeydown)
+  }
+})
+
+onDeactivated(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+  window.removeEventListener('keydown', onDialogKeydown)
+})
+
 /* -------------------------------------------------------------- toast --- */
 
 const toastMessage = ref('')
@@ -573,6 +591,7 @@ function showToast(message: string): void {
 }
 
 onUnmounted(() => {
+  if (searchTimer) clearTimeout(searchTimer)
   clearTimeout(toastTimer)
   window.removeEventListener('keydown', onDialogKeydown)
 })

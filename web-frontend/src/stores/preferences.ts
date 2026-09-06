@@ -63,6 +63,12 @@ export const usePreferencesStore = defineStore('preferences', () => {
       } catch (e) {
         saveError.value = e instanceof Error ? e.message : String(e)
         console.error('Failed to save preferences', e)
+        // audit P2：保存失败后 dirty 永真会把后续所有 load() 静默挡在门外
+        // （load 的 `|| dirty` 丢弃分支），本地与服务器永久失联。失败即复位
+        // dirty——本地乐观改动允许被下一次 load() 的服务器状态覆盖；失败本身
+        // 已经 saveError 外露（设置页 watch → snackbar「无法在服务器上保存
+        // 设置」），不是无声丢弃。之后的新编辑会照常重新置 dirty 并重排保存。
+        dirty = false
       }
     }, 600)
   }

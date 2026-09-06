@@ -247,7 +247,7 @@
  * 打码开启时一并隐藏（同 GalleryCard 的 `!privacyMaskEnabled` 守卫）。
  * R4-6: 无标题画廊以 `#<gid>` 展示。
  */
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { favoriteApi } from '@/api/favorite'
 import type { FavoriteItem } from '@/api/favorite'
@@ -625,7 +625,16 @@ function showToast(message: string): void {
   }, 2400)
 }
 
+/* KeepAlive 停用守卫（audit P2，W1-F3/P1-5 同类）：App.vue 缓存本视图——
+   停用后挂起的搜索防抖时钟作废（缓存实例不在前台，重新输入会重排时钟）；
+   本视图无对话框，无 Escape 监听。卸载清理由下方 onUnmounted 兜底（缓存
+   淘汰不经过 deactivated）。 */
+onDeactivated(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+})
+
 onUnmounted(() => {
+  if (searchTimer) clearTimeout(searchTimer)
   clearTimeout(toastTimer)
 })
 

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import { reactive } from 'vue'
+import { KeepAlive, defineComponent, h, reactive, shallowRef, type Component } from 'vue'
 import HomeView from '../HomeView.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
@@ -395,6 +395,60 @@ describe('HomeView (首页)', () => {
     )
     // 成功后对话框关闭。
     expect(document.querySelector('.dialog-scrim')).toBeNull()
+  })
+
+  /* ---------------- KeepAlive 停用守卫（audit P2） ---------------- */
+
+  describe('KeepAlive 停用守卫 (audit P2)', () => {
+    /** A stand-in for another route view (uncached side of the KeepAlive). */
+    const OtherView = defineComponent({ name: 'OtherView', render: () => h('div') })
+
+    /** Mount HomeView inside a real <KeepAlive> so activated/deactivated fire. */
+    async function mountCachedHome() {
+      vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: [gallery()], total: 1 })
+      const current = shallowRef<Component>(HomeView)
+      const Host = defineComponent({
+        setup() {
+          return () => h(KeepAlive, () => h(current.value))
+        },
+      })
+      wrapper = mount(Host)
+      await flushPromises()
+      await flushPromises()
+      return current
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('deactivated instance: Escape cannot close the save dialog and the filter debounce is dropped', async () => {
+      vi.useFakeTimers()
+      const current = await mountCachedHome()
+      vi.mocked(galleryApi.search).mockClear()
+
+      // 打开「保存快速搜索」对话框 + 勾选筛选（500ms 防抖时钟已排）。
+      wrapper.findComponent(FilterPanel).vm.$emit('save-quick-search')
+      wrapper.findComponent(FilterPanel).vm.$emit('update:filters', { sort: 2 })
+      await flushPromises()
+
+      // 离开本视图 → KeepAlive 停用（实例仍被缓存）。
+      current.value = OtherView
+      await flushPromises()
+
+      // 停用态 Escape 不应误关后台实例的对话框…
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      // …排队的筛选防抖时钟被作废，不再触发搜索。
+      await vi.advanceTimersByTimeAsync(700)
+      await flushPromises()
+      expect(galleryApi.search).not.toHaveBeenCalled()
+
+      // 回到本视图：对话框仍是打开的（后台 Escape 没有关掉它）。
+      current.value = HomeView
+      await flushPromises()
+      await flushPromises()
+      expect(document.querySelector('.dialog-scrim')).not.toBeNull()
+    })
   })
 })
 

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
-import { nextTick } from 'vue'
+import { nextTick, KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
 import DownloadView, { buildDetailRoute, buildReaderRoute } from '../DownloadView.vue'
 import { downloadApi } from '@/api/download'
@@ -840,5 +840,72 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     await mountView()
     await wrapper.find('.app-list-row').trigger('click')
     expect(pushMock).toHaveBeenCalledWith({ path: '/reader/9002', query: { token: 'tok2' } })
+  })
+
+  /* ---------------- KeepAlive 停用守卫（audit P2） ---------------- */
+
+  describe('KeepAlive 停用守卫 (audit P2)', () => {
+    /** A stand-in for another route view (uncached side of the KeepAlive). */
+    const OtherView = defineComponent({ name: 'OtherView', render: () => h('div') })
+
+    /** Mount DownloadView inside a real <KeepAlive> so activated/deactivated fire. */
+    async function mountCachedView() {
+      vi.mocked(downloadApi.list).mockResolvedValue({
+        downloads: [makeDownload(1)],
+        labels: [],
+        total: 1,
+      })
+      const current = shallowRef<Component>(DownloadView)
+      const Host = defineComponent({
+        setup() {
+          return () => h(KeepAlive, () => h(current.value))
+        },
+      })
+      wrapper = mount(Host)
+      await flushPromises()
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+      return current
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('deactivated instance: Escape cannot close the label dialog and the search debounce is dropped', async () => {
+      vi.useFakeTimers()
+      const current = await mountCachedView()
+      expect(downloadApi.list).toHaveBeenCalledTimes(1)
+
+      // 打开 New label 对话框（PC 批量条「新建标签」或 FAB 集群 mini FAB，
+      // 视环境的 pointer:fine 匹配结果而定）。
+      const newLabelBtn = wrapper
+        .findAll('button')
+        .find((b) => b.text().includes('新建标签') || b.attributes('aria-label') === 'New label')!
+      await newLabelBtn.trigger('click')
+      await flushPromises()
+
+      // 输入搜索词（400ms 防抖时钟已排）。
+      await wrapper.find('.search-bar__input').setValue('abc')
+
+      // 离开本视图 → KeepAlive 停用（实例仍被缓存）。
+      current.value = OtherView
+      await flushPromises()
+
+      // 停用态 Escape 不应误关后台实例的对话框…
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      // …排队的防抖时钟被作废，不再触发 /download/list。
+      await vi.advanceTimersByTimeAsync(600)
+      await flushPromises()
+      expect(downloadApi.list).toHaveBeenCalledTimes(1)
+
+      // 回到本视图：对话框仍是打开的（后台 Escape 没有关掉它）。
+      current.value = DownloadView
+      await flushPromises()
+      await nextTick()
+      await flushPromises()
+      expect(document.querySelector('.dialog-scrim')).not.toBeNull()
+    })
   })
 })

@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, DOMWrapper, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
 import HistoryView from '../HistoryView.vue'
 import { historyApi } from '@/api/history'
 import type { HistoryItem } from '@/api/history'
@@ -473,5 +474,64 @@ describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
     expect(document.querySelector('.dialog-scrim')).toBeNull()
     expect(wrapper.find('[data-testid="content-state-empty"]').exists()).toBe(true)
     expect(document.querySelector('.toast')).toBeNull()
+  })
+
+  /* ---------------- KeepAlive 停用守卫（audit P2） ---------------- */
+
+  describe('KeepAlive 停用守卫 (audit P2)', () => {
+    /** A stand-in for another route view (uncached side of the KeepAlive). */
+    const OtherView = defineComponent({ name: 'OtherView', render: () => h('div') })
+
+    /** Mount HistoryView inside a real <KeepAlive> so activated/deactivated fire. */
+    async function mountCachedHistory(items: HistoryItem[]) {
+      vi.mocked(historyApi.listHistory).mockResolvedValue({ history: items, total: items.length })
+      const current = shallowRef<Component>(HistoryView)
+      const Host = defineComponent({
+        setup() {
+          return () => h(KeepAlive, () => h(current.value))
+        },
+      })
+      wrapper = mount(Host)
+      await flushPromises()
+      await flushPromises()
+      return current
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('deactivated instance: Escape cannot close the dialog and the search debounce is dropped', async () => {
+      vi.useFakeTimers()
+      const current = await mountCachedHistory([makeHistoryItem({ gid: 1 })])
+      expect(historyApi.listHistory).toHaveBeenCalledTimes(1)
+
+      // 打开清空历史确认对话框（FAB）。
+      await wrapper
+        .findAll('.fab--mini')
+        .find((b) => b.attributes('aria-label') === 'Clear history')!
+        .trigger('click')
+      await flushPromises()
+
+      // 输入搜索词（400ms 防抖时钟已排）。
+      await wrapper.find('.search-bar__input').setValue('futa')
+
+      // 离开本视图 → KeepAlive 停用（实例仍被缓存）。
+      current.value = OtherView
+      await flushPromises()
+
+      // 停用态 Escape 不应误关后台实例的对话框…
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+      // …排队的防抖时钟被作废，不再触发请求。
+      await vi.advanceTimersByTimeAsync(600)
+      await flushPromises()
+      expect(historyApi.listHistory).toHaveBeenCalledTimes(1)
+
+      // 回到本视图：对话框仍是打开的（后台 Escape 没有关掉它）。
+      current.value = HistoryView
+      await flushPromises()
+      await flushPromises()
+      expect(document.querySelector('.dialog-scrim')).not.toBeNull()
+    })
   })
 })

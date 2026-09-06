@@ -483,7 +483,7 @@ export function buildReaderRoute(target: DownloadRouteTarget): {
  * State model = `DownloadInfo.STATE_*`: 0 idle · 1 wait · 2 download ·
  * 3 finish · 4 failed (anotherviewer-web mirrors the Android constants).
  */
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { useVirtualizer } from '@tanstack/vue-virtual'
 import { downloadApi } from '@/api/download'
@@ -1234,6 +1234,23 @@ watch([showLabelDialog, showMoveDialog], ([labelOpen, moveOpen]) => {
   else window.removeEventListener('keydown', onDialogKeydown)
 })
 
+/* KeepAlive 停用守卫（audit P2，W1-F3/P1-5 同类）：App.vue 缓存本视图——
+   对话框（新建标签/移动）开着离开时，window Escape 监听会随缓存实例残留
+   并在后台误关对话框。停用即摘除；重新激活且对话框仍开着时摘后重挂
+   （remove-before-add，对齐 SearchView P1-5 模式）。搜索防抖时钟一并在
+   停用时作废（重新输入会重排时钟）；卸载清理由下方 onUnmounted 兜底。 */
+onActivated(() => {
+  if (showLabelDialog.value || showMoveDialog.value) {
+    window.removeEventListener('keydown', onDialogKeydown)
+    window.addEventListener('keydown', onDialogKeydown)
+  }
+})
+
+onDeactivated(() => {
+  if (searchTimer) clearTimeout(searchTimer)
+  window.removeEventListener('keydown', onDialogKeydown)
+})
+
 watch(showLabelDialog, async (open) => {
   if (open) {
     await nextTick()
@@ -1328,6 +1345,7 @@ onMounted(() => {
 })
 
 onUnmounted(() => {
+  if (searchTimer) clearTimeout(searchTimer)
   clearTimeout(toastTimer)
   window.removeEventListener('keydown', onDialogKeydown)
 })

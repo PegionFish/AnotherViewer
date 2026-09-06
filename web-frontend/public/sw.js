@@ -203,8 +203,13 @@ async function cacheFirstImage(request) {
 
   if (cached) {
     if (isFreshImage(cached)) return cached
-    // Expired — evict and revalidate from network.
-    await cache.delete(request)
+    const cachedAt = Number(cached.headers.get(CACHED_AT_HEADER))
+    // Stamped entry past its TTL — evict and revalidate from the network.
+    if (cachedAt) await cache.delete(request)
+    // Unstamped entry (opaque cross-origin body): keep it as the offline
+    // fallback. isFreshImage() can never call it fresh, and isCacheableImage()
+    // no longer re-caches opaque responses — deleting it here would leave the
+    // next offline pass with nothing (audit P2).
   }
 
   try {
@@ -236,16 +241,21 @@ function isImageRequest(request, url) {
 }
 
 function isCacheableImage(response) {
-  // Same-origin 200s, or cross-origin opaque responses (CDN thumbnails).
-  return response.ok || response.type === 'opaque'
+  // Same-origin 200s only. Cross-origin opaque responses are NOT re-cached
+  // (audit P2): they expose no writable headers, so an entry could never be
+  // stamped and isFreshImage() would treat it as expired on every request —
+  // a fetch + cache-write double work per image while online. Cached data for
+  // such URLs (legacy entries) remains readable via the offline fallback in
+  // cacheFirstImage().
+  return response.ok && response.type !== 'opaque'
 }
 
 /** Clone the response with a cache timestamp header attached. */
 function stampResponse(response) {
-  // Opaque responses (cross-origin, no-cors) report status 0 and expose no
-  // writable headers — the Response constructor rejects status 0 with a
-  // RangeError. Cache them unstamped instead; isFreshImage() then treats
-  // them as due-for-revalidation online, and they still serve offline.
+  // Only cacheable (non-opaque) responses reach this function via
+  // cacheFirstImage; networkFirstApi responses are same-origin. Opaque bodies
+  // report status 0 and expose no writable headers — the Response constructor
+  // rejects status 0 with a RangeError. Guard kept as a safety net.
   if (response.type === 'opaque') return response
   const headers = new Headers(response.headers)
   headers.set(CACHED_AT_HEADER, String(Date.now()))

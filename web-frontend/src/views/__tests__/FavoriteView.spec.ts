@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
+import { KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
 import FavoriteView from '../FavoriteView.vue'
 import { favoriteApi } from '@/api/favorite'
 import type { FavoriteItem, FavoriteListResponse } from '@/api/favorite'
@@ -485,5 +486,52 @@ describe('FavoriteView (W3-F4 A4 单列密信息行 + 服务端分页)', () => {
     expect(wrapper.find('[data-testid="content-state-error"]').exists()).toBe(true)
     expect(wrapper.text()).not.toContain('正则无效')
     expect(document.querySelector('.toast')).toBeNull()
+  })
+
+  /* ---------------- KeepAlive 停用守卫（audit P2） ---------------- */
+
+  describe('KeepAlive 停用守卫 (audit P2)', () => {
+    /** A stand-in for another route view (uncached side of the KeepAlive). */
+    const OtherView = defineComponent({ name: 'OtherView', render: () => h('div') })
+
+    /** Mount FavoriteView inside a real <KeepAlive> so activated/deactivated fire. */
+    async function mountCachedFavorites() {
+      vi.mocked(favoriteApi.listFavorites).mockResolvedValue(listResult([makeFavorite(1)]))
+      const current = shallowRef<Component>(FavoriteView)
+      const Host = defineComponent({
+        setup() {
+          return () => h(KeepAlive, () => h(current.value))
+        },
+      })
+      wrapper = mount(Host)
+      await flushPromises()
+      await flushPromises()
+      return current
+    }
+
+    afterEach(() => {
+      vi.useRealTimers()
+    })
+
+    it('deactivated instance drops the pending search debounce (no reload, no re-fire on return)', async () => {
+      vi.useFakeTimers()
+      const current = await mountCachedFavorites()
+      expect(favoriteApi.listFavorites).toHaveBeenCalledTimes(1)
+
+      // 输入搜索词（400ms 防抖时钟已排）后立即离开。
+      await wrapper.find('.search-bar__input').setValue('futa')
+      current.value = OtherView
+      await flushPromises()
+
+      // 停用态防抖时钟被作废——到点不再触发 /favorite/list。
+      await vi.advanceTimersByTimeAsync(600)
+      await flushPromises()
+      expect(favoriteApi.listFavorites).toHaveBeenCalledTimes(1)
+
+      // 重新激活也不补发（时钟已作废，等待新输入）。
+      current.value = FavoriteView
+      await flushPromises()
+      expect(favoriteApi.listFavorites).toHaveBeenCalledTimes(1)
+    })
   })
 })

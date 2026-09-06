@@ -102,8 +102,30 @@ const router = createRouter({
   routes,
 })
 
+/**
+ * /auth/status 免认证探测结果缓存（audit P2）：免认证部署的匿名会话此前每次
+ * 导航都要发一次 /auth/status——TTL 内直接复用。登录/登出路径天然失效：
+ * 拿到 token 后守卫短路（不查缓存），而登出/会话失效都会经过 Login 路由
+ * （进入即清缓存，见守卫首行），下一跳重新拿真实状态。
+ */
+interface AuthStatusCacheEntry {
+  authRequired: boolean
+  cachedAt: number
+}
+
+const AUTH_STATUS_TTL_MS = 60_000
+let authStatusCache: AuthStatusCacheEntry | null = null
+
+/** 主动失效 /auth/status 缓存（登出/登录接线与测试用）。 */
+export function invalidateAuthStatusCache(): void {
+  authStatusCache = null
+}
+
 router.beforeEach(async (to, _from, next) => {
   if (to.name === 'Login') {
+    // 登录页是所有登录/登出动作的必经之路：进页即弃缓存，离开后的第一跳
+    // 拿真实状态（不破坏「登录后立即需要真实状态」）。
+    invalidateAuthStatusCache()
     next()
     return
   }
@@ -113,16 +135,26 @@ router.beforeEach(async (to, _from, next) => {
     next()
     return
   }
-  // 无 token 时查询服务器是否需要认证
+  // 无 token：先看 TTL 缓存，再查服务器。
+  const now = Date.now()
+  if (authStatusCache && now - authStatusCache.cachedAt < AUTH_STATUS_TTL_MS) {
+    if (!authStatusCache.authRequired) {
+      next() // 服务器不要求登录（缓存），放行
+      return
+    }
+    next({ name: 'Login' })
+    return
+  }
   try {
     const { authApi } = await import('@/api/auth')
     const status = await authApi.status()
+    authStatusCache = { authRequired: status.authRequired, cachedAt: Date.now() }
     if (!status.authRequired) {
       next() // 服务器不要求登录，放行
       return
     }
   } catch {
-    // 服务器不可达，走正常登录流程
+    // 服务器不可达，走正常登录流程（失败结果不缓存）
   }
   next({ name: 'Login' })
 })
