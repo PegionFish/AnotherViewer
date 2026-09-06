@@ -191,36 +191,144 @@
       <!-- Virtualized single-column list: only the rows inside the scroller
            viewport (+ overscan) are mounted; the ul keeps the full total
            height so the scrollbar and FastScroller geometry stay intact
-           (tanstack virtualizer window mode). 2026-09-06：服务端分页恢复，
-           虚拟滚动渲染不变（W3-A4 复用）。 -->
+           (tanstack virtualizer window mode). W3-C1（A4 先行卡）：行骨架切到
+           共享 AppListRow（缩略图→详情 / 主体→阅读 点击分区 + 多选勾选），
+           下载特有字段（percent/速率/进度条/状态/操作钮）经 slot 注入；
+           `download-item` 修饰类随行下发供下方 scoped 样式着色（S4 状态色）。 -->
       <ul
         ref="listHostRef"
         class="download-list"
         :style="{ height: `${virtualizer.getTotalSize()}px` }"
       >
         <li
-          v-for="item in virtualizer.getVirtualItems()"
-          :key="`${item.key}`"
+          v-for="row in virtualRows"
+          :key="`${row.key}`"
           class="download-list__item"
           :style="{
-            transform: `translateY(${item.start}px)`,
-            animationDelay: `${Math.min(item.index * 24, 240)}ms`,
+            transform: `translateY(${row.start}px)`,
+            animationDelay: `${Math.min(row.index * 24, 240)}ms`,
           }"
         >
-          <DownloadItemCard
-            :item="downloads[item.index]"
-            :speed="liveSpeeds[downloads[item.index]?.gid ?? -1] ?? 0"
+          <AppListRow
+            :id="row.item.id"
+            :gid="row.item.gid"
+            :title="displayTitle(row.item)"
+            :thumb="row.item.thumb"
+            :aria-label="`${displayTitle(row.item)} — ${stateLabelOf(row.item)}`"
             :selectable="selectMode"
-            :selected="selectedIds.has(downloads[item.index].id)"
-            @start="onStart"
-            @pause="onPause"
-            @cancel="onCancel"
-            @delete="onDelete"
-            @menu="onItemMenu"
-            @select="onItemSelect"
+            :selected="selectedIds.has(row.item.id)"
+            :class="['download-item', `download-item--${stateKeyOf(row.item)}`]"
             @open="onItemOpen"
             @read="onItemRead"
-          />
+            @menu="onItemMenu"
+            @select="onItemSelect"
+          >
+            <template #meta>
+              <CategoryChip v-if="row.chip" :category="row.chip" />
+              <span v-if="row.item.total > 0" class="download-item__pages">
+                {{ row.item.done }}/{{ row.item.total }} pages
+              </span>
+              <!-- W5/W7: 阅读进度角标（下载行），与 GalleryCard 的显示语义一致。 -->
+              <span
+                v-if="showReadProgressBadge(row.item)"
+                class="download-item__read-progress"
+                data-testid="read-progress-badge"
+              >
+                {{ readProgressLabelOf(row.item) }}
+              </span>
+            </template>
+
+            <!-- percent (left) + speed/ETA (right) — both text_super_small 12sp -->
+            <div class="download-item__stats">
+              <span class="download-item__percent">{{ percentTextOf(row.item) }}</span>
+              <span
+                v-if="statsTextOf(row.item, liveSpeeds[row.item.gid] ?? 0)"
+                class="download-item__speed"
+              >
+                {{ statsTextOf(row.item, liveSpeeds[row.item.gid] ?? 0) }}
+              </span>
+            </div>
+
+            <!-- Horizontal ProgressBar replica (determinate; slides when total is
+                 still unknown, mirroring Android's indeterminate fallback) -->
+            <div
+              class="download-item__track"
+              role="progressbar"
+              :aria-label="`Download progress for ${displayTitle(row.item)}`"
+              :aria-valuemin="0"
+              :aria-valuemax="100"
+              :aria-valuenow="isIndeterminate(row.item) ? undefined : percentOf(row.item)"
+            >
+              <div
+                class="download-item__fill"
+                :class="{
+                  'download-item__fill--indeterminate': isIndeterminate(row.item),
+                  'download-item__fill--sheen': isDownloading(row.item) && !isIndeterminate(row.item),
+                }"
+                :style="isIndeterminate(row.item) ? undefined : { width: `${percentOf(row.item)}%` }"
+              />
+            </div>
+
+            <div class="download-item__footer">
+              <!-- State text (Android: textColorThemeAccent, above the actions) -->
+              <span class="download-item__state">
+                <span class="download-item__state-dot" aria-hidden="true" />
+                {{ stateLabelOf(row.item) }}
+              </span>
+
+              <!-- Action cluster: 40dp icons with 8dp padding, as in item_download.xml -->
+              <div class="download-item__actions">
+                <button
+                  v-if="canStart(row.item)"
+                  type="button"
+                  class="download-item__action"
+                  title="Start"
+                  aria-label="Start download"
+                  @click.stop="onStart(row.item.id)"
+                >
+                  <AppIcon name="play-dark" size="24px" />
+                </button>
+                <button
+                  v-if="canPause(row.item)"
+                  type="button"
+                  class="download-item__action"
+                  title="Pause"
+                  aria-label="Pause download"
+                  @click.stop="onPause(row.item.id)"
+                >
+                  <AppIcon name="pause-dark" size="24px" />
+                </button>
+                <button
+                  v-if="canCancel(row.item)"
+                  type="button"
+                  class="download-item__action"
+                  title="Stop"
+                  aria-label="Stop download"
+                  @click.stop="onCancel(row.item.id)"
+                >
+                  <AppIcon name="close-dark" size="24px" />
+                </button>
+                <button
+                  type="button"
+                  class="download-item__action download-item__action--danger"
+                  title="Delete"
+                  aria-label="Delete download"
+                  @click.stop="onDelete(row.item.id)"
+                >
+                  <AppIcon name="delete-dark" size="24px" />
+                </button>
+              </div>
+            </div>
+
+            <!-- Failure reason (DownloadInfo.error), secondary text under the state -->
+            <p
+              v-if="isFailed(row.item) && errorTextOf(row.item)"
+              class="download-item__error"
+              :title="errorTextOf(row.item)"
+            >
+              {{ errorTextOf(row.item) }}
+            </p>
+          </AppListRow>
         </li>
       </ul>
     </ContentLayout>
@@ -383,9 +491,13 @@ import type { DownloadItem, DownloadLabel, DownloadBatchTarget } from '@/api/dow
 import { useWebSocket } from '@/composables/useWebSocket'
 import type { DownloadProgress } from '@/composables/useWebSocket'
 import { useFilterSlots } from '@/composables/useFilterSlots'
+import { usePagedList } from '@/composables/usePagedList'
 import { usePcInput } from '@/composables/usePcInput'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import type { FabAction } from '@/types/components'
+import { CATEGORY_BY_BIT } from '@/types/components'
+import { maskedTitle } from '@/utils/privacyMask'
+import { usePreferencesStore } from '@/stores/preferences'
 import {
   DEFAULT_DOWNLOAD_LIST_PREFS,
   loadDownloadListPrefs,
@@ -394,13 +506,15 @@ import {
 import ContentLayout from '@/components/layout/ContentLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
-import DownloadItemCard from '@/components/download/DownloadItem.vue'
+import CategoryChip from '@/components/atoms/CategoryChip.vue'
+import AppListRow from '@/components/gallery/AppListRow.vue'
 
 /** View states matching ContentLayout's internal ViewTransition. */
 type ViewState = 'loading' | 'content' | 'empty' | 'error'
 
 /** Android `DownloadInfo.STATE_*` used for optimistic UI updates. */
 const router = useRouter()
+const preferencesStore = usePreferencesStore()
 
 const STATE_NONE = 0
 const STATE_WAIT = 1
@@ -424,13 +538,10 @@ const DOWNLOAD_PAGE_SIZES = [50, 100, 200] as const
 /** Fixed row-height estimate for the virtualizer (single-column list). */
 const ROW_ESTIMATE = 160
 
-const downloads = ref<DownloadItem[]>([])
 const labels = ref<DownloadLabel[]>([])
 const activeLabel = ref<number | null>(null)
 const state = ref<ViewState>('loading')
 const refreshing = ref(false)
-/** Total entries under the current label (from the server, page 1). */
-const total = ref(0)
 const contentRef = ref<InstanceType<typeof ContentLayout> | null>(null)
 /** F4 REGEX_INVALID: the error tip switches to a dedicated regex message. */
 const errorText = ref('Failed to load downloads')
@@ -439,84 +550,80 @@ const errorText = ref('Failed to load downloads')
 
 /** 每页条数（共享偏好里的档外值回落默认 50）。 */
 const storedPageSize = listPrefs.pageSize
-const pageSize = ref(
-  (DOWNLOAD_PAGE_SIZES as readonly number[]).includes(storedPageSize)
-    ? storedPageSize
-    : DEFAULT_DOWNLOAD_LIST_PREFS.pageSize,
-)
 
-/** 当前页码（1 起，跟随加载位置；跳页用 offset 语义直取替换）。 */
-const currentPage = ref(1)
-/** 跳页输入。 */
-const jumpInput = ref<number | null>(1)
-const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize.value)))
-/**
- * 分页条可见性：total > pageSize 才显示。对齐 Android 仅当可见条数 ≥
- * paginationSize(500) 时显示指示器——这里用 total ≤ pageSize 同义判定
- * （还有更多页才需要定位）。
- */
-const paginationVisible = computed(() => total.value > pageSize.value)
+/** fetchPage 抓到的附属数据（labels）；仅非 stale 成功时随 onSuccess 提交。 */
+let pendingLabels: DownloadLabel[] = []
 
 /**
- * 跳页：服务端 offset 直取并替换列表（offset = (k-1)*pageSize），列表顶部
- * 重置为所跳页面（虚拟滚动由 virtualizer + scrollToTop 滚回顶部）。
+ * 分页状态机（W3-C1 usePagedList）：页码 / 条数 / 跳页 / PC 页码窗口 /
+ * PageUp/Down / stale 竞态守卫。fetchPage 适配 /download/list 的
+ * offset/limit 契约（offset = (page-1)*pageSize）；视图四态机与错误文案
+ * 留在本视图，经 onLoadStart/onSuccess/onError 钩子接线。
  */
-function jumpToPage(force?: number): void {
-  const target = Math.min(
-    Math.max(Math.floor(force ?? jumpInput.value ?? currentPage.value), 1),
-    totalPages.value,
-  )
-  if (!Number.isFinite(target) || target < 1) return
-  if (target === currentPage.value) return
-  jumpInput.value = target
-  state.value = 'loading'
-  void load((target - 1) * pageSize.value)
-}
-
-/**
- * PC 页码窗口（2026-08-30）：总页数 ≤7 全量；否则首页/末页夹在窗口两端，
- * 窗口内 ±1 邻页 + 折叠省略号，当前页永远可见。
- * 返回示例（page=6/total=30）：[1,'…',5,6,7,'…',30]。
- */
-const pageWindow = computed<(number | '…')[]>(() => {
-  const total = totalPages.value
-  const current = currentPage.value
-  if (total <= 7) return Array.from({ length: total }, (_, i) => i + 1)
-  const windowSize = 5 // 当前 ±2（含本身）
-  const start = Math.max(2, Math.min(current - 2, total - windowSize))
-  const end = start + windowSize - 1
-  const items: (number | '…')[] = []
-  items.push(1)
-  if (start > 2) items.push('…')
-  for (let p = start; p <= end; p++) items.push(p)
-  if (end < total - 1) items.push('…')
-  items.push(total)
-  return items
+const {
+  items: downloads,
+  total,
+  pageSize,
+  currentPage,
+  totalPages,
+  paginationVisible,
+  pageWindow,
+  jumpInput,
+  load: loadPage,
+  jumpToPage,
+} = usePagedList<DownloadItem>({
+  fetchPage: async (page, size) => {
+    const filter = currentFilter()
+    const result = await downloadApi.list(
+      activeLabel.value ?? undefined,
+      (page - 1) * size,
+      size,
+      SORT_MODE,
+      filter.q,
+      filter.regex,
+    )
+    pendingLabels = result.labels
+    return { items: result.downloads, total: result.total }
+  },
+  pageSizes: DOWNLOAD_PAGE_SIZES,
+  initialPageSize: storedPageSize,
+  fallbackPageSize: DEFAULT_DOWNLOAD_LIST_PREFS.pageSize,
+  onLoadStart: () => {
+    state.value = 'loading'
+  },
+  onSuccess: (result) => {
+    labels.value = pendingLabels
+    state.value = result.items.length === 0 ? 'empty' : 'content'
+    contentRef.value?.scrollToTop()
+  },
+  onError: (error) => {
+    console.error('Failed to load downloads', error)
+    // F4: invalid regex in q → 400 REGEX_INVALID; name the cause instead of
+    // the generic "failed to load" tip (dedicated toast + error-state copy).
+    if (errorCodeOf(error) === 'REGEX_INVALID') {
+      errorText.value = '正则无效，请检查搜索/筛选的正则表达式'
+      showToast('正则无效，请检查筛选表达式')
+    } else {
+      errorText.value = 'Failed to load downloads'
+    }
+    if (downloads.value.length === 0) {
+      state.value = 'error'
+    } else if (errorCodeOf(error) !== 'REGEX_INVALID') {
+      showToast('Failed to refresh downloads')
+    }
+  },
+  onPageSizeChange: (size) => saveDownloadListPrefs({ sortMode: SORT_MODE, pageSize: size }),
+  keyboardPaging: true,
 })
 
-/** PC 键盘：PageUp/PageDown 上一页/下一页（INPUT/SELECT 焦点时豁免）。 */
-function onPageKey(e: KeyboardEvent): void {
-  const target = e.target as HTMLElement | null
-  if (target && (target.tagName === 'INPUT' || target.tagName === 'SELECT' || target.tagName === 'TEXTAREA')) return
-  if (e.key === 'PageDown') {
-    e.preventDefault()
-    if (currentPage.value < totalPages.value) jumpToPage(currentPage.value + 1)
-  } else if (e.key === 'PageUp') {
-    e.preventDefault()
-    if (currentPage.value > 1) jumpToPage(currentPage.value - 1)
-  }
+/**
+ * 视图层加载入口：过滤/标签/刷新等所有入口都回第 1 页（原 load() 的
+ * offset=0 语义）。`silent: true` 不切 loading 态——宿主自管忙态的入口
+ * （下拉刷新 / 批量操作后的静默重载 / 挂载首屏）。
+ */
+function load(opts?: { silent?: boolean }): Promise<void> {
+  return loadPage(1, opts)
 }
-onMounted(() => window.addEventListener('keydown', onPageKey))
-onUnmounted(() => window.removeEventListener('keydown', onPageKey))
-
-/** 每页条数切换（分页条下拉）→ 即时保存本地偏好 + 重置回第 1 页加载。 */
-watch(pageSize, (next) => {
-  if (!(DOWNLOAD_PAGE_SIZES as readonly number[]).includes(next)) return
-  saveDownloadListPrefs({ sortMode: SORT_MODE, pageSize: next })
-  jumpInput.value = 1
-  state.value = 'loading'
-  void load(0)
-})
 
 /**
  * F4: extracts the business error code from the API error envelope
@@ -591,8 +698,16 @@ const virtualizer = useVirtualizer(
   })),
 )
 
-/** Monotonic request guard — stale responses (fast label switches) drop. */
-let requestSeq = 0
+/** 虚拟窗口行：tanstack 虚拟项与数据行合成一个 v-for 迭代单元。 */
+const virtualRows = computed(() =>
+  virtualizer.value.getVirtualItems().map((vitem) => ({
+    key: vitem.key,
+    index: vitem.index,
+    start: vitem.start,
+    item: downloads.value[vitem.index],
+    chip: CATEGORY_BY_BIT[downloads.value[vitem.index].category],
+  })),
+)
 
 /* ---------------------------------- server-side search + filter slots ----- */
 
@@ -608,7 +723,7 @@ const { slots, activeSlotId, activeSlot, selectSlot } = useFilterSlots(searchQue
 function onSlotBarSelect(id: string | null): void {
   selectSlot(id)
   // 槽位点击总是重新加载（清空搜索词不一定触发防抖 watch——搜索词本来就空时）。
-  state.value = 'loading'
+  // 非静默 load → onLoadStart 切 loading 态。
   void load()
 }
 
@@ -643,7 +758,6 @@ function scheduleSearchCommit(): void {
       // 槽位激活时该变更来自 selectSlot 清空搜索词——加载已由 onSlotBarSelect
       // 触发（也避免与槽位过滤重复请求）。
       if (activeSlot.value) return
-      state.value = 'loading'
       void load()
     }
   }, 400)
@@ -652,51 +766,7 @@ function scheduleSearchCommit(): void {
 function clearSearch(): void {
   searchQuery.value = ''
   debouncedQuery.value = ''
-  state.value = 'loading'
   void load()
-}
-
-/**
- * 加载（替换模式）：`offset` 为服务端分页偏移（跳页时 (n-1)*pageSize，
- * 其余入口保持 0）。成功后当前页码跟随加载位置（offset 语义）。
- * 搜索/标签/槽位变更各自触发重载（offset 0 → 回到第 1 页）。
- */
-async function load(offset = 0): Promise<void> {
-  const seq = ++requestSeq
-  try {
-    const filter = currentFilter()
-    const result = await downloadApi.list(
-      activeLabel.value ?? undefined,
-      offset,
-      pageSize.value,
-      SORT_MODE,
-      filter.q,
-      filter.regex,
-    )
-    if (seq !== requestSeq) return
-    downloads.value = result.downloads
-    labels.value = result.labels
-    total.value = result.total
-    currentPage.value = Math.min(Math.floor(offset / pageSize.value) + 1, totalPages.value)
-    state.value = result.downloads.length === 0 ? 'empty' : 'content'
-    contentRef.value?.scrollToTop()
-  } catch (error) {
-    if (seq !== requestSeq) return
-    console.error('Failed to load downloads', error)
-    // F4: invalid regex in q → 400 REGEX_INVALID; name the cause instead of
-    // the generic "failed to load" tip (dedicated toast + error-state copy).
-    if (errorCodeOf(error) === 'REGEX_INVALID') {
-      errorText.value = '正则无效，请检查搜索/筛选的正则表达式'
-      showToast('正则无效，请检查筛选表达式')
-    } else {
-      errorText.value = 'Failed to load downloads'
-    }
-    if (downloads.value.length === 0) {
-      state.value = 'error'
-    } else if (errorCodeOf(error) !== 'REGEX_INVALID') {
-      showToast('Failed to refresh downloads')
-    }
-  }
 }
 
 function selectTab(id: number | null, event: MouseEvent): void {
@@ -706,18 +776,133 @@ function selectTab(id: number | null, event: MouseEvent): void {
   if (el instanceof HTMLElement) {
     el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' })
   }
-  state.value = 'loading'
   void load()
 }
 
 async function onRefresh(): Promise<void> {
-  await load()
+  await load({ silent: true })
   refreshing.value = false
 }
 
 function onRetry(): void {
-  state.value = 'loading'
   void load()
+}
+
+/* --------------------------------------------------- row presentation --- */
+
+/** 行展示标题——脱敏在本视图完成（与原 DownloadItem 同一表达式，逻辑不变）。 */
+function displayTitle(item: DownloadItem): string {
+  return maskedTitle(item.title || item.titleJpn || 'Untitled', item.gid)
+}
+
+/* W5/W7 (plan-2026-09-02): 阅读进度角标——showReadProgress 开且进度 > 0 才
+   显示；格式对齐 Android GalleryAdapterNew：N/MP（有总页数）或 NP（页数
+   未知）。字段缺失（旧服务器 undefined）时隐藏，与 GalleryCard 语义一致。 */
+function readProgressLabelOf(item: DownloadItem): string {
+  const progress = item.readProgress
+  if (typeof progress !== 'number' || !Number.isFinite(progress) || progress <= 0) return ''
+  const current = progress + 1
+  return item.total > 0 ? `${current}/${item.total}P` : `${current}P`
+}
+
+function showReadProgressBadge(item: DownloadItem): boolean {
+  return preferencesStore.prefs?.general?.showReadProgress === true && readProgressLabelOf(item) !== ''
+}
+
+function isDownloading(item: DownloadItem): boolean {
+  return item.state === STATE_DOWNLOAD
+}
+
+function isFailed(item: DownloadItem): boolean {
+  return item.state === STATE_FAILED
+}
+
+/** Failure reason from the backend; empty when the item has none. */
+function errorTextOf(item: DownloadItem): string {
+  return item.error?.trim() || ''
+}
+
+/** Downloading with an unknown page count → sliding indeterminate bar. */
+function isIndeterminate(item: DownloadItem): boolean {
+  return isDownloading(item) && item.total <= 0
+}
+
+function percentOf(item: DownloadItem): number {
+  return item.total > 0 ? Math.min(100, Math.round((item.done / item.total) * 100)) : 0
+}
+
+function percentTextOf(item: DownloadItem): string {
+  return item.total > 0 ? `${percentOf(item)}%` : '—'
+}
+
+/** CSS modifier key for the current state (S4 state colors on the row). */
+function stateKeyOf(item: DownloadItem): string {
+  switch (item.state) {
+    case STATE_NONE:
+      return 'idle'
+    case STATE_WAIT:
+      return 'wait'
+    case STATE_DOWNLOAD:
+      return 'download'
+    case STATE_FINISH:
+      return 'finish'
+    default:
+      return 'failed'
+  }
+}
+
+/** Android `download_state_*` strings (values-en/strings.xml:377-383). */
+function stateLabelOf(item: DownloadItem): string {
+  switch (item.state) {
+    case STATE_NONE:
+      return 'Idle'
+    case STATE_WAIT:
+      return 'Waiting'
+    case STATE_DOWNLOAD:
+      return 'Downloading'
+    case STATE_FINISH:
+      return 'Done'
+    default:
+      return 'Failed'
+  }
+}
+
+/** Android shows the start icon when idle or failed (retry). */
+function canStart(item: DownloadItem): boolean {
+  return item.state === STATE_NONE || item.state === STATE_FAILED
+}
+
+function canPause(item: DownloadItem): boolean {
+  return isDownloading(item)
+}
+
+function canCancel(item: DownloadItem): boolean {
+  return item.state === STATE_WAIT || isDownloading(item)
+}
+
+/** Seconds remaining at the current rate (0 = not computable). */
+function etaSecondsOf(item: DownloadItem, speed: number): number {
+  if (speed <= 0 || item.total <= 0) return 0
+  return Math.max(0, item.total - item.done) / speed
+}
+
+function formatEta(seconds: number): string {
+  const s = Math.round(seconds)
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  if (h > 0) return `${h}h ${m}m`
+  const sec = s % 60
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
+/** Right-hand stats text: rate + ETA while downloading. */
+function statsTextOf(item: DownloadItem, speed: number): string {
+  if (!isDownloading(item)) return ''
+  if (speed <= 0) return 'Fetching…'
+  const rate = speed >= 10 ? speed.toFixed(0) : speed.toFixed(1)
+  const eta = etaSecondsOf(item, speed) > 0 ? ` · ETA ${formatEta(etaSecondsOf(item, speed))}` : ''
+  return `${rate} pages/s${eta}`
 }
 
 /* -------------------------------------------------------- row actions --- */
@@ -891,7 +1076,7 @@ async function onBatchStop(): Promise<void> {
   } catch (error) {
     console.error('Failed to stop downloads', error)
     showToast('Failed to stop downloads')
-    await load()
+    await load({ silent: true })
   } finally {
     batchBusy.value = false
     exitSelectMode()
@@ -1015,7 +1200,7 @@ async function pauseAll(): Promise<void> {
   } catch (error) {
     console.error('Failed to pause downloads', error)
     showToast('Failed to pause downloads')
-    await load()
+    await load({ silent: true })
   }
 }
 
@@ -1065,7 +1250,7 @@ async function createLabel(): Promise<void> {
     await downloadApi.createLabel(name)
     showLabelDialog.value = false
     showToast(`Label “${name}” created`)
-    await load()
+    await load({ silent: true })
   } catch (error) {
     console.error('Failed to create label', error)
     labelError.value = 'Failed to create label'
@@ -1139,7 +1324,7 @@ watch(
 
 onMounted(() => {
   connect()
-  void load()
+  void load({ silent: true })
 })
 
 onUnmounted(() => {
@@ -1581,6 +1766,230 @@ onUnmounted(() => {
   }
 }
 
+/* ------------------------------------------- download row internals ---- */
+/* W3-C1：行骨架（卡片面/勾选圈/缩略图/标题）在共享 AppListRow 内；这里只
+   保留下载特有的 slotted 内容样式（原 DownloadItem.vue 逐条搬入，声明不变
+   ——视觉零漂移）。`download-item--*` 状态修饰类由模板随行下发到 AppListRow
+   根节点，用于给进度条/状态文案着色（S4 状态色）。 */
+.download-item__pages {
+  margin-left: auto;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* W5/W7: 阅读进度角标 — 12sp secondary，跟在下载进度文案之后。 */
+.download-item__read-progress {
+  flex-shrink: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* ------------------------------------------------------------- stats --- */
+.download-item__stats {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--spacing);
+  font-size: var(--text-super-small); /* 12sp, percent + speed row */
+}
+
+.download-item__percent {
+  color: var(--text-color-primary);
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.download-item__speed {
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ----------------------------------------------------- progress bar --- */
+.download-item__track {
+  height: 4px;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--grey-300); /* S4 spec: grey-300 track (light) */
+}
+
+/* Theme-aware tracks matching Android progress_dark / progress_black. */
+[data-theme='dark'] .download-item__track {
+  background: var(--grey-600);
+}
+
+[data-theme='black'] .download-item__track {
+  background: var(--grey-700);
+}
+
+.download-item__fill {
+  position: relative;
+  height: 100%;
+  border-radius: 2px;
+  overflow: hidden;
+  background: var(--grey-500);
+  transition:
+    width 300ms var(--ease-decelerate-quart),
+    background-color 200ms linear;
+}
+
+/* State colors: downloading = accent, idle/wait = grey, done = green,
+   failed = red (S4 style spec). */
+.download-item--download .download-item__fill {
+  background: var(--color-accent);
+}
+
+.download-item--finish .download-item__fill {
+  background: var(--color-cat-game-cg);
+}
+
+.download-item--failed .download-item__fill {
+  background: var(--color-red-500);
+}
+
+/* Live sheen sweeping across the fill while downloading. */
+.download-item__fill--sheen::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent 0%, var(--translucent-bg) 50%, transparent 100%);
+  transform: translateX(-100%);
+  animation: dl-sheen 1300ms linear infinite;
+}
+
+@keyframes dl-sheen {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+/* Unknown page count: Material-style sliding segment. */
+.download-item__fill--indeterminate {
+  width: 40%;
+  background: var(--color-accent);
+  animation: dl-slide 1400ms var(--ease-decelerate-quart) infinite;
+}
+
+@keyframes dl-slide {
+  0% {
+    margin-left: -40%;
+  }
+  100% {
+    margin-left: 100%;
+  }
+}
+
+/* ------------------------------------------------------------ footer --- */
+.download-item__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--spacing);
+  margin-top: auto;
+}
+
+.download-item__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: var(--text-super-small); /* 12sp */
+  font-weight: 500;
+  color: var(--grey-500);
+}
+
+.download-item--download .download-item__state {
+  color: var(--color-accent);
+}
+
+.download-item--finish .download-item__state {
+  color: var(--color-cat-game-cg);
+}
+
+.download-item--failed .download-item__state {
+  color: var(--color-red-500);
+}
+
+.download-item__state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+
+.download-item--download .download-item__state-dot {
+  animation: dl-pulse 1000ms ease-in-out infinite;
+}
+
+@keyframes dl-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.3;
+  }
+}
+
+/* ----------------------------------------------------- failure reason --- */
+.download-item__error {
+  margin: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ----------------------------------------------------------- actions --- */
+.download-item__actions {
+  display: flex;
+  align-items: center;
+}
+
+/* 40dp touch targets with 24dp glyphs (item_download.xml ImageViews). */
+.download-item__action {
+  width: 40px;
+  height: 40px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--drawable-color-primary);
+  cursor: pointer;
+  transition:
+    background-color 140ms var(--ease-decelerate-quart),
+    color 140ms var(--ease-decelerate-quart),
+    transform 120ms var(--ease-decelerate-quart);
+}
+
+.download-item__action:hover {
+  background: var(--color-surface-activated);
+}
+
+.download-item__action:active {
+  transform: scale(0.88);
+}
+
+.download-item__action:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
+}
+
+.download-item__action--danger:hover {
+  color: var(--color-red-500);
+}
+
 /* ------------------------------------------------------------- dialog --- */
 .dialog-scrim {
   position: fixed;
@@ -1744,7 +2153,10 @@ onUnmounted(() => {
   .download-list__item,
   .dialog-scrim,
   .dialog,
-  .toast {
+  .toast,
+  .download-item__fill--sheen::after,
+  .download-item__fill--indeterminate,
+  .download-item--download .download-item__state-dot {
     animation: none;
   }
 }

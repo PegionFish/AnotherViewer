@@ -207,7 +207,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     }))
     await mountView()
 
-    const img = wrapper.find('.download-item__thumb img')
+    const img = wrapper.find('.app-list-row__thumb img')
     expect(img.exists()).toBe(true)
     expect(img.attributes('src')).toBe(`/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`)
   })
@@ -254,12 +254,13 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     await mountView()
     expect(wrapper.find('.select-bar').exists()).toBe(false)
 
-    const row = wrapper.find('.download-item')
+    const row = wrapper.find('.app-list-row')
     await row.trigger('contextmenu')
 
     expect(wrapper.find('.select-bar').exists()).toBe(true)
     expect(wrapper.find('.select-bar__count').text()).toBe('共 250 条 · 已选 1 条')
-    expect(row.classes()).toContain('download-item--selected')
+    // W3-C1: 行骨架切共享 AppListRow —— 行根类名引用同步更新。
+    expect(row.classes()).toContain('app-list-row--selected')
     // FAB cluster hidden while selecting (Android choice mode).
     expect(wrapper.find('.fab-layout').exists()).toBe(false)
 
@@ -275,7 +276,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
       total: 250,
     }))
     await mountView()
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
 
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     // 分页恢复：全选 = 当前页 50 条（共 250 条）。
@@ -305,7 +306,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     vi.mocked(downloadApi.startRange).mockResolvedValue(2)
     await mountView()
 
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     // Select all three (2 is downloading → not startable).
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
@@ -333,7 +334,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     vi.mocked(downloadApi.stopRange).mockResolvedValue(2)
     await mountView()
 
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '停止')!.trigger('click')
@@ -353,7 +354,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await mountView()
 
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '删除')!.trigger('click')
     await flushPromises()
 
@@ -372,7 +373,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     vi.mocked(downloadApi.move).mockResolvedValue(1)
     await mountView()
 
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '移动')!.trigger('click')
     await flushPromises()
     // Dialog teleports to body.
@@ -443,7 +444,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     vi.mocked(downloadApi.startRange).mockResolvedValue(40)
     await mountView()
 
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
     // 已加载 50 条 < total 250 → 跨页全选。
@@ -467,7 +468,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true)
     await mountView()
 
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '删除')!.trigger('click')
@@ -556,7 +557,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     await mountView()
 
     await clickFilterChip('Artist')
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '开始')!.trigger('click')
@@ -583,7 +584,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     await wrapper.find('.search-bar__input').setValue('futa')
     await vi.advanceTimersByTimeAsync(500)
     await flushPromises()
-    await wrapper.find('.download-item').trigger('contextmenu')
+    await wrapper.find('.app-list-row').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '开始')!.trigger('click')
@@ -826,7 +827,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
       total: 1,
     }))
     await mountView()
-    await wrapper.find('.download-item__thumb').trigger('click')
+    await wrapper.find('.app-list-row__thumb').trigger('click')
     expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/9001', query: { token: 'tok1' } })
   })
 
@@ -837,7 +838,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
       total: 1,
     }))
     await mountView()
-    await wrapper.find('.download-item').trigger('click')
+    await wrapper.find('.app-list-row').trigger('click')
     expect(pushMock).toHaveBeenCalledWith({ path: '/reader/9002', query: { token: 'tok2' } })
   })
 })
