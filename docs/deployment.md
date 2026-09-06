@@ -31,7 +31,8 @@ README.txt
 ├── security.key       # token/密码加密密钥
 ├── downloads/         # 下载内容默认位置（可用管理界面改到其他路径，持久化）
 ├── cache/             # 图片缓存
-└── backups/           # 备份产物落点
+├── backups/           # 备份产物落点
+└── logs/              # Tomcat access log（access.yyyy-MM-dd.log，按天滚动，保留 30 天）
 ```
 
 下载路径与缓存路径可在管理界面单独设置（持久化于 `server_config` 表，重启不丢）；其余路径一律由 data-dir 派生。迁移/备份基于此固定结构，**与具体路径无关**。
@@ -180,6 +181,63 @@ sudo systemctl start anotherviewer
 ```bash
 rclone mount cloud:/data /data/anotherviewer/downloads --vfs-cache-mode full --vfs-cache-max-size 1G
 ```
+
+## 日志持久化（journald）
+
+systemd 部署下应用日志由 journald 收管（`journalctl -u anotherviewer -f`）。journald 默认 `Storage=auto`：只有 `/var/log/journal` 已存在才落盘，否则只写内存盘 `/run/log/journal`，**主机重启后日志全部丢失**。两种开启方式任选其一：
+
+**首选：journald 配置 drop-in**（自包含——persistent 模式下 journald 自动创建 `/var/log/journal`，无需手工建目录）：
+
+```bash
+sudo mkdir -p /etc/systemd/journald.conf.d
+sudo tee /etc/systemd/journald.conf.d/99-persistent.conf >/dev/null <<'EOF'
+[Journal]
+Storage=persistent
+EOF
+sudo systemctl restart systemd-journald
+```
+
+**备选（等价）**：只手工创建目录，默认的 `Storage=auto` 检测到目录存在即自动转持久化：
+
+```bash
+sudo mkdir -p /var/log/journal
+sudo systemctl restart systemd-journald
+```
+
+> 注意：`Storage=` 是 `journald.conf`（`[Journal]` 段）的选项，**不是 unit 属性**——写进 `systemctl edit anotherviewer` 生成的 unit drop-in（`anotherviewer.service.d/override.conf`）会被 systemd 以 "Unknown key" 忽略，不生效。
+
+验证：`ls /var/log/journal/<machine-id>/` 出现归档文件；重启服务或主机后 `journalctl -b -1` 仍能回看上一次启动的日志。
+
+应用 access log（见下节）是应用直接写的文件，不经 journald，不受此设置影响。
+
+## 慢请求分析（access log）
+
+应用对每个 HTTP 请求记一行访问日志（`server.tomcat.accesslog`，默认开启）：落 `<data-dir>/logs/access.yyyy-MM-dd.log`，按天滚动，保留 30 天自动清理。字段最小集：时间、客户端 IP、请求行（方法 路径 协议）、状态码、响应字节、耗时毫秒：
+
+```
+[06/Sep/2026:10:01:02 +0800] 192.168.6.10 "GET /api/v1/health HTTP/1.1" 200 143 12
+```
+
+一行内空格分隔，**最后一列（`$NF`）即耗时毫秒（%D）**。SPA 前端静态资源（`/`、`/assets/**`）与 API 共用同一份日志；分析 API 时按 `/api/v1/` 前缀过滤（请求路径固定在第 5 列）。
+
+常用命令（在 `<data-dir>/logs` 目录下执行）：
+
+```bash
+# Top 20 最慢的 API 请求：%D 随行输出 → 按数值排序 → 还原原始行
+grep -h '/api/v1/' access.*.log | awk '{print $NF, $0}' | sort -n | cut -d' ' -f2- | tail -n 20
+
+# 只看超过 500ms 的 API 请求
+awk '$5 ~ /^\/api\/v1\// && $NF > 500' access.*.log
+
+# API 耗时分布：请求数 / 平均 / p50 / p95 / 最大（毫秒）
+grep -h '/api/v1/' access.*.log | awk '{print $NF}' | sort -n \
+  | awk '{a[NR]=$1; s+=$1} END {if (NR==0) {print "no requests"; exit} print "requests="NR, "avg=" int(s/NR) "ms", "p50=" a[int((NR-1)*0.5)+1] "ms", "p95=" a[int((NR-1)*0.95)+1] "ms", "max=" a[NR] "ms"}'
+
+# 对照组：前端静态资源访问（排除 API）
+grep -hv '/api/v1/' access.*.log | tail -n 20
+```
+
+> data-dir 传**绝对路径**时 access log 一定落 `<data-dir>/logs`；若传相对路径（如裸 `./gradlew bootRun` 的默认 `./data`），Tomcat 会把它解析到自己的临时 basedir（`/tmp/tomcat.<port>.<随机>`）而非工作目录。官方 zip 包 `bin/start.sh` 与 `scripts/dev-run.sh` 均使用绝对路径，不受影响。
 
 ## 故障排查
 

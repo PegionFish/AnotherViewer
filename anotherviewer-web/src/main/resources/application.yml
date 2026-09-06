@@ -4,6 +4,18 @@ server:
   # 反映真实客户端 IP（登录限流按 IP 分桶依赖它）。直连部署时该策略同样安全：
   # Tomcat RemoteIpValve 默认只信任内部网段，外部客户端自带的 XFF 不会被采纳。
   forward-headers-strategy: native
+  tomcat:
+    accesslog:
+      # 每请求一行访问日志，落 data-dir/logs（部署机 ProtectSystem=strict 只放行
+      # data 可写，日志必须与其他数据同目录）。字段：时间、客户端 IP、请求行、
+      # 状态码、响应字节、耗时毫秒（慢请求分析见 docs/deployment.md）。
+      enabled: true
+      directory: ${anotherviewer.data-dir}/logs
+      prefix: access
+      file-date-format: .yyyy-MM-dd
+      suffix: .log
+      max-days: 30
+      pattern: '%t %a "%r" %s %B %D'
 
 spring:
   datasource:
