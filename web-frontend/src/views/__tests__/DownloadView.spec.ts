@@ -147,7 +147,7 @@ function pages(total: number): (offset: number, limit: number) => DownloadItem[]
     Array.from({ length: Math.min(limit, total - offset) }, (_, i) => makeDownload(offset + i + 1))
 }
 
-describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 2026-09-05)', () => {
+describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 2026-09-06 分页恢复)', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
@@ -179,7 +179,7 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     return wrapper
   }
 
-  it('loads the full list with one request and mounts only the virtual window', async () => {
+  it('loads the first page with offset 0 and mounts only the virtual window', async () => {
     vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
       downloads: pages(250)(offset, limit),
       labels: [],
@@ -187,17 +187,15 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     }))
     await mountView()
 
-    // 全量加载：offset 0 + 全量上限（2026-09-05，服务端同步放宽）。
-    expect(downloadApi.list).toHaveBeenCalledWith(undefined, 0, 100_000, 'time_desc', null, false)
+    // 默认偏好：每页 50 条（与 Android 一致）+ 添加时间倒序（最新在前）。
+    expect(downloadApi.list).toHaveBeenCalledWith(undefined, 0, 50, 'time_desc', null, false)
     expect(wrapper.find('[data-testid="content-state-content"]').exists()).toBe(true)
     const items = wrapper.findAll('.download-list__item')
     // Virtualized: only the rows around the window are mounted — without
-    // virtualization all 250 loaded rows would be in the DOM.
+    // virtualization all 50 loaded rows would be in the DOM.
     expect(items.length).toBeGreaterThan(0)
-    expect(items.length).toBeLessThan(250)
+    expect(items.length).toBeLessThan(50)
     expect(wrapper.text()).toContain('Dl 1')
-    // 全量后跳页分页退役：再大的 total 也不渲染分页条。
-    expect(wrapper.find('[data-testid="download-pagination"]').exists()).toBe(false)
   })
 
   it('rewrites external thumbnails through the image proxy in rendered rows', async () => {
@@ -280,7 +278,8 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     await wrapper.find('.download-item').trigger('contextmenu')
 
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
-    expect(wrapper.find('.select-bar__count').text()).toBe('共 250 条 · 已选 250 条')
+    // 分页恢复：全选 = 当前页 50 条（共 250 条）。
+    expect(wrapper.find('.select-bar__count').text()).toBe('共 250 条 · 已选 50 条')
 
     await wrapper.find('.select-bar__close').trigger('click')
     expect(wrapper.find('.select-bar').exists()).toBe(false)
@@ -397,7 +396,7 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
       return { downloads: rows, labels: [], total: q ? rows.length : 250 }
     })
     await mountView()
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', null, false)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', null, false)
 
     const input = wrapper.find('.search-bar__input')
     await input.setValue('futa')
@@ -406,12 +405,12 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     expect(downloadApi.list).toHaveBeenCalledTimes(1)
     await vi.advanceTimersByTimeAsync(300)
     await flushPromises()
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', 'futa', false)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', 'futa', false)
 
     // 清空搜索恢复全量。
     await wrapper.find('.search-bar__clear').trigger('click')
     await flushPromises()
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', null, false)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', null, false)
     vi.useRealTimers()
   })
 
@@ -431,13 +430,13 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     await input.setValue('漫画')
     await vi.advanceTimersByTimeAsync(500)
     await flushPromises()
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', '漫画', false)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', '漫画', false)
     vi.useRealTimers()
   })
 
-  it('select-all (全量在册) sends the all-mode target with current filters', async () => {
+  it('select-all across pages sends the all-mode target with current filters', async () => {
     vi.mocked(downloadApi.list).mockImplementation(async () => ({
-      downloads: pages(250)(0, 100_000),
+      downloads: pages(250)(0, 50),
       labels: [],
       total: 250,
     }))
@@ -447,18 +446,14 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     await wrapper.find('.download-item').trigger('contextmenu')
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '全选')!.trigger('click')
     await flushPromises()
-    // 全量加载后「全选」即全部在册行。
-    expect(wrapper.find('.select-bar__count').text()).toBe('共 250 条 · 已选 250 条')
+    // 已加载 50 条 < total 250 → 跨页全选。
+    expect(wrapper.find('.select-bar__count').text()).toBe('共 250 条 · 已选 50 条')
 
     await wrapper.findAll('.select-bar__btn').find((b) => b.text() === '开始')!.trigger('click')
     await flushPromises()
 
-    // 全量在册 → 批量目标退化为显式 ids（跨页 all-mode 仅在加载 < total 时存在）。
-    const target = vi.mocked(downloadApi.startRange).mock.calls[0][0]
-    expect(target.all).toBeUndefined()
-    expect(target.ids).toHaveLength(250)
-    expect(target.ids).toContain(1)
-    expect(target.ids).toContain(250)
+    // 跨页全选 → all 模式（服务端按当前过滤条件投影全集 id）。
+    expect(downloadApi.startRange).toHaveBeenCalledWith({ all: true, label: null })
     expect(document.querySelector('.toast')?.textContent).toContain('Started 40 downloads')
   })
 
@@ -514,7 +509,7 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
 
     await clickFilterChip('Artist')
     // 槽位激活 → q=pattern + regex=true。
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', 'artist', true)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', 'artist', true)
     expect(filterChipActive('Artist')).toBe(true)
     // 互斥：选槽位清空搜索词。
     const input = wrapper.find('.search-bar__input').element as HTMLInputElement
@@ -522,7 +517,7 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
 
     // 回到「全部」→ 恢复无过滤加载。
     await clickFilterChip('全部')
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', null, false)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', null, false)
     expect(filterChipActive('全部')).toBe(true)
   })
 
@@ -544,7 +539,7 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     await vi.advanceTimersByTimeAsync(500)
     await flushPromises()
     // 输入搜索取消槽位 → 走 LIKE 搜索（regex=false）。
-    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100_000, 'time_desc', 'futa', false)
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 50, 'time_desc', 'futa', false)
     expect(filterChipActive('Artist')).toBe(false)
     expect(filterChipActive('全部')).toBe(true)
     vi.useRealTimers()
@@ -636,18 +631,173 @@ describe('DownloadView (虚拟滚动 + 全量加载, plan-2026-08-06 A5/A7 + 202
     expect(wrapper.text()).not.toContain('正则无效')
     expect(document.querySelector('.toast')).toBeNull()
   })
-  it('still honors the shared persisted sort mode on mount (pageSize 退役)', async () => {
+  it('restores the persisted page size on mount (与 AdminDownload 同键)', async () => {
     localStorage.setItem(
       DOWNLOAD_UI_KEY,
       JSON.stringify({ sortMode: 'title_asc', pageSize: 100 }),
     )
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 100) => ({
+      downloads: pages(250)(offset, limit),
+      labels: [],
+      total: 250,
+    }))
+    await mountView()
+    expect(downloadApi.list).toHaveBeenCalledWith(undefined, 0, 100, 'title_asc', null, false)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 250 条')
+  })
+
+  /* ---------------- 分页条（plan-2026-08-30 §3.4.0.1 + 2026-09-06 恢复） ---------------- */
+
+  it('hides the pagination bar when total <= pageSize (Android 语义)', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
+      downloads: pages(50)(offset, limit),
+      labels: [],
+      total: 50,
+    }))
+    await mountView()
+    expect(wrapper.find('[data-testid="download-pagination"]').exists()).toBe(false)
+  })
+
+  it('shows the pagination bar with page/size info when total > pageSize', async () => {
     vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
       downloads: pages(250)(offset, limit),
       labels: [],
       total: 250,
     }))
     await mountView()
-    expect(downloadApi.list).toHaveBeenCalledWith(undefined, 0, 100_000, 'title_asc', null, false)
+    const bar = wrapper.find('[data-testid="download-pagination"]')
+    expect(bar.exists()).toBe(true)
+    expect(bar.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 250 条')
+    // 档位收敛为 50/100/200（默认 50 对齐 Android）。
+    expect(bar.findAll('option').map((o) => o.text())).toEqual(['50', '100', '200'])
+  })
+
+  it('jumps to a page via server offset and replaces the list', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
+      downloads: pages(250)(offset, limit),
+      labels: [],
+      total: 250,
+    }))
+    await mountView()
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 250 条')
+
+    const input = wrapper.find('.pagination-bar__input')
+    await input.setValue('3')
+    await input.trigger('keyup.enter')
+    await flushPromises()
+    await flushPromises()
+
+    // 第 3 页 → offset = (3-1)*50 = 100 直取（替换列表）。
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 100, 50, 'time_desc', null, false)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 3 / 5 页 · 250 条')
+    // 替换语义：列表内容重置为所跳页首行。
+    expect(wrapper.text()).toContain('Dl 101')
+  })
+
+  it('clamps the jump target to [1, totalPages]', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
+      downloads: pages(250)(offset, limit),
+      labels: [],
+      total: 250,
+    }))
+    await mountView()
+    const input = wrapper.find('.pagination-bar__input')
+    await input.setValue('999')
+    await input.trigger('keyup.enter')
+    await flushPromises()
+    await flushPromises()
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 200, 50, 'time_desc', null, false)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 5 / 5 页 · 250 条')
+  })
+
+  it('renders a PC page-number window with ellipsis and jumps on click (63d20db5 形态)', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
+      downloads: pages(900)(offset, limit),
+      labels: [],
+      total: 900,
+    }))
+    await mountView()
+    const bar = wrapper.find('[data-testid="download-pagination"]')
+    expect(bar.exists()).toBe(true)
+    // totalPages = 900/50 = 18；首页窗口：1 2 3 … 18
+    const pageBtns = bar.findAll('.pagination-bar__page').map((b) => b.text())
+    expect(pageBtns).toContain('1')
+    expect(pageBtns).toContain('18')
+    expect(bar.find('.pagination-bar__ellipsis').exists()).toBe(true)
+    // 点击第 3 页按钮 → offset = (3-1)*50 = 100
+    await bar.findAll('.pagination-bar__page').find((b) => b.text() === '3')!.trigger('click')
+    await flushPromises()
+    await flushPromises()
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 100, 50, 'time_desc', null, false)
+    expect(bar.find('.pagination-bar__info').text()).toBe('第 3 / 18 页 · 900 条')
+    // 当前页按钮带 active 标记
+    expect(bar.find('.pagination-bar__page--active').text()).toBe('3')
+  })
+
+  it('PageDown / PageUp keys page through the list (PC keyboard)', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
+      downloads: pages(250)(offset, limit),
+      labels: [],
+      total: 250,
+    }))
+    await mountView()
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 250 条')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))
+    await flushPromises()
+    await flushPromises()
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 50, 50, 'time_desc', null, false)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 2 / 5 页 · 250 条')
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageUp' }))
+    await flushPromises()
+    await flushPromises()
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 5 页 · 250 条')
+  })
+
+  it('changing the page size saves prefs and reloads page 1', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (_l, offset = 0, limit = 50) => ({
+      downloads: pages(250)(offset, limit),
+      labels: [],
+      total: 250,
+    }))
+    await mountView()
+
+    await wrapper.find('.pagination-bar__select').setValue('100')
+    await flushPromises()
+    await flushPromises()
+
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 0, 100, 'time_desc', null, false)
+    expect(wrapper.find('.pagination-bar__info').text()).toBe('第 1 / 3 页 · 250 条')
+    // 本地偏好即时保存（与 AdminDownload 同键）。
+    expect(JSON.parse(localStorage.getItem(DOWNLOAD_UI_KEY)!)).toEqual({
+      sortMode: 'time_desc',
+      pageSize: 100,
+    })
+  })
+
+  it('resets to page 1 with the label param when switching label tabs', async () => {
+    vi.mocked(downloadApi.list).mockImplementation(async (label, offset = 0, limit = 50) => {
+      if (label === 5) {
+        return { downloads: pages(160)(offset, limit), labels: [{ id: 5, label: 'Work', time: 1 }], total: 160 }
+      }
+      return { downloads: pages(250)(offset, limit), labels: [{ id: 5, label: 'Work', time: 1 }], total: 250 }
+    })
+    await mountView()
+    expect(wrapper.findAll('.label-tabs__tab').map((t) => t.text())).toContain('Work')
+
+    // 先翻到第 2 页，再切标签 → offset 重置 0 且带 label。
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'PageDown' }))
+    await flushPromises()
+    await flushPromises()
+    expect(downloadApi.list).toHaveBeenLastCalledWith(undefined, 50, 50, 'time_desc', null, false)
+
+    await wrapper.findAll('.label-tabs__tab').find((t) => t.text() === 'Work')!.trigger('click')
+    await flushPromises()
+    await flushPromises()
+    await nextTick()
+    await flushPromises()
+
+    expect(downloadApi.list).toHaveBeenLastCalledWith(5, 0, 50, 'time_desc', null, false)
+    expect(wrapper.text()).toContain('Dl 1')
   })
 
   /* ---------------- token 透传（P-A/P-B） ---------------- */
