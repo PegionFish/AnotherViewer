@@ -1317,4 +1317,115 @@ class SyncServiceTest {
     private fun scanCount(): Int =
         org.mockito.Mockito.mockingDetails(filterRepo).invocations
             .count { it.method.name == "findAllByUsernameIsNull" }
+
+    // ==================== A7-T 同步回归锁 ====================
+    //
+    // 全库审计「已核实无问题」同步不变量的固化锁。方向互补，已有用例不重复：
+    //  - Web 本地写 stamping → 增量 pull 可见（history add / clearHistory 墓碑化）：
+    //    WebLocalTombstoneSyncTest 已固化（真实 HistoryService + SyncService 共库）；
+    //  - Web addFavorite 可见性 / removeFavorite 墓碑下发：WebFavoriteTombstoneSyncTest
+    //    （A7-T 新增集成锁，文件锁内唯一新增测试文件）；
+    //  - App push 删除墓碑 → 落墓碑行 + bump → 增量 pull 携带：既有
+    //    `history delete keeps a tombstone row and bumps lastModified` +
+    //    `history tombstone reaches an incremental pull after the bump` 已固化；
+    //  - 本节补齐缺口：A7-3 pull 维度、墓碑分支不碰 page、墓碑复活传播、
+    //    精确同水位 tie-break（现状语义逐用例注明源码落点）。
+
+    @Test
+    fun `duplicate gid rows across users pull only the owning user's row (A7-3)`() {
+        // A7-3 pull 维度（push 维度见 `merge tolerates duplicate gid rows across
+        // users without exception`）：同 gid 双行分属 A/B 时，A/B 的 pull 各自只能
+        // 取到自己的行——pull 仅把 username 交给 (username, lastModified) 派生查询
+        // （SyncService.kt pull select 块），不按 gid 反查。fake store 按 gid 键
+        // 无法共存两行，与既有 push 维度用例同法按真实库状态覆写 stub；B 行水位
+        // 更新——任何丢失 username 过滤的取数（findAll / findAllByGid 复用）都会把
+        // B 行漏进 A 的 pull，断言即失败。
+        val rowB = HistoryInfoEntity().apply {
+            gid = 90; token = "tok90"; title = "B row"; lastModified = 9_000; username = "B"
+        }
+        val rowA = HistoryInfoEntity().apply {
+            gid = 90; token = "tok90"; title = "A row"; lastModified = 2_000; username = "A"
+        }
+        `when`(historyRepo.findByUsername("A")).thenReturn(listOf(rowA))
+        `when`(historyRepo.findByUsername("B")).thenReturn(listOf(rowB))
+        `when`(historyRepo.findByUsernameAndLastModifiedGreaterThan("A", 1_000L)).thenReturn(listOf(rowA))
+        `when`(historyRepo.findByUsernameAndLastModifiedGreaterThan("B", 1_000L)).thenReturn(listOf(rowB))
+
+        // 全量（since=0）：A 只见 A 行，B 只见 B 行。
+        val fullA = service.pull(0, "A", "android-test").entities.history
+        assertEquals(listOf("A row"), fullA.map { it.title })
+        val fullB = service.pull(0, "B", "android-test").entities.history
+        assertEquals(listOf("B row"), fullB.map { it.title })
+
+        // 增量：同一约束，且锁住派生查询选择本身。
+        val deltaA = service.pull(1_000, "A", "android-test").entities.history
+        assertEquals(listOf("A row"), deltaA.map { it.title })
+        verify(historyRepo).findByUsernameAndLastModifiedGreaterThan("A", 1_000L)
+    }
+
+    @Test
+    fun `history tombstone bump never touches the stored page`() {
+        // audit 固化（D3）：applyHistoryFields 的 `page = maxOf(entity.page, dto.page)`
+        // 是 page 的唯一落点（SyncService.kt applyHistoryFields）；mergeHistory 的
+        // 墓碑分支只置 deleted=true 并 max bump lastModified，不经过
+        // applyHistoryFields——incoming 不携带 page（旧端默认 0）的删除 push
+        // 不得把已存进度清零。
+        seedHistory(gid = 66, lastModified = 1_000, page = 42)
+
+        push("A", history = listOf(hist(66, lastModified = 2_000, deleted = true)))
+
+        val stored = historyRepo.findByGid(66)!!
+        assertTrue(stored.deleted)
+        assertEquals(2_000L, stored.lastModified)
+        assertEquals(42, stored.page)
+    }
+
+    @Test
+    fun `history live push resurrects a tombstone and the resurrection reaches the next incremental pull`() {
+        // audit 固化（墓碑复活，deleted→false）：存量墓碑时不走策略序（§3.8 镜像，
+        // SyncService.kt `if (!existing.deleted)` 跳过），直接落实体专属 LWW
+        // ±skew——beyond skew 的 incoming live 复活墓碑；复活路径经过
+        // applyHistoryFields，故 page 同样取 max 不回退；复活是 deleted→false 的
+        // 事件，最后一个增量 pull 必须携带 deleted=false 的行。
+        HistoryInfoEntity().apply {
+            gid = 67; token = "tok67"; title = "Hist 67"; time = 100
+            lastModified = 1_000; page = 42; deleted = true; username = "A"
+        }.let { historyRepo.save(it) }
+
+        val response = push(
+            "A",
+            history = listOf(hist(67, time = 50, lastModified = 7_000, deleted = false, title = "Revived", page = 5)),
+        )
+
+        val stored = historyRepo.findByGid(67)!!
+        assertFalse(stored.deleted)
+        assertEquals("Revived", stored.title)
+        // 复活走 applyHistoryFields：page = max(42, 5) 不回退。
+        assertEquals(42, stored.page)
+        assertEquals(7_000L, stored.lastModified)
+        assertEquals(1, response.conflicts)
+
+        val pulled = service.pull(1_500, "A", "android-test").entities.history
+        assertEquals(listOf(67L), pulled.map { it.gid })
+        assertFalse(pulled.single().deleted)
+    }
+
+    @Test
+    fun `exact lastModified tie keeps the stored row without a save`() {
+        // audit 固化（merge tie-break，以代码实际语义为准）：B（lww）±skew 仲裁下
+        // lastModified 完全相等时既有行胜——union 实体（favorite）同态分支在
+        // `incoming > existing + SKEW` 不成立即 return false（SyncService.kt
+        // mergeFavorite 末段）；history 再落 time tie-break，相等时同样既有行胜
+        // （SyncService.kt mergeHistory 末段）。现状：无 save、无冲突计数、无水位
+        // bump。lastModified 高者胜（beyond skew）由既有 LWW 用例固化，不重复。
+        seedFavorite(gid = 45, lastModified = 1_000, title = "Old")
+        push("A", favorites = listOf(fav(45, lastModified = 1_000, title = "New")))
+        assertEquals("Old", favoriteRepo.findByGid(45)!!.title)
+        verify(favoriteRepo, never()).save(any(LocalFavoriteInfoEntity::class.java))
+
+        seedHistory(gid = 68, lastModified = 1_000, time = 100)
+        push("A", history = listOf(hist(68, time = 100, lastModified = 1_000, title = "New")))
+        assertEquals("Hist 68", historyRepo.findByGid(68)!!.title)
+        verify(historyRepo, never()).save(any(HistoryInfoEntity::class.java))
+    }
 }
