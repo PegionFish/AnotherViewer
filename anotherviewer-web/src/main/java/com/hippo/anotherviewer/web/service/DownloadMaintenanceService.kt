@@ -39,13 +39,14 @@ import java.io.File
 @Service
 class DownloadMaintenanceService(
     private val downloadRepository: DownloadInfoRepository,
-    private val config: SiteCoreConfigProperties
+    private val config: SiteCoreConfigProperties,
+    private val usernameProvider: com.hippo.anotherviewer.web.config.CurrentUsernameProvider,
 ) {
     private val logger = LoggerFactory.getLogger(DownloadMaintenanceService::class.java)
 
     /** 只读扫描：返回当前全部冗余文件与无效下载清单。 */
     fun preview(): MaintenancePreviewResponse {
-        val rows = downloadRepository.findAll()
+        val rows = downloadRepository.findAllByDeletedFalseOrderById()
         return MaintenancePreviewResponse(
             redundantFiles = scanRedundant(rows),
             invalidDownloads = scanInvalid(rows)
@@ -55,9 +56,12 @@ class DownloadMaintenanceService(
     /**
      * 执行清理：重新扫描后只删当前命中的条目（两段式的第二段）。
      * 返回实际删除计数与释放字节数。
+     *
+     * A7-2：扫描仅存活行；INVALID_DOWNLOADS 的 DB 行墓碑化（deleted=true +
+     * lastModified bump，删除经增量 pull 传播）而非物理删，磁盘文件照删。
      */
     fun clean(kind: MaintenanceKind): MaintenanceCleanResponse = synchronized(this) {
-        val rows = downloadRepository.findAll()
+        val rows = downloadRepository.findAllByDeletedFalseOrderById()
         var removedFiles = 0
         var removedDownloads = 0
         var freedBytes = 0L
@@ -84,7 +88,10 @@ class DownloadMaintenanceService(
                         }
                     }
                 }
-                downloadRepository.deleteById(issue.id)
+                row.deleted = true
+                row.lastModified = System.currentTimeMillis()
+                if (row.username == null) row.username = usernameProvider.currentUsername()
+                downloadRepository.save(row)
                 removedDownloads++
             }
         }

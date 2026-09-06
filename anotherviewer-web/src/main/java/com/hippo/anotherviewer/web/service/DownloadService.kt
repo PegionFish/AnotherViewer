@@ -55,6 +55,7 @@ class DownloadService(
     private val downloadDirIndex: DownloadDirIndex,
     // S10: 批量取 history 行 page 填下载列表 readProgress（findByGidIn，避免 N+1）。
     private val historyRepository: com.hippo.anotherviewer.web.repository.HistoryInfoRepository,
+    private val usernameProvider: com.hippo.anotherviewer.web.config.CurrentUsernameProvider,
 ) : DisposableBean {
     private val logger = LoggerFactory.getLogger(DownloadService::class.java)
 
@@ -130,18 +131,21 @@ class DownloadService(
         val size = limit.coerceIn(1, 500)
         val sortObj = sortOf(sort)
         val pageable = PageRequest.of(offset.coerceAtLeast(0) / size, size, sortObj)
-        val labels = labelRepository.findAll()
+        // A7-2（D12）：标签列表过滤墓碑（downloadLabel 是同步软删实体）。
+        val labels = labelRepository.findAll().filter { !it.deleted }
 
         val labelFilter = labelId?.takeIf { it != 0 }
         val qFilter = q?.takeIf { it.isNotBlank() }
 
+        // A7-2（D1）：列表与 total 一律仅存活行（墓碑行是同步删除的传播载体，
+        // 不列进 REST 列表、不计入 total——内容/total 在有墓碑时变小是修复）。
         val (rows, totalCount) = when {
             qFilter != null && regex -> regexPage(labelFilter, qFilter, offset.coerceAtLeast(0), size, sortObj)
             qFilter != null -> downloadRepository.searchDownloads(labelFilter, escapeLike(qFilter), pageable).content to
                 downloadRepository.countSearchDownloads(labelFilter, escapeLike(qFilter))
-            labelFilter != null -> downloadRepository.findByLabel(labelFilter, pageable).content to
-                downloadRepository.countByLabel(labelFilter)
-            else -> downloadRepository.findAll(pageable).content to downloadRepository.count()
+            labelFilter != null -> downloadRepository.findByLabelAndDeletedFalse(labelFilter, pageable).content to
+                downloadRepository.countByLabelAndDeletedFalse(labelFilter)
+            else -> downloadRepository.findAllByDeletedFalse(pageable).content to downloadRepository.countByDeletedFalse()
         }
         // S10: 对最终 rows（含 regexPage 路径）批量取历史行填 readProgress。
         val progressByGid = historyRepository.findByGidIn(rows.map { it.gid })
@@ -220,33 +224,62 @@ class DownloadService(
         raw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     fun getDownloadInfo(id: Long): DownloadItem? {
-        return downloadRepository.findById(id).orElse(null)?.toItem()
+        // A7-2（D4）：墓碑行不作为详情/活动下载返回。
+        return downloadRepository.findById(id).orElse(null)?.takeUnless { it.deleted }?.toItem()
     }
 
     // ── lifecycle ───────────────────────────────────────────────
 
+    /**
+     * A7-2 复活语义（对齐 addFavorite F3 与 SyncService.mergeDownload 的 incoming live
+     * 复活分支）：撞墓碑行不拒绝而是复活——download 是同步软删实体，列表已隐藏墓碑，
+     * 物理删时代「删了可重加」的能力必须保留；否则 Web 永远无法重新下载该 gid。
+     * 磁盘文件已随删除清掉：done 清零、state 回到 0（待开始），total 保留元数据。
+     * 活行仍拒绝（幂等防重复添加）。
+     */
     fun addDownload(request: DownloadAddRequest): Boolean {
         val existing = downloadRepository.findByGid(request.gid)
-        if (existing != null) return false
-
+        val now = System.currentTimeMillis()
         // 2026-08-30：目录命名对齐 Android——`{gid}-{title}`（人读可辨），
         // 标题缺席回落纯 gid（旧布局兼容）。
         val downloadPath = File(config.download.path, DownloadDirs.dirName(request.gid, request.title))
         downloadPath.mkdirs()
 
-        val entity = DownloadInfoEntity().apply {
-            gid = request.gid
-            token = request.token
-            title = request.title
-            titleJpn = ""
-            thumb = request.thumb
-            category = 0
-            state = 0
-            total = 0
-            done = 0
-            label = request.label
-            downloadDir = downloadPath.absolutePath
-            time = System.currentTimeMillis()
+        val entity = when {
+            existing == null -> DownloadInfoEntity().apply {
+                gid = request.gid
+                token = request.token
+                title = request.title
+                titleJpn = ""
+                thumb = request.thumb
+                category = 0
+                state = 0
+                total = 0
+                done = 0
+                label = request.label
+                downloadDir = downloadPath.absolutePath
+                time = now
+                // A7-1 stamping：新行当场落属主与同步水位（请求线程才有 SecurityContext，
+                // username 只在写入口落；worker 后续只 bump lastModified）。
+                username = usernameProvider.currentUsername()
+                lastModified = now
+            }
+            existing.deleted -> existing.apply {
+                token = request.token
+                title = request.title
+                thumb = request.thumb
+                label = request.label
+                state = 0
+                total = 0
+                done = 0
+                error = null
+                downloadDir = downloadPath.absolutePath
+                time = now
+                deleted = false
+                if (username == null) username = usernameProvider.currentUsername()
+                lastModified = now
+            }
+            else -> return false
         }
         downloadRepository.save(entity)
         return true
@@ -332,6 +365,12 @@ class DownloadService(
         return true
     }
 
+    /**
+     * A7-2：删除下载 = 磁盘文件照删（行为不变），DB 行墓碑化（deleted=true +
+     * lastModified bump）——行保留让删除经增量 pull 传播给 App；物理删会让删除
+     * 永不传播（§1.1），且 App 下次 push 同 gid 时 union-merge 静默重建。
+     * cancelDownload 的终态写不复活墓碑（updateEntity 跳墓碑行已覆盖）。
+     */
     fun deleteDownload(id: Long): Boolean {
         val entity = downloadRepository.findById(id).orElse(null) ?: return false
         val task = tasks[id]
@@ -343,7 +382,10 @@ class DownloadService(
         val dirFile = DownloadDirs.resolve(config.download.path, entity.gid, entity.downloadDir)
         if (dirFile.exists()) dirFile.deleteRecursively()
         if (downloadRepository.existsById(id)) {
-            downloadRepository.deleteById(id)
+            entity.deleted = true
+            entity.lastModified = System.currentTimeMillis()
+            if (entity.username == null) entity.username = usernameProvider.currentUsername()
+            downloadRepository.save(entity)
         }
         tasks.remove(id)
         downloadDirIndex.invalidate(entity.gid)
@@ -351,7 +393,7 @@ class DownloadService(
     }
 
     fun startAllDownloads() {
-        val waiting = downloadRepository.findByState(0)
+        val waiting = downloadRepository.findByStateAndDeletedFalse(0)
         waiting.forEach { startDownload(it.id) }
     }
 
@@ -369,7 +411,8 @@ class DownloadService(
         downloadDirIndex.refresh()
         var restarted = 0
         var skippedVerified = 0
-        downloadRepository.findAll().forEach { entity ->
+        // A7-2（D6）：「全部下载」遍历仅存活行，墓碑不参与重启/完成化。
+        downloadRepository.findAllByDeletedFalseOrderById().forEach { entity ->
             val total = entity.total
             if (isVerifiedOnDisk(entity.gid, entity.downloadDir, total)) {
                 updateEntity(entity.id) {
@@ -405,7 +448,8 @@ class DownloadService(
      * 调用点：ImageProxyController.servePushedPage（阅读器读到推送文件即标记）。
      */
     fun completeIfVerified(gid: Long) {
-        val entity = downloadRepository.findByGid(gid) ?: return
+        // A7-2（D9）：墓碑行不做磁盘校验「完成化」（复活表象）。
+        val entity = downloadRepository.findByGid(gid)?.takeUnless { it.deleted } ?: return
         if (entity.state == 3) return
         val total = entity.total
         if (total <= 0) return
@@ -421,7 +465,8 @@ class DownloadService(
     }
 
     fun pauseAllDownloads() {
-        val active = downloadRepository.findByState(1) + downloadRepository.findByState(2)
+        // A7-2（D7）：仅存活行。
+        val active = downloadRepository.findByStateAndDeletedFalse(1) + downloadRepository.findByStateAndDeletedFalse(2)
         active.forEach { pauseDownload(it.id) }
     }
 
@@ -481,19 +526,38 @@ class DownloadService(
 
     fun createLabel(label: String): Boolean {
         val existing = labelRepository.findByLabel(label)
-        if (existing != null) return false
-
-        val entity = DownloadLabelEntity().apply {
-            this.label = label
-            time = System.currentTimeMillis()
+        // A7-2：同名墓碑标签复活（downloadLabel 按 label 名联合合并且 findByLabel
+        // 是单实体查询——墓碑旁再插同名行会让 mergeDownloadLabel 命中两行直接抛
+        // IncorrectResultSizeDataAccessException）；活行仍拒绝。
+        if (existing != null && !existing.deleted) return false
+        val now = System.currentTimeMillis()
+        val entity = if (existing != null) {
+            existing.apply {
+                deleted = false
+                lastModified = now
+                if (username == null) username = usernameProvider.currentUsername()
+            }
+        } else {
+            DownloadLabelEntity().apply {
+                this.label = label
+                time = now
+                // A7-1 stamping：新行当场落属主与同步水位。
+                username = usernameProvider.currentUsername()
+                lastModified = now
+            }
         }
         labelRepository.save(entity)
         return true
     }
 
+    /** A7-2（D12）：删除标签 = 墓碑化（downloadLabel 是同步软删实体，物理删不传播且会被 push 重建）。 */
     fun deleteLabel(id: Long): Boolean {
-        if (!labelRepository.existsById(id)) return false
-        labelRepository.deleteById(id)
+        val row = labelRepository.findById(id).orElse(null) ?: return false
+        if (row.deleted) return true
+        row.deleted = true
+        row.lastModified = System.currentTimeMillis()
+        if (row.username == null) row.username = usernameProvider.currentUsername()
+        labelRepository.save(row)
         return true
     }
 
@@ -548,9 +612,9 @@ class DownloadService(
 
     fun getActiveDownloadCount(): Int = tasks.size
 
-    fun getCompletedDownloadCount(): Long = downloadRepository.countByState(3)
+    fun getCompletedDownloadCount(): Long = downloadRepository.countByStateAndDeletedFalse(3)
 
-    fun getFailedDownloadCount(): Long = downloadRepository.countByState(4)
+    fun getFailedDownloadCount(): Long = downloadRepository.countByStateAndDeletedFalse(4)
 
     fun getActiveDownloads(): List<DownloadItem> {
         return tasks.keys.mapNotNull { id ->
@@ -696,12 +760,17 @@ class DownloadService(
      * Persist progress periodically (not only at completion) so restarts
      * resume from the last persisted `done`. Never resurrects a paused (0) or
      * cancelled/failed (4) row.
+     *
+     * A7-1 worker 规则（§3.4）：池线程无 SecurityContext——只 bump lastModified
+     * （done 是同步可见字段，不 bump 则 App 增量 pull 看不到 WebUI 下载进展），
+     * 绝不写 username；墓碑行（deleted=true）跳过，进度写不得复活删除。
      */
     private fun persistProgress(task: DownloadTask, done: Int) {
         try {
             downloadRepository.findById(task.id).ifPresent { e ->
-                if (e.state != 0 && e.state != 4) {
+                if (!e.deleted && e.state != 0 && e.state != 4) {
                     e.done = done
+                    e.lastModified = System.currentTimeMillis()
                     downloadRepository.save(e)
                 }
             }
@@ -713,11 +782,17 @@ class DownloadService(
     /**
      * Idempotent entity update through a fresh load — guards the final save so
      * a finished worker cannot resurrect a deleted row.
+     *
+     * A7-1 worker 规则（§3.4）：墓碑行（deleted=true）一律跳过（含 cancelDownload
+     * 的终态写——状态写不得复活墓碑）；worker 线程无 SecurityContext，只 bump
+     * lastModified（state/error 是同步可见字段），绝不写 username。
      */
     private fun updateEntity(id: Long, transform: (DownloadInfoEntity) -> Unit) {
         try {
             downloadRepository.findById(id).ifPresent { e ->
+                if (e.deleted) return@ifPresent
                 transform(e)
+                e.lastModified = System.currentTimeMillis()
                 downloadRepository.save(e)
             }
         } catch (e: Exception) {

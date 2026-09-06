@@ -57,6 +57,8 @@ class GalleryFeedServiceTest {
                 availability,
                 mock(DownloadDirIndex::class.java),
                 serverConfig,
+            mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java),
+            mock(HistoryService::class.java),
             ),
             client,
             availability,

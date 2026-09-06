@@ -8,15 +8,27 @@ import org.springframework.data.jpa.repository.Query
 import org.springframework.data.repository.query.Param
 import org.springframework.transaction.annotation.Transactional
 
+/**
+ * A7-2 软删后的查询面约定：REST 列表/筛选/统计/生命周期遍历只看存活行
+ * （deleted=false），墓碑行（deleted=true）是同步删除的唯一传播载体——
+ * `findByGid`（merge/复活仲裁）与 `findByUsername*`（pull 载体）必须保持
+ * 不过滤，不得给它们加 deleted 条件。
+ */
 interface DownloadInfoRepository : JpaRepository<DownloadInfoEntity, Long> {
     fun findByGid(gid: Long): DownloadInfoEntity?
     fun findByLabel(label: Int): List<DownloadInfoEntity>
-    /** 按 label 分页（W6 下载列表分页）。 */
-    fun findByLabel(label: Int, pageable: Pageable): Page<DownloadInfoEntity>
-    fun countByLabel(label: Int): Long
-    fun findByState(state: Int): List<DownloadInfoEntity>
-    /** COUNT(state) 派生查询：stats 计数不加载实体（Metrics 150-200ms → ms 级）。 */
-    fun countByState(state: Int): Long
+    /** 按 label 分页（W6 下载列表分页）。A7-2（D1）: 仅存活行。 */
+    fun findByLabelAndDeletedFalse(label: Int, pageable: Pageable): Page<DownloadInfoEntity>
+    fun countByLabelAndDeletedFalse(label: Int): Long
+    /** A7-2（D5/D7）: start-all/pause-all 遍历不触墓碑。 */
+    fun findByStateAndDeletedFalse(state: Int): List<DownloadInfoEntity>
+    /** COUNT(state) 派生查询：stats 计数不加载实体（Metrics 150-200ms → ms 级）。A7-2（D8）: 不计墓碑。 */
+    fun countByStateAndDeletedFalse(state: Int): Long
+    /** A7-2（D1）: 分页全量列表（默认路径，替代 findAll+count）。 */
+    fun findAllByDeletedFalse(pageable: Pageable): Page<DownloadInfoEntity>
+    fun countByDeletedFalse(): Long
+    /** A7-2（D6）: restart-all / 维护扫描遍历不触墓碑（id 序，遍历确定性）。 */
+    fun findAllByDeletedFalseOrderById(): List<DownloadInfoEntity>
     fun findAllByUsernameIsNull(): List<DownloadInfoEntity>
     fun countByUsername(username: String): Long
     @Transactional
@@ -31,11 +43,13 @@ interface DownloadInfoRepository : JpaRepository<DownloadInfoEntity, Long> {
     private companion object {
         // 标题/标题日文大小写不敏感模糊匹配；label 可空过滤。q 由调用方预转义
         // （%/_/\\ → 带 ESCAPE），避免通配符注入。
+        // A7-2（D1/D3）: 搜索/计数/全集 id 投影一律仅存活行。
         const val SEARCH_WHERE = """
             (:label IS NULL OR d.label = :label)
             AND (:q IS NULL OR :q = ''
                  OR LOWER(COALESCE(d.title, '')) LIKE LOWER(CONCAT('%', :q, '%')) ESCAPE '\'
                  OR LOWER(COALESCE(d.titleJpn, '')) LIKE LOWER(CONCAT('%', :q, '%')) ESCAPE '\')
+            AND d.deleted = false
         """
     }
 
@@ -59,7 +73,7 @@ interface DownloadInfoRepository : JpaRepository<DownloadInfoEntity, Long> {
     ): Page<Long>
 
     /** 正则筛选用的轻量投影（id/title/titleJpn/time，SQL 层仅按 label 过滤，
-        正则匹配与排序在服务端内存完成——SQLite 无 REGEXP）。 */
+        正则匹配与排序在服务端内存完成——SQLite 无 REGEXP）。A7-2（D2）: 仅存活行。 */
     interface TitleProjection {
         val id: Long
         val title: String?
@@ -67,6 +81,6 @@ interface DownloadInfoRepository : JpaRepository<DownloadInfoEntity, Long> {
         val time: Long
     }
 
-    @Query("SELECT d.id AS id, d.title AS title, d.titleJpn AS titleJpn, d.time AS time FROM DownloadInfoEntity d WHERE (:label IS NULL OR d.label = :label)")
+    @Query("SELECT d.id AS id, d.title AS title, d.titleJpn AS titleJpn, d.time AS time FROM DownloadInfoEntity d WHERE (:label IS NULL OR d.label = :label) AND d.deleted = false")
     fun findTitlesByLabel(@Param("label") label: Int?): List<TitleProjection>
 }

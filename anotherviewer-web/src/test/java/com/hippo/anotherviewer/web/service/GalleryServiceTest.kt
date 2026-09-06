@@ -47,6 +47,7 @@ class GalleryServiceTest {
         val historyTags: GalleryTagsRepository,
         val favorites: LocalFavoriteInfoRepository,
         val galleryLookup: GalleryLookupService,
+        val quickSearches: QuickSearchRepository,
     )
 
     private fun harness(realLookup: Boolean = false): Harness {
@@ -56,6 +57,7 @@ class GalleryServiceTest {
         val history = mock(HistoryInfoRepository::class.java)
         val historyTags = mock(GalleryTagsRepository::class.java)
         val favorites = mock(LocalFavoriteInfoRepository::class.java)
+        val quickSearches = mock(QuickSearchRepository::class.java)
         val availability = EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000)
         // P1: 验证直开路径的上游复用/缓存共享时需要真实 GalleryLookupService
         // （内部 detailCache 生效，与 GalleryService 共享同一批仓储 mock）；
@@ -67,7 +69,7 @@ class GalleryServiceTest {
         }
         val service = GalleryService(
             history,
-            mock(QuickSearchRepository::class.java),
+            quickSearches,
             historyTags,
             favorites,
             sessionManager,
@@ -76,9 +78,17 @@ class GalleryServiceTest {
             galleryLookup,
             availability,
             mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
-        return Harness(service, availability, downloads, history, historyTags, favorites, galleryLookup)
+            mock(ServerConfigService::class.java),
+            stubProvider("test-user"),
+            HistoryService(history, stubProvider("test-user")),
+        )
+        return Harness(service, availability, downloads, history, historyTags, favorites, galleryLookup, quickSearches)
     }
+
+    /** A7-1: 纯 Mockito 单测不碰 SecurityContext——注入固定用户的 Provider stub。 */
+    private fun stubProvider(name: String): com.hippo.anotherviewer.web.config.CurrentUsernameProvider =
+        mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
+            .apply { `when`(currentUsername()).thenReturn(name) }
 
     private fun downloadRow(): DownloadInfoEntity = DownloadInfoEntity().apply {
         gid = GID
@@ -427,7 +437,13 @@ class GalleryServiceTest {
         `when`(h.history.findByGid(GID)).thenReturn(history)
         `when`(h.historyTags.findByGid(GID)).thenReturn(emptyList<GalleryTagsEntity>())
         `when`(h.favorites.findByGid(GID)).thenReturn(null)
-        val favoriteService = FavoriteService(h.favorites, h.history, h.downloads, HistoryService(h.history))
+        val favoriteService = FavoriteService(
+            h.favorites,
+            h.history,
+            h.downloads,
+            HistoryService(h.history, stubProvider("test-user")),
+            stubProvider("test-user"),
+        )
 
         assertTrue(favoriteService.addFavorite(GID, TOKEN, "Favorite title", 512, slot = 3))
 
@@ -435,6 +451,188 @@ class GalleryServiceTest {
         val detail = h.service.getGalleryDetail(GID, TOKEN)
         assertNotNull(detail)
         assertEquals(3, detail!!.favoriteSlot)
+    }
+
+    // ── A7-1: 统一 stamping（addToHistory 委托 HistoryService；createQuickSearch 落属主）──
+
+    @Test
+    fun `addToHistory delegates stamping to HistoryService`() {
+        // A7-1：GalleryService.addToHistory 不再自行落库——委托 HistoryService.addHistory
+        // （单一 stamping 实现点），新行 username/lastModified 由 HistoryService 落。
+        val h = harness()
+        `when`(h.history.findByGid(GID)).thenReturn(null)
+
+        h.service.addToHistory(GID, TOKEN, "Title", mode = 3)
+
+        verify(h.history).save(
+            com.hippo.anotherviewer.web.argThatK<HistoryInfoEntity> {
+                it.gid == GID && it.mode == 3 && it.username == "test-user" && it.lastModified > 0
+            }
+        )
+    }
+
+    @Test
+    fun `addToHistory update path keeps stored progress and bumps lastModified`() {
+        // S5① 语义经委托保持：page=null 不改写已存进度；水位 bump 供增量 pull。
+        val h = harness()
+        val existing = historyRow().apply { page = 41; lastModified = 7L }
+        `when`(h.history.findByGid(GID)).thenReturn(existing)
+
+        h.service.addToHistory(GID, TOKEN, "Title", mode = 0)
+
+        assertEquals(41, existing.page)
+        assertTrue(existing.lastModified > 7L)
+        verify(h.history).save(existing)
+    }
+
+    @Test
+    fun `createQuickSearch stamps username and lastModified`() {
+        val h = harness()
+        `when`(h.quickSearches.save(any(com.hippo.anotherviewer.web.entity.QuickSearchEntity::class.java)))
+            .thenAnswer { it.getArgument(0) }
+        val dto = com.hippo.anotherviewer.web.dto.QuickSearchDto(
+            id = 0, name = "qs", mode = 0, category = 0, keyword = "k",
+            advanceSearch = 0, minRating = 0, pageFrom = 0, pageTo = 0, sort = 0
+        )
+
+        h.service.createQuickSearch(dto)
+
+        verify(h.quickSearches).save(
+            com.hippo.anotherviewer.web.argThatK<com.hippo.anotherviewer.web.entity.QuickSearchEntity> {
+                it.name == "qs" && it.username == "test-user" && it.lastModified > 0 && it.time > 0 && !it.deleted
+            }
+        )
+    }
+
+    // ── A7-2: 快搜软删 + 墓碑过滤（Q1） ──
+
+    private fun quickSearchDto(name: String = "qs") = com.hippo.anotherviewer.web.dto.QuickSearchDto(
+        id = 0, name = name, mode = 0, category = 0, keyword = "k",
+        advanceSearch = 0, minRating = 0, pageFrom = 0, pageTo = 0, sort = 0
+    )
+
+    @Test
+    fun `deleteQuickSearch soft-deletes the row`() {
+        val h = harness()
+        val row = com.hippo.anotherviewer.web.entity.QuickSearchEntity().apply {
+            id = 5L; name = "qs"; lastModified = 5L
+        }
+        `when`(h.quickSearches.findById(5L)).thenReturn(java.util.Optional.of(row))
+        `when`(h.quickSearches.save(any(com.hippo.anotherviewer.web.entity.QuickSearchEntity::class.java)))
+            .thenAnswer { it.getArgument(0) }
+
+        h.service.deleteQuickSearch(5L)
+
+        // quickSearch 是同步软删实体：行保留（墓碑随增量 pull 传播删除），不再物理删。
+        assertTrue(row.deleted)
+        assertTrue(row.lastModified > 5L)
+        assertEquals("test-user", row.username)
+        verify(h.quickSearches, never()).deleteById(5L)
+    }
+
+    @Test
+    fun `deleteQuickSearch on a missing id is a silent no-op`() {
+        val h = harness()
+        `when`(h.quickSearches.findById(404L)).thenReturn(java.util.Optional.empty())
+
+        h.service.deleteQuickSearch(404L)
+
+        verify(h.quickSearches, never()).save(any(com.hippo.anotherviewer.web.entity.QuickSearchEntity::class.java))
+    }
+
+    @Test
+    fun `getQuickSearches hides tombstones`() {
+        // Q1：设备端删除的快搜墓碑不出现在 REST 列表。
+        val h = harness()
+        `when`(h.quickSearches.findAllByDeletedFalseOrderById())
+            .thenReturn(listOf(com.hippo.anotherviewer.web.entity.QuickSearchEntity().apply { id = 1L; name = "live" }))
+
+        val response = h.service.getQuickSearches()
+
+        assertTrue(response.success)
+        assertEquals(listOf("live"), response.data.map { it.name })
+        verify(h.quickSearches, never()).findAllByOrderById()
+    }
+
+    @Test
+    fun `createQuickSearch resurrects a same-name tombstone instead of inserting a duplicate`() {
+        // findByName 是单实体查询：墓碑旁再插同名活行会让 mergeQuickSearch 命中
+        // 两行抛 IncorrectResultSizeDataAccessException，毒化同步通道。
+        val h = harness()
+        val tombstone = com.hippo.anotherviewer.web.entity.QuickSearchEntity().apply {
+            id = 6L; name = "qs"; deleted = true; lastModified = 5L
+        }
+        `when`(h.quickSearches.findByName("qs")).thenReturn(tombstone)
+        `when`(h.quickSearches.save(any(com.hippo.anotherviewer.web.entity.QuickSearchEntity::class.java)))
+            .thenAnswer { it.getArgument(0) }
+
+        val result = h.service.createQuickSearch(quickSearchDto("qs").copy(keyword = "new-kw"))
+
+        assertTrue(!tombstone.deleted)
+        assertEquals("new-kw", tombstone.keyword)
+        assertEquals(6L, result.id)
+        assertTrue(tombstone.lastModified > 5L)
+    }
+
+    // ── A7-2: 详情/本地搜索的墓碑过滤（F2/H3/D10/H2） ──
+
+    @Test
+    fun `getGalleryDetail skips tombstoned rows and falls through in source order`() {
+        // F2/H3/D10：download 墓碑 → history 墓碑 → favorite 墓碑 → null（DOWN 期零上游）。
+        val h = harness()
+        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow().apply { deleted = true })
+        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { deleted = true })
+        `when`(h.favorites.findByGid(GID)).thenReturn(favoriteRow().apply { deleted = true })
+        h.availability.recordFailure("connect timed out")
+
+        assertNull(h.service.getGalleryDetail(GID, TOKEN))
+    }
+
+    @Test
+    fun `getGalleryDetail falls through a tombstoned download row to the live history row`() {
+        val h = harness()
+        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow().apply { deleted = true })
+        `when`(h.history.findByGid(GID)).thenReturn(historyRow())
+        h.availability.recordFailure("connect timed out")
+
+        val detail = h.service.getGalleryDetail(GID, TOKEN)
+
+        assertNotNull(detail)
+        assertEquals("History title", detail!!.title)
+    }
+
+    @Test
+    fun `getGalleryDetail hides the read progress of a tombstoned history row`() {
+        // H3：readProgressOf 不读墓碑行。
+        val h = harness()
+        `when`(h.downloads.findByGid(GID)).thenReturn(downloadRow())
+        `when`(h.history.findByGid(GID)).thenReturn(historyRow().apply { page = 21; deleted = true })
+
+        val detail = h.service.getGalleryDetail(GID, TOKEN)
+
+        assertNotNull(detail)
+        assertEquals(0, detail!!.readProgress)
+    }
+
+    @Test
+    fun `searchLocalHistory category fallback hides tombstones`() {
+        // H2：分类回退路径仅存活行（ EH DOWN → 本地回退）。
+        val h = harness()
+        h.availability.recordFailure("connect timed out")
+        val pageable = org.springframework.data.domain.PageRequest.of(0, 20)
+        `when`(h.history.findByCategoryAndDeletedFalseOrderByTimeDesc(5, pageable)).thenReturn(
+            org.springframework.data.domain.PageImpl(
+                listOf(historyRow().apply { gid = 1L }),
+                pageable,
+                1,
+            )
+        )
+
+        val response = h.service.searchGallery(null, 5, 0, 20)
+
+        assertTrue(response.success)
+        assertEquals(1, response.total)
+        verify(h.history).findByCategoryAndDeletedFalseOrderByTimeDesc(5, pageable)
     }
 
     // ── P2: toplist / search 站点结果缓存 ───────────────────────

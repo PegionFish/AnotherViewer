@@ -53,7 +53,10 @@ class GallerySearchUrlTest {
             mock(GalleryLookupService::class.java),
             EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000),
             mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
+            mock(ServerConfigService::class.java),
+            mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java),
+            mock(HistoryService::class.java),
+        )
     }
 
     /** All-default shortcut so each case only spells the param under test. */
@@ -339,7 +342,10 @@ class GallerySearchUrlTest {
             mock(GalleryLookupService::class.java),
             availability,
             mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
+            mock(ServerConfigService::class.java),
+            mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java),
+            mock(HistoryService::class.java),
+        )
 
         mockStatic(SiteEngine::class.java).use { engine ->
             val response = service.searchGallery(null, null, 0, 20)
@@ -382,7 +388,10 @@ class GallerySearchUrlTest {
             mock(GalleryLookupService::class.java),
             EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000),
             mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
+            mock(ServerConfigService::class.java),
+            mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java),
+            mock(HistoryService::class.java),
+        )
 
         mockStatic(SiteEngine::class.java).use { engine ->
             engine.`when`<GalleryListParser.Result> {

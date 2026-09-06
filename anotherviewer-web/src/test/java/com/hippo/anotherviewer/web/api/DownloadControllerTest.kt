@@ -66,7 +66,8 @@ class DownloadControllerTest {
             serverConfigService,
             mock(EhAvailabilityService::class.java),
             mock(DownloadDirIndex::class.java),
-            mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
+            mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java),
+            mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
         )
         mockMvc = MockMvcBuilders.standaloneSetup(DownloadController(downloadService))
             .setControllerAdvice(GlobalExceptionHandler())
@@ -230,8 +231,8 @@ class DownloadControllerTest {
     @Test
     fun `list defaults to offset 0 limit 100 and returns total`() {
         val page = PageImpl(listOf(entity(1, 101), entity(2, 102)), PageRequest.of(0, 100), 7)
-        `when`(downloadRepository.findAll(any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.count()).thenReturn(7L)
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(7L)
         `when`(labelRepository.findAll()).thenReturn(listOf(labelEntity(1, "L1")))
 
         mockMvc.perform(get("/api/v1/download/list"))
@@ -242,10 +243,10 @@ class DownloadControllerTest {
             .andExpect(jsonPath("$.labels[0].label").value("L1"))
             .andExpect(jsonPath("$.total").value(7))
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
-        verify(downloadRepository).count()
-        verify(downloadRepository, never()).findByLabel(anyInt(), any(Pageable::class.java))
-        verify(downloadRepository, never()).countByLabel(anyInt())
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
+        verify(downloadRepository).countByDeletedFalse()
+        verify(downloadRepository, never()).findByLabelAndDeletedFalse(anyInt(), any(Pageable::class.java))
+        verify(downloadRepository, never()).countByLabelAndDeletedFalse(anyInt())
         assertEquals(0, captor.value.pageNumber)
         assertEquals(100, captor.value.pageSize)
     }
@@ -255,8 +256,8 @@ class DownloadControllerTest {
         // A5 契约：offset 是行偏移。offset=5&limit=20 → pageIndex=0（前 20 行）；
         // offset=100&limit=100 → pageIndex=1（101..200 行）。
         val page = PageImpl(listOf(entity(1, 101)), PageRequest.of(0, 20), 1)
-        `when`(downloadRepository.findAll(any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.count()).thenReturn(1L)
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(1L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("offset", "5").param("limit", "20"))
@@ -264,7 +265,7 @@ class DownloadControllerTest {
             .andExpect(jsonPath("$.downloads.length()").value(1))
 
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         assertEquals(0, captor.value.pageNumber)
         assertEquals(20, captor.value.pageSize)
     }
@@ -272,8 +273,8 @@ class DownloadControllerTest {
     @Test
     fun `list maps row offset 100 with limit 100 to page 1`() {
         val page = PageImpl(listOf(entity(2, 102)), PageRequest.of(1, 100), 500)
-        `when`(downloadRepository.findAll(any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.count()).thenReturn(500L)
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(500L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("offset", "100").param("limit", "100"))
@@ -281,7 +282,7 @@ class DownloadControllerTest {
             .andExpect(jsonPath("$.total").value(500))
 
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         assertEquals(1, captor.value.pageNumber)
         assertEquals(100, captor.value.pageSize)
     }
@@ -289,15 +290,15 @@ class DownloadControllerTest {
     @Test
     fun `list defaults to time_desc sort (newest first)`() {
         val page = PageImpl(emptyList<DownloadInfoEntity>(), PageRequest.of(0, 100), 0)
-        `when`(downloadRepository.findAll(any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.count()).thenReturn(0L)
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(0L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list"))
             .andExpect(status().isOk)
 
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         val order = captor.value.sort.getOrderFor("time")
         assertEquals(Sort.Direction.DESC, order?.direction)
     }
@@ -305,15 +306,15 @@ class DownloadControllerTest {
     @Test
     fun `list forwards the requested sort mode`() {
         val page = PageImpl(emptyList<DownloadInfoEntity>(), PageRequest.of(0, 100), 0)
-        `when`(downloadRepository.findAll(any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.count()).thenReturn(0L)
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(0L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("sort", "title_asc"))
             .andExpect(status().isOk)
 
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         val order = captor.value.sort.getOrderFor("title")
         assertEquals(Sort.Direction.ASC, order?.direction)
     }
@@ -321,23 +322,23 @@ class DownloadControllerTest {
     @Test
     fun `list falls back to time_desc for an unknown sort value`() {
         val page = PageImpl(emptyList<DownloadInfoEntity>(), PageRequest.of(0, 100), 0)
-        `when`(downloadRepository.findAll(any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.count()).thenReturn(0L)
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(0L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("sort", "bogus"))
             .andExpect(status().isOk)
 
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         assertEquals(Sort.Direction.DESC, captor.value.sort.getOrderFor("time")?.direction)
     }
 
     @Test
     fun `list filters by label with countByLabel total`() {
         val page = PageImpl(listOf(entity(3, 103, label = 7)), PageRequest.of(0, 20), 4)
-        `when`(downloadRepository.findByLabel(eq(7), any(Pageable::class.java))).thenReturn(page)
-        `when`(downloadRepository.countByLabel(7)).thenReturn(4L)
+        `when`(downloadRepository.findByLabelAndDeletedFalse(eq(7), any(Pageable::class.java))).thenReturn(page)
+        `when`(downloadRepository.countByLabelAndDeletedFalse(7)).thenReturn(4L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("label", "7").param("limit", "20"))
@@ -345,31 +346,31 @@ class DownloadControllerTest {
             .andExpect(jsonPath("$.downloads.length()").value(1))
             .andExpect(jsonPath("$.downloads[0].label").value(7))
             .andExpect(jsonPath("$.total").value(4))
-        verify(downloadRepository).findByLabel(eq(7), any(Pageable::class.java))
-        verify(downloadRepository).countByLabel(7)
-        verify(downloadRepository, never()).findAll(any(Pageable::class.java))
+        verify(downloadRepository).findByLabelAndDeletedFalse(eq(7), any(Pageable::class.java))
+        verify(downloadRepository).countByLabelAndDeletedFalse(7)
+        verify(downloadRepository, never()).findAllByDeletedFalse(any(Pageable::class.java))
         verify(downloadRepository, never()).count()
     }
 
     @Test
     fun `list clamps limit above 500 to 500`() {
-        `when`(downloadRepository.findAll(any(Pageable::class.java)))
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java)))
             .thenReturn(PageImpl(emptyList(), PageRequest.of(0, 500), 0))
-        `when`(downloadRepository.count()).thenReturn(0L)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(0L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("limit", "9999"))
             .andExpect(status().isOk)
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         assertEquals(500, captor.value.pageSize)
     }
 
     @Test
     fun `list clamps non-positive limit to 1`() {
-        `when`(downloadRepository.findAll(any(Pageable::class.java)))
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java)))
             .thenReturn(PageImpl(emptyList(), PageRequest.of(0, 1), 0))
-        `when`(downloadRepository.count()).thenReturn(0L)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(0L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("limit", "0"))
@@ -378,7 +379,7 @@ class DownloadControllerTest {
             .andExpect(status().isOk)
 
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository, times(2)).findAll(captureK(captor))
+        verify(downloadRepository, times(2)).findAllByDeletedFalse(captureK<Pageable>(captor))
         assertEquals(1, captor.value.pageSize)
     }
 
@@ -420,15 +421,15 @@ class DownloadControllerTest {
 
     @Test
     fun `list clamps negative offset to 0`() {
-        `when`(downloadRepository.findAll(any(Pageable::class.java)))
+        `when`(downloadRepository.findAllByDeletedFalse(any(Pageable::class.java)))
             .thenReturn(PageImpl(emptyList(), PageRequest.of(0, 100), 0))
-        `when`(downloadRepository.count()).thenReturn(0L)
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(0L)
         `when`(labelRepository.findAll()).thenReturn(emptyList())
 
         mockMvc.perform(get("/api/v1/download/list").param("offset", "-3"))
             .andExpect(status().isOk)
         val captor = ArgumentCaptor.forClass(Pageable::class.java)
-        verify(downloadRepository).findAll(captureK(captor))
+        verify(downloadRepository).findAllByDeletedFalse(captureK<Pageable>(captor))
         assertEquals(0, captor.value.pageNumber)
     }
     // ── batch (Android multi-select Start/Stop/Delete/Move) ─────
@@ -569,7 +570,7 @@ class DownloadControllerTest {
             .andExpect(jsonPath("$.total").value(0))
         verify(downloadRepository).searchDownloads(nullable(Int::class.java), eq("futa"), any(Pageable::class.java))
         verify(downloadRepository).countSearchDownloads(nullable(Int::class.java), eq("futa"))
-        verify(downloadRepository, never()).findAll(any(Pageable::class.java))
+        verify(downloadRepository, never()).findAllByDeletedFalse(any(Pageable::class.java))
     }
 
     // ── filter slots（筛选槽位 CRUD）────────────────────────────

@@ -32,6 +32,7 @@ class HistoryModePassthroughTest {
     fun setUp() {
         historyRepository = inMemoryHistoryRepo()
         val sessionManager = mock(SiteSessionManager::class.java)
+        val usernameProvider = stubProvider("test-user")
         galleryService = GalleryService(
             historyRepository,
             mock(QuickSearchRepository::class.java),
@@ -43,9 +44,17 @@ class HistoryModePassthroughTest {
             mock(GalleryLookupService::class.java),
             EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000),
             mock(DownloadDirIndex::class.java),
-            mock(ServerConfigService::class.java),        )
-        historyService = HistoryService(historyRepository)
+            mock(ServerConfigService::class.java),
+            usernameProvider,
+            HistoryService(historyRepository, usernameProvider),
+        )
+        historyService = HistoryService(historyRepository, usernameProvider)
     }
+
+    /** A7-1: 纯 Mockito 单测不碰 SecurityContext——注入固定用户的 Provider stub。 */
+    private fun stubProvider(name: String): com.hippo.anotherviewer.web.config.CurrentUsernameProvider =
+        mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
+            .apply { `when`(currentUsername()).thenReturn(name) }
 
     @Test
     fun `post history with mode then get history returns that mode`() {

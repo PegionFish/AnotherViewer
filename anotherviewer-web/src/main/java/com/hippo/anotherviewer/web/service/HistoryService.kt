@@ -1,5 +1,6 @@
 package com.hippo.anotherviewer.web.service
 
+import com.hippo.anotherviewer.web.config.CurrentUsernameProvider
 import com.hippo.anotherviewer.web.config.PrivacyMaskFilter
 import com.hippo.anotherviewer.web.dto.HistoryItem
 import com.hippo.anotherviewer.web.dto.HistoryListResponse
@@ -7,9 +8,13 @@ import com.hippo.anotherviewer.web.entity.HistoryInfoEntity
 import com.hippo.anotherviewer.web.repository.HistoryInfoRepository
 import org.springframework.data.domain.PageRequest
 import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
 
 @Service
-class HistoryService(private val historyRepository: HistoryInfoRepository) {
+class HistoryService(
+    private val historyRepository: HistoryInfoRepository,
+    private val usernameProvider: CurrentUsernameProvider,
+) {
 
     /**
      * When both [page] and [pageSize] are absent, returns the full history
@@ -101,9 +106,18 @@ class HistoryService(private val historyRepository: HistoryInfoRepository) {
                    thumb: String?, category: Int, rating: Float, mode: Int = 0, page: Int? = null) {
         val existing = historyRepository.findByGid(gid)
         if (existing != null) {
-            existing.time = System.currentTimeMillis()
+            val now = System.currentTimeMillis()
+            existing.time = now
             existing.mode = mode
             if (page != null) existing.page = page.coerceAtLeast(0)
+            // A7-2：clearHistory 墓碑化后重读同一画廊必须复活历史行（对齐
+            // SyncService.mergeHistory 的墓碑复活语义）——否则墓碑行被反复更新、
+            // 行永远不出现在列表里，Web 端「清空后重读」功能性地丢失。
+            existing.deleted = false
+            // A7-1 stamping：更新不覆盖属主（行上 NULL 才落当前用户）；lastModified
+            // 必须 bump——它是 App 增量 pull 看到 Web 侧阅读进度/模式变更的唯一信号。
+            if (existing.username == null) existing.username = usernameProvider.currentUsername()
+            existing.lastModified = now
             historyRepository.save(existing)
         } else {
             val entity = HistoryInfoEntity().apply {
@@ -119,13 +133,40 @@ class HistoryService(private val historyRepository: HistoryInfoRepository) {
                 this.mode = mode
                 this.page = page?.coerceAtLeast(0) ?: 0
                 this.time = System.currentTimeMillis()
+                // A7-1 stamping：新行当场落属主与同步水位（adoptNullOwnership 已短路，
+                // NULL 行不再有后续认养扫描）。
+                this.username = usernameProvider.currentUsername()
+                this.lastModified = this.time
             }
             historyRepository.save(entity)
         }
     }
 
+    /**
+     * A7-2（§1.4）：清空历史 = 逐行墓碑化，而非 `deleteAll()` 物理删。
+     *
+     * 物理删后没有任何行满足 `lastModified > since`，App 增量 pull 收不到任何信号；
+     * App 的快照差分只发现「本地删了、服务端还有」（push 方向），不存在反向差分；
+     * 即使全量 pull 也是纯 upsert，App 重装后全量 push 反而会被 mergeHistory 逐条
+     * 复活。墓碑行（deleted=true + lastModified bump）是服务端删除传播的唯一载体
+     * （与 mergeHistory 落的墓碑完全同构）。
+     *
+     * 作用域：只墓碑化当前用户的活行；username 为 NULL 的存量行视作当次就地收养
+     * 一并墓碑化（require_auth=false 下全员即 "default"，等同清库）。
+     * 墓碑无 GC（与 mergeHistory 的墓碑一致，行永久留存——自动清理会令离线超过
+     * 清理窗口的设备永久错过删除，如需引入必须单独立项）。
+     */
+    @Transactional
     fun clearHistory() {
-        historyRepository.deleteAll()
+        val now = System.currentTimeMillis()
+        val user = usernameProvider.currentUsername()
+        val mine = historyRepository.findByUsername(user) + historyRepository.findAllByUsernameIsNull()
+        mine.filter { !it.deleted }.forEach { row ->
+            row.deleted = true
+            row.lastModified = now
+            if (row.username == null) row.username = user
+            historyRepository.save(row)
+        }
     }
 
     /**
@@ -136,7 +177,12 @@ class HistoryService(private val historyRepository: HistoryInfoRepository) {
      */
     fun updateFavoriteSlot(gid: Long, slot: Int): Boolean {
         val existing = historyRepository.findByGid(gid) ?: return false
+        // A7-1：favoriteSlot 是同步可见字段——只在值实际变化时写回并 bump lastModified，
+        // 无变化不产生同步流量（增量 pull 以 lastModified > since 为信号）。
+        if (existing.favoriteSlot == slot) return true
         existing.favoriteSlot = slot
+        if (existing.username == null) existing.username = usernameProvider.currentUsername()
+        existing.lastModified = System.currentTimeMillis()
         historyRepository.save(existing)
         return true
     }

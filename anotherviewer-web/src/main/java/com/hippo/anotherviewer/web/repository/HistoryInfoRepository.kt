@@ -26,8 +26,8 @@ interface HistoryInfoRepository : JpaRepository<HistoryInfoEntity, Long> {
     @Query("select h from HistoryInfoEntity h where h.deleted = false order by h.time desc")
     fun findHistoryPaged(pageable: Pageable): Page<HistoryInfoEntity>
 
-    /** DB-paginated local history filtered by category, newest first. */
-    fun findByCategoryOrderByTimeDesc(category: Int, pageable: Pageable): Page<HistoryInfoEntity>
+    /** A7-2（H2）: DB-paginated local history filtered by category, newest first, live rows only. */
+    fun findByCategoryAndDeletedFalseOrderByTimeDesc(category: Int, pageable: Pageable): Page<HistoryInfoEntity>
 
     /**
      * P2: 子串 q 过滤下沉 DB（title/titleJpn LIKE %kw%，大小写不敏感，仅存活行），
@@ -56,16 +56,4 @@ interface HistoryInfoRepository : JpaRepository<HistoryInfoEntity, Long> {
         order by h.time desc
     """)
     fun findLiveByTitleOrTitleJpnContaining(@Param("keyword") keyword: String): List<HistoryInfoEntity>
-
-    /** DB-paginated local history matching keyword in title/titleJpn (LIKE %kw%, case-insensitive), newest first. */
-    @Query("""
-        select h from HistoryInfoEntity h
-        where lower(h.title) like lower(concat('%', :keyword, '%'))
-           or lower(h.titleJpn) like lower(concat('%', :keyword, '%'))
-        order by h.time desc
-    """)
-    fun findByTitleContainingIgnoreCaseOrTitleJpnContainingIgnoreCaseOrderByTimeDesc(
-        @Param("keyword") keyword: String,
-        pageable: Pageable
-    ): Page<HistoryInfoEntity>
 }

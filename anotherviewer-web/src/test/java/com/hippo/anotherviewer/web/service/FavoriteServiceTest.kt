@@ -44,8 +44,19 @@ class FavoriteServiceTest {
         repository = mock(LocalFavoriteInfoRepository::class.java)
         historyRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
         downloadRepository = mock(com.hippo.anotherviewer.web.repository.DownloadInfoRepository::class.java)
-        service = FavoriteService(repository, historyRepository, downloadRepository, HistoryService(historyRepository))
+        service = FavoriteService(
+            repository,
+            historyRepository,
+            downloadRepository,
+            HistoryService(historyRepository, stubProvider("test-user")),
+            stubProvider("test-user"),
+        )
     }
+
+    /** A7-1: 纯 Mockito 单测不碰 SecurityContext——注入固定用户的 Provider stub。 */
+    private fun stubProvider(name: String): com.hippo.anotherviewer.web.config.CurrentUsernameProvider =
+        mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
+            .apply { `when`(currentUsername()).thenReturn(name) }
 
     private fun savedEntity(): LocalFavoriteInfoEntity {
         val captor = ArgumentCaptor.forClass(LocalFavoriteInfoEntity::class.java)
@@ -100,6 +111,87 @@ class FavoriteServiceTest {
         assertFalse(service.addFavorite(42L, "token", "Title", 1))
 
         verify(repository, never()).save(any(LocalFavoriteInfoEntity::class.java))
+    }
+
+    // ── A7-1: 统一 stamping ──
+
+    @Test
+    fun `addFavorite stamps username and lastModified`() {
+        `when`(repository.findByGid(42L)).thenReturn(null)
+        `when`(historyRepository.findByGid(42L)).thenReturn(null)
+        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+
+        service.addFavorite(42L, "token", "Title", 512)
+
+        val entity = savedEntity()
+        assertEquals("test-user", entity.username)
+        assertTrue(entity.lastModified > 0)
+        assertFalse(entity.deleted)
+    }
+
+    // ── A7-2: 软删墓碑化 + 复活语义 ──
+
+    @Test
+    fun `removeFavorite soft-deletes with lastModified bump and resets favoriteSlot`() {
+        val row = LocalFavoriteInfoEntity().apply { gid = 42L; username = "test-user"; lastModified = 5L }
+        `when`(repository.findByGid(42L)).thenReturn(row)
+        `when`(historyRepository.findByGid(42L)).thenReturn(null)
+        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+
+        assertTrue(service.removeFavorite(42L))
+
+        // 行仍在库（不再物理删），deleted=true + 水位 bump——增量 pull 才能把删除
+        // 传播给 App（物理删会让 App 下次 push 静默重建）。
+        assertTrue(row.deleted)
+        assertTrue(row.lastModified > 5L)
+        verify(repository, never()).delete(any(LocalFavoriteInfoEntity::class.java))
+        verify(repository).save(row)
+    }
+
+    @Test
+    fun `removeFavorite on an already tombstoned row is idempotent without another bump`() {
+        val tombstone = LocalFavoriteInfoEntity().apply { gid = 42L; deleted = true; lastModified = 5L }
+        `when`(repository.findByGid(42L)).thenReturn(tombstone)
+
+        assertTrue(service.removeFavorite(42L))
+
+        assertEquals(5L, tombstone.lastModified)
+        verify(repository, never()).save(any(LocalFavoriteInfoEntity::class.java))
+    }
+
+    @Test
+    fun `addFavorite resurrects a tombstoned row instead of rejecting`() {
+        val tombstone = LocalFavoriteInfoEntity().apply {
+            gid = 42L; token = "old"; title = "Old"; deleted = true; lastModified = 5L
+        }
+        `when`(repository.findByGid(42L)).thenReturn(tombstone)
+        `when`(historyRepository.findByGid(42L)).thenReturn(null)
+        `when`(downloadRepository.findByGid(42L)).thenReturn(null)
+
+        assertTrue(service.addFavorite(42L, "new-token", "New Title", 512, slot = 3))
+
+        // 复活语义（F3，对齐 mergeFavorite 的 incoming live 复活分支）：deleted→false
+        // + 覆写业务字段 + stamp；活行仍拒绝（duplicate gid 测试钉住）。
+        assertFalse(tombstone.deleted)
+        assertEquals("new-token", tombstone.token)
+        assertEquals("New Title", tombstone.title)
+        assertEquals(3, tombstone.favoriteSlot)
+        assertEquals("test-user", tombstone.username)
+        assertTrue(tombstone.lastModified > 5L)
+        verify(repository, never()).delete(any(LocalFavoriteInfoEntity::class.java))
+    }
+
+    @Test
+    fun `favoriteSlot writeback skips tombstoned download rows`() {
+        // D11：回写不得复活墓碑下载行。
+        `when`(repository.findByGid(42L)).thenReturn(null)
+        `when`(historyRepository.findByGid(42L)).thenReturn(null)
+        `when`(downloadRepository.findByGid(42L))
+            .thenReturn(com.hippo.anotherviewer.web.entity.DownloadInfoEntity().apply { gid = 42L; deleted = true })
+
+        assertTrue(service.addFavorite(42L, "token", "Title", 512))
+
+        verify(downloadRepository, never()).save(any(com.hippo.anotherviewer.web.entity.DownloadInfoEntity::class.java))
     }
 
     // ── 任务 D：favoriteSlot 回写来源历史行（详情页收藏态数据源） ──

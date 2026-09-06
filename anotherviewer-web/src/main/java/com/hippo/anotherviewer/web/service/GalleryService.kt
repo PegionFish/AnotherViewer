@@ -35,6 +35,8 @@ class GalleryService(
     private val availability: EhAvailabilityService,
     private val downloadDirIndex: DownloadDirIndex,
     private val serverConfig: ServerConfigService,
+    private val usernameProvider: com.hippo.anotherviewer.web.config.CurrentUsernameProvider,
+    private val historyService: HistoryService,
 ) {
     private val logger = LoggerFactory.getLogger(GalleryService::class.java)
     private val client get() = sessionManager.okHttpClient
@@ -378,12 +380,15 @@ class GalleryService(
         val result = when {
             // Defensive: a non-blank keyword routed to the fallback is matched
             // against local history (title/titleJpn LIKE) instead of a full scan.
+            // A7-2（H2）：改用仅存活行的 LIKE 查询（与 REST 历史检索同一条 JPQL，
+            // deleted=false 内建），墓碑不进本地回退列表。
             !keyword.isNullOrBlank() ->
-                historyRepository.findByTitleContainingIgnoreCaseOrTitleJpnContainingIgnoreCaseOrderByTimeDesc(keyword.trim(), pageable)
+                historyRepository.findLiveByTitleOrTitleJpnContainingPaged(keyword.trim(), pageable)
             category == null || category == 0 ->
                 historyRepository.findHistoryPaged(pageable)
             else ->
-                historyRepository.findByCategoryOrderByTimeDesc(category, pageable)
+                // A7-2（H2）：分类路径同样仅存活行。
+                historyRepository.findByCategoryAndDeletedFalseOrderByTimeDesc(category, pageable)
         }
         return GalleryListResponse(
             success = true,
@@ -407,13 +412,15 @@ class GalleryService(
     fun getGalleryDetail(gid: Long, token: String? = null): GalleryDetailDto? {
         // 1. 本地推送下载行直接作为 detail 来源——pages 取行内 total
         //    （<=0 时数落盘文件），零 EH 依赖，阅读器必须能开。
-        val download = downloadRepository.findByGid(gid)
+        //    A7-2（D10）：墓碑下载行跳过（落到下一分支，不得以删除记录开详情）。
+        val download = downloadRepository.findByGid(gid)?.takeUnless { it.deleted }
         if (download != null) {
             return downloadDetailDto(download)
         }
 
         // 2. 历史行：本地 dto 立即构造；仅站点可达时尝试上游补强（评论等真实字段）。
-        val history = historyRepository.findByGid(gid)
+        //    A7-2（H3）：墓碑历史行跳过（清空历史/设备删除后详情不再以墓碑为源）。
+        val history = historyRepository.findByGid(gid)?.takeUnless { it.deleted }
         if (history != null) {
             return enrichHistoryDetail(gid, history)
         }
@@ -432,7 +439,8 @@ class GalleryService(
         }
 
         // 4. 收藏行：无历史/下载的收藏条目在 EH DOWN 时仍可打开详情（本地 token/标题/缩略图）。
-        val favorite = localFavoriteInfoRepository.findByGid(gid)
+        //    A7-2（F2）：墓碑收藏行跳过（applyFavoriteFields 会把墓碑字段清空，渲染垃圾详情）。
+        val favorite = localFavoriteInfoRepository.findByGid(gid)?.takeUnless { it.deleted }
         if (favorite != null) {
             return favoriteDetailDto(favorite)
         }
@@ -590,34 +598,20 @@ class GalleryService(
         }
     }
 
-    /** S5: 已存阅读进度（0 起页索引）；无历史行视为 0（未读）。 */
-    private fun readProgressOf(gid: Long): Int = historyRepository.findByGid(gid)?.page ?: 0
+    /** S5: 已存阅读进度（0 起页索引）；无历史行视为 0（未读）。A7-2（H3）：墓碑行不计进度。 */
+    private fun readProgressOf(gid: Long): Int =
+        historyRepository.findByGid(gid)?.takeUnless { it.deleted }?.page ?: 0
 
     fun addToHistory(gid: Long, token: String, title: String?, mode: Int, page: Int? = null) {
-        val existing = historyRepository.findByGid(gid)
-        if (existing != null) {
-            existing.time = System.currentTimeMillis()
-            // R4-4: mode 透传写入 history 行（缺省 0 即回退默认值，与实体列默认一致）。
-            existing.mode = mode
-            // S5①: page 仅在调用方明确携带（非 null）时改写——REST 缺省（null）
-            // 保持已存进度不被清零，显式传 0 表示重读写 0（判空区分，不是判 0）。
-            if (page != null) existing.page = page.coerceAtLeast(0)
-            historyRepository.save(existing)
-        } else {
-            val entity = HistoryInfoEntity().apply {
-                this.gid = gid
-                this.token = token
-                this.title = title
-                this.mode = mode
-                this.page = page?.coerceAtLeast(0) ?: 0
-                this.time = System.currentTimeMillis()
-            }
-            historyRepository.save(entity)
-        }
+        // A7-1：委托 HistoryService.addHistory——stamping（username/lastModified）、
+        // 打码标题防污染与 page 语义（null 保持已存进度）单一实现点，与 REST 历史写
+        // 路径完全一致；本方法曾是 second 落点导致新行 username=null/lastModified=0。
+        historyService.addHistory(gid, token, title, null, null, 0, 0f, mode, page)
     }
 
+    /** A7-2（Q1）：快搜墓碑行不列进 REST 列表（设备端删除经同步落墓碑）。 */
     fun getQuickSearches(): QuickSearchListResponse {
-        val all = quickSearchRepository.findAllByOrderById()
+        val all = quickSearchRepository.findAllByDeletedFalseOrderById()
         return QuickSearchListResponse(
             success = true,
             data = all.map {
@@ -638,6 +632,41 @@ class GalleryService(
     }
 
     fun createQuickSearch(dto: QuickSearchDto): QuickSearchDto {
+        val now = System.currentTimeMillis()
+        // A7-2：同名墓碑行走复活（快搜按 name 联合合并，findByName 是单实体查询——
+        // 墓碑旁再插一行同名活记录会让 mergeQuickSearch 命中两行直接抛
+        // IncorrectResultSizeDataAccessException，毒化整条同步通道）；同名活行为现状
+        // 语义（不查重，直接插入），本卡不改变。
+        quickSearchRepository.findByName(dto.name)?.takeIf { it.deleted }?.let { tombstone ->
+            tombstone.apply {
+                name = dto.name
+                mode = dto.mode
+                category = dto.category
+                keyword = dto.keyword
+                advanceSearch = dto.advanceSearch
+                minRating = dto.minRating
+                pageFrom = dto.pageFrom
+                pageTo = dto.pageTo
+                sort = dto.sort
+                time = now
+                deleted = false
+                if (username == null) username = usernameProvider.currentUsername()
+                lastModified = now
+            }
+            val revived = quickSearchRepository.save(tombstone)
+            return QuickSearchDto(
+                id = revived.id,
+                name = revived.name,
+                mode = revived.mode,
+                category = revived.category,
+                keyword = revived.keyword,
+                advanceSearch = revived.advanceSearch,
+                minRating = revived.minRating,
+                pageFrom = revived.pageFrom,
+                pageTo = revived.pageTo,
+                sort = revived.sort
+            )
+        }
         val entity = QuickSearchEntity().apply {
             name = dto.name
             mode = dto.mode
@@ -648,6 +677,10 @@ class GalleryService(
             pageFrom = dto.pageFrom
             pageTo = dto.pageTo
             sort = dto.sort
+            // A7-1 stamping：新行当场落属主与同步水位（deleted=false 为列默认值）。
+            time = now
+            username = usernameProvider.currentUsername()
+            lastModified = now
         }
         val saved = quickSearchRepository.save(entity)
         return QuickSearchDto(
@@ -664,8 +697,18 @@ class GalleryService(
         )
     }
 
+    /**
+     * A7-2：删除快搜 = 墓碑化（deleted=true + lastModified bump），行保留——
+     * quickSearch 是同步软删实体，物理删会让删除永不传播、且 App 下次 push 同名
+     * 预设时 union-merge 直接重建。不存在的 id 静默返回（对齐 deleteById 的旧行为）。
+     */
     fun deleteQuickSearch(id: Long) {
-        quickSearchRepository.deleteById(id)
+        val row = quickSearchRepository.findById(id).orElse(null) ?: return
+        if (row.deleted) return
+        row.deleted = true
+        row.lastModified = System.currentTimeMillis()
+        if (row.username == null) row.username = usernameProvider.currentUsername()
+        quickSearchRepository.save(row)
     }
 
     /** Blocked list response: success=false, cause=EH_UNAVAILABLE, no upstream hit. */

@@ -23,8 +23,13 @@ class HistoryServiceTest {
     @BeforeEach
     fun setUp() {
         historyRepository = mock(HistoryInfoRepository::class.java)
-        historyService = HistoryService(historyRepository)
+        historyService = HistoryService(historyRepository, stubProvider("test-user"))
     }
+
+    /** A7-1: 纯 Mockito 单测不碰 SecurityContext——注入固定用户的 Provider stub。 */
+    private fun stubProvider(name: String): com.hippo.anotherviewer.web.config.CurrentUsernameProvider =
+        mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
+            .apply { `when`(currentUsername()).thenReturn(name) }
 
     private fun entity(gid: Long, time: Long): HistoryInfoEntity {
         val e = HistoryInfoEntity()
@@ -128,6 +133,133 @@ class HistoryServiceTest {
 
         assertEquals(7, existing.mode)
         verify(historyRepository).save(existing)
+    }
+
+    // ── A7-1: 统一 stamping（新行 username/lastModified；更新只 bump 水位） ──
+
+    @Test
+    fun `addHistory insert stamps username and lastModified`() {
+        `when`(historyRepository.findByGid(21L)).thenReturn(null)
+
+        historyService.addHistory(21L, "t21", "Title 21", null, null, 1, 5.0f)
+
+        verify(historyRepository).save(
+            argThatK { it.gid == 21L && it.username == "test-user" && it.lastModified > 0 }
+        )
+    }
+
+    @Test
+    fun `addHistory update bumps lastModified for incremental pull and never overwrites the owner`() {
+        val existing = entity(22L, 1000).apply { username = "alice"; lastModified = 5L }
+        `when`(historyRepository.findByGid(22L)).thenReturn(existing)
+
+        historyService.addHistory(22L, "t22", "Title 22", null, null, 1, 5.0f)
+
+        assertEquals("alice", existing.username)
+        assertTrue(existing.lastModified > 5L)
+        verify(historyRepository).save(existing)
+    }
+
+    @Test
+    fun `addHistory update claims a legacy null-username row in place`() {
+        val existing = entity(23L, 1000)
+        `when`(historyRepository.findByGid(23L)).thenReturn(existing)
+
+        historyService.addHistory(23L, "t23", "Title 23", null, null, 1, 5.0f)
+
+        assertEquals("test-user", existing.username)
+        verify(historyRepository).save(existing)
+    }
+
+    @Test
+    fun `updateFavoriteSlot bumps lastModified only on change`() {
+        val row = entity(24L, 1000).apply { favoriteSlot = 3; lastModified = 7L }
+        `when`(historyRepository.findByGid(24L)).thenReturn(row)
+
+        // 值未变：不产生任何写（无同步流量）。
+        assertTrue(historyService.updateFavoriteSlot(24L, 3))
+        verify(historyRepository, never()).save(any(HistoryInfoEntity::class.java))
+
+        // 值变化：写回 + bump lastModified（favoriteSlot 是同步可见字段）。
+        assertTrue(historyService.updateFavoriteSlot(24L, 5))
+        assertEquals(5, row.favoriteSlot)
+        assertTrue(row.lastModified > 7L)
+        verify(historyRepository).save(row)
+    }
+
+    // ── A7-2: 软删 / clearHistory 墓碑化 / 重读复活 ──
+
+    @Test
+    fun `addHistory on a tombstoned row revives it on reread`() {
+        // clearHistory 后重读同一画廊必须复活历史行（对齐 mergeHistory 墓碑复活），
+        // 否则墓碑被反复更新而列表永远为空——「清空后重读」功能性丢失。
+        val tombstone = entity(25L, 1000).apply { deleted = true; lastModified = 5L }
+        `when`(historyRepository.findByGid(25L)).thenReturn(tombstone)
+
+        historyService.addHistory(25L, "t25", "Title 25", null, null, 1, 5.0f)
+
+        assertFalse(tombstone.deleted)
+        assertTrue(tombstone.lastModified > 5L)
+        verify(historyRepository).save(tombstone)
+    }
+
+    @Test
+    fun `clearHistory tombstones rows instead of deleting`() {
+        val mine = entity(1L, 3000).apply { username = "test-user"; lastModified = 10L }
+        val legacyNull = entity(2L, 2000)
+        `when`(historyRepository.findByUsername("test-user")).thenReturn(listOf(mine))
+        `when`(historyRepository.findAllByUsernameIsNull()).thenReturn(listOf(legacyNull))
+
+        historyService.clearHistory()
+
+        // 行数不变、deleted=true、lastModified bump（增量 pull 才能拿到墓碑）；
+        // 不再 deleteAll() 物理删——那会让删除永不传播。
+        assertTrue(mine.deleted)
+        assertTrue(mine.lastModified > 10L)
+        assertTrue(legacyNull.deleted)
+        assertTrue(legacyNull.lastModified > 0L)
+        // NULL 存量行就地收养（等价一次 adopt）。
+        assertEquals("test-user", legacyNull.username)
+        verify(historyRepository, never()).deleteAll()
+        verify(historyRepository, never()).delete(any(HistoryInfoEntity::class.java))
+    }
+
+    @Test
+    fun `clearHistory scopes to the acting user`() {
+        // 多用户作用域：只墓碑化当前用户的行（+NULL 收养）——他人行不在
+        // findByUsername(当前用户) 的结果里（作用域由查询承载），已墓碑的行
+        // 不重复 bump 水位。
+        val mine = entity(1L, 3000).apply { username = "test-user" }
+        val other = entity(4L, 500).apply { username = "alice" }
+        val alreadyTombstoned = entity(3L, 1000).apply { username = "test-user"; deleted = true; lastModified = 10L }
+        `when`(historyRepository.findByUsername("test-user")).thenReturn(listOf(mine, alreadyTombstoned))
+        `when`(historyRepository.findAllByUsernameIsNull()).thenReturn(emptyList())
+
+        historyService.clearHistory()
+
+        assertTrue(mine.deleted)
+        assertTrue(mine.lastModified > 0L)
+        verify(historyRepository, never()).save(other)             // 他人行不碰
+        assertFalse(other.deleted)
+        verify(historyRepository, never()).save(alreadyTombstoned) // 已墓碑不重复 bump
+        assertEquals(10L, alreadyTombstoned.lastModified)
+    }
+
+    @Test
+    fun `listHistory is empty after clearHistory`() {
+        // 端到端同义验收：墓碑化后 REST 列表为空，但行仍在仓储。
+        val mine = entity(1L, 3000).apply { username = "test-user" }
+        val legacyNull = entity(2L, 2000)
+        `when`(historyRepository.findByUsername("test-user")).thenReturn(listOf(mine, legacyNull))
+        `when`(historyRepository.findAllByUsernameIsNull()).thenReturn(emptyList())
+        `when`(historyRepository.findAllByOrderByTimeDesc()).thenAnswer { listOf(mine, legacyNull) }
+
+        historyService.clearHistory()
+
+        val response = historyService.listHistory()
+        assertTrue(response.history.isEmpty())
+        assertEquals(0, response.total)
+        verify(historyRepository, never()).deleteAll()
     }
 
     @Test

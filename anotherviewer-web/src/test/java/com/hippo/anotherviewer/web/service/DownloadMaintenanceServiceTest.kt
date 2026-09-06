@@ -26,8 +26,13 @@ class DownloadMaintenanceServiceTest {
         root = File(tempDir, "downloads").apply { mkdirs() }
         val config = SiteCoreConfigProperties().apply { download.path = root.absolutePath }
         repository = mock(DownloadInfoRepository::class.java)
-        service = DownloadMaintenanceService(repository, config)
+        service = DownloadMaintenanceService(repository, config, stubProvider("test-user"))
     }
+
+    /** A7-1: 纯 Mockito 单测不碰 SecurityContext——注入固定用户的 Provider stub。 */
+    private fun stubProvider(name: String): com.hippo.anotherviewer.web.config.CurrentUsernameProvider =
+        mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
+            .apply { `when`(currentUsername()).thenReturn(name) }
 
     // ── fixtures ────────────────────────────────────────────────
 
@@ -58,7 +63,7 @@ class DownloadMaintenanceServiceTest {
     @Test
     fun `disk-only directory (no row) is redundant while referenced one is kept`() {
         // 2026-08-31（用户裁决）：行能匹配到目录→不冗余；匹配不到（磁盘-only）→冗余。
-        `when`(repository.findAll()).thenReturn(listOf(finishedRow(1, 999)))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(finishedRow(1, 999)))
         withContent(File(root, "999")) // 行引用 → 保留
         withContent(File(root, "999-Disk Only Title")) // 无行引用时才算冗余？同gid另一目录=副本
 
@@ -70,7 +75,7 @@ class DownloadMaintenanceServiceTest {
 
     @Test
     fun `non-layout or empty directory is flagged redundant`() {
-        `when`(repository.findAll()).thenReturn(emptyList())
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(emptyList())
         // 非 gid 前缀目录（杂项）→ 冗余；gid 布局但磁盘-only（无行）→ 冗余。
         File(root, "misc-notes").mkdirs()
         File(root, "misc-notes/readme.txt").writeBytes(byteArrayOf(1))
@@ -87,7 +92,7 @@ class DownloadMaintenanceServiceTest {
             finishedRow(1, 100),                                  // default dir <root>/100
             finishedRow(2, 200, dir = File(root, "elsewhere-200")) // custom downloadDir
         )
-        `when`(repository.findAll()).thenReturn(rows)
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(rows)
         withContent(File(root, "100"))
         withContent(File(root, "777")) // 磁盘-only 无行 → redundant（无行引用）
         File(root, "stray.tmp").writeBytes(ByteArray(5)) // loose file → always redundant
@@ -101,7 +106,7 @@ class DownloadMaintenanceServiceTest {
 
     @Test
     fun `finished row without content dir is invalid as content_dir_missing`() {
-        `when`(repository.findAll()).thenReturn(listOf(finishedRow(1, 300)))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(finishedRow(1, 300)))
 
         val preview = service.preview()
 
@@ -112,7 +117,7 @@ class DownloadMaintenanceServiceTest {
 
     @Test
     fun `finished row whose pages are all zero-byte is invalid as no_usable_page_files`() {
-        `when`(repository.findAll()).thenReturn(listOf(finishedRow(1, 400)))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(finishedRow(1, 400)))
         withContent(File(root, "400"), zeroByte = true)
 
         assertEquals("no_usable_page_files", service.preview().invalidDownloads.single().reason)
@@ -123,7 +128,7 @@ class DownloadMaintenanceServiceTest {
         val paused = finishedRow(1, 500).apply { state = 0 }
         val downloading = finishedRow(2, 501).apply { state = 2 }
         val failed = finishedRow(3, 502).apply { state = 4 } // content missing but retryable
-        `when`(repository.findAll()).thenReturn(listOf(paused, downloading, failed))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(paused, downloading, failed))
 
         assertTrue(service.preview().invalidDownloads.isEmpty())
     }
@@ -135,7 +140,7 @@ class DownloadMaintenanceServiceTest {
         // 从 macOS 迁移来的行：downloadDir 指向旧主机的绝对路径，本机不存在。
         val migrated = finishedRow(1, 700, dir = File("/Users/bob/AnotherViewer/data/downloads/700"))
         withContent(File(root, "700"))
-        `when`(repository.findAll()).thenReturn(listOf(migrated))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(migrated))
 
         val preview = service.preview()
 
@@ -147,7 +152,7 @@ class DownloadMaintenanceServiceTest {
     @Test
     fun `migrated row without local content is still flagged via resolved default dir`() {
         val migrated = finishedRow(2, 800, dir = File("/Users/bob/AnotherViewer/data/downloads/800"))
-        `when`(repository.findAll()).thenReturn(listOf(migrated))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(migrated))
 
         assertEquals("content_dir_missing", service.preview().invalidDownloads.single().reason)
     }
@@ -160,7 +165,7 @@ class DownloadMaintenanceServiceTest {
         withContent(File(root, "100"))
         // 冗余=非本应用布局：0 字节页文件目录（布局有效但内容无效）。
         val junk = withContent(File(root, "888"), zeroByte = true)
-        `when`(repository.findAll()).thenReturn(rows)
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(rows)
 
         val result = service.clean(MaintenanceKind.REDUNDANT_FILES)
 
@@ -174,12 +179,21 @@ class DownloadMaintenanceServiceTest {
     @Test
     fun `clean INVALID_DOWNLOADS removes row plus its leftover dir`() {
         val dir = withContent(File(root, "600"), zeroByte = true)
-        `when`(repository.findAll()).thenReturn(listOf(finishedRow(9, 600)))
+        val row = finishedRow(9, 600)
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(row))
+        `when`(repository.save(org.mockito.ArgumentMatchers.any(DownloadInfoEntity::class.java)))
+            .thenAnswer { it.getArgument(0) }
 
         val result = service.clean(MaintenanceKind.INVALID_DOWNLOADS)
 
         assertEquals(1, result.removedDownloads)
-        org.mockito.Mockito.verify(repository).deleteById(9L)
+        // A7-2：行墓碑化（deleted=true + 属主/水位落），不再物理删行。
+        org.mockito.Mockito.verify(repository).save(
+            org.mockito.ArgumentMatchers.argThat { r: DownloadInfoEntity ->
+                r.id == 9L && r.deleted && r.username == "test-user" && r.lastModified > 0
+            }
+        )
+        org.mockito.Mockito.verify(repository, org.mockito.Mockito.never()).deleteById(org.mockito.ArgumentMatchers.anyLong())
         assertFalse(dir.exists())
         assertTrue(result.freedBytes == 0L) // 全是 0 字节文件，释放字节数为 0
     }
@@ -187,13 +201,32 @@ class DownloadMaintenanceServiceTest {
     @Test
     fun `clean INVALID_DOWNLOADS never deletes a directory outside the downloads root`() {
         val outsideRoot = withContent(File(tempDir, "outside"), zeroByte = true)
-        `when`(repository.findAll()).thenReturn(listOf(finishedRow(7, 700, dir = outsideRoot)))
+        val row = finishedRow(7, 700, dir = outsideRoot)
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(listOf(row))
+        `when`(repository.save(org.mockito.ArgumentMatchers.any(DownloadInfoEntity::class.java)))
+            .thenAnswer { it.getArgument(0) }
 
         val result = service.clean(MaintenanceKind.INVALID_DOWNLOADS)
 
         assertEquals(1, result.removedDownloads)
-        org.mockito.Mockito.verify(repository).deleteById(7L)
+        org.mockito.Mockito.verify(repository).save(
+            org.mockito.ArgumentMatchers.argThat { r: DownloadInfoEntity -> r.id == 7L && r.deleted }
+        )
         assertTrue(outsideRoot.exists()) // 根外内容只保留不删
+    }
+
+    @Test
+    fun `tombstoned rows are invisible to the scan and their dirs become redundant`() {
+        // A7-2：墓碑行不再保护其内容目录——删除传播后目录交由冗余清理回收；
+        // 行本身不进无效下载扫描。
+        val tombstone = finishedRow(5, 500).apply { deleted = true }
+        withContent(File(root, "500"))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(emptyList())
+
+        val preview = service.preview()
+
+        assertTrue(preview.invalidDownloads.isEmpty())
+        assertEquals(listOf("500"), preview.redundantFiles.map { it.path })
     }
 
     @Test
@@ -202,7 +235,7 @@ class DownloadMaintenanceServiceTest {
         val row = finishedRow(1, 800)
         withContent(File(root, "misc-800")) // 非 gid 前缀=杂项，两段均判冗余的对照
         withContent(File(root, "800"))
-        `when`(repository.findAll()).thenReturn(emptyList()).thenReturn(listOf(row))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(emptyList()).thenReturn(listOf(row))
 
         // 第一段（无行）：800 磁盘-only=冗余（匹配不到），misc-800 杂项=冗余。
         assertEquals(listOf("800", "misc-800"), service.preview().redundantFiles.map { it.path })
@@ -216,8 +249,8 @@ class DownloadMaintenanceServiceTest {
     @Test
     fun `blank or missing downloads path yields empty scan results`() {
         val config = SiteCoreConfigProperties().apply { download.path = "" }
-        val svc = DownloadMaintenanceService(repository, config)
-        `when`(repository.findAll()).thenReturn(emptyList())
+        val svc = DownloadMaintenanceService(repository, config, stubProvider("test-user"))
+        `when`(repository.findAllByDeletedFalseOrderById()).thenReturn(emptyList())
 
         val preview = svc.preview()
 

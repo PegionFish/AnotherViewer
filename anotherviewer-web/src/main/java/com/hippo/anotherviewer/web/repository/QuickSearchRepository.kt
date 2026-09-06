@@ -6,6 +6,8 @@ import org.springframework.data.jpa.repository.JpaRepository
 interface QuickSearchRepository : JpaRepository<QuickSearchEntity, Long> {
     fun findByName(name: String): QuickSearchEntity?
     fun findAllByOrderById(): List<QuickSearchEntity>
+    /** A7-2（Q1）: REST 列表只出存活快搜（墓碑行是同步删除的传播载体，不下发列表）。 */
+    fun findAllByDeletedFalseOrderById(): List<QuickSearchEntity>
     fun findAllByUsernameIsNull(): List<QuickSearchEntity>
     fun countByUsername(username: String): Long
     /** H-3: 同步增量拉取按 (username, lastModified) 走索引查询，避免全表扫描后内存过滤。 */

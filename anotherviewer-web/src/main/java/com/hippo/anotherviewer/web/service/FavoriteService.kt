@@ -2,6 +2,7 @@ package com.hippo.anotherviewer.web.service
 
 import com.hippo.anotherviewer.web.dto.FavoriteItem
 import com.hippo.anotherviewer.web.dto.FavoriteListResponse
+import com.hippo.anotherviewer.web.config.CurrentUsernameProvider
 import com.hippo.anotherviewer.web.entity.LocalFavoriteInfoEntity
 import com.hippo.anotherviewer.web.repository.LocalFavoriteInfoRepository
 import org.slf4j.LoggerFactory
@@ -14,6 +15,7 @@ class FavoriteService(
     private val historyRepository: com.hippo.anotherviewer.web.repository.HistoryInfoRepository,
     private val downloadRepository: com.hippo.anotherviewer.web.repository.DownloadInfoRepository,
     private val historyService: HistoryService,
+    private val usernameProvider: CurrentUsernameProvider,
 ) {
     private val logger = LoggerFactory.getLogger(FavoriteService::class.java)
 
@@ -131,20 +133,37 @@ class FavoriteService(
         category: Int,
         slot: Int = SLOT_DEFAULT_FOLDER
     ): Boolean {
+        val clampedSlot = slot.coerceIn(SLOT_NOT_FAVORITED, SLOT_MAX)
+        val now = System.currentTimeMillis()
         val existing = favoriteRepository.findByGid(gid)
-        if (existing != null) return false
-        val entity = LocalFavoriteInfoEntity().apply {
-            this.gid = gid
-            this.token = token
-            this.title = title
-            // category is a site bitmask (up to 512); it is written to its own
-            // column only and must never leak into favoriteSlot.
-            this.category = category
-            // Clamp so a bitmask-style value can never be persisted as a slot;
-            // an out-of-range slot would break listFavorites' slot filter.
-            // Legacy rows with favoriteSlot=512 (pre-N-5) are not migrated here.
-            this.favoriteSlot = slot.coerceIn(SLOT_NOT_FAVORITED, SLOT_MAX)
-            this.time = System.currentTimeMillis()
+        // A7-2 复活语义（F3，对齐 SyncService.mergeFavorite 的 incoming live 复活分支）：
+        // 墓碑行不拒绝而是复活（deleted→false + 覆写业务字段 + stamp），否则 Web 永远
+        // 无法重新收藏该 gid（列表已隐藏墓碑，重加是无声失败）；活行仍拒绝。
+        val entity = when {
+            existing == null -> LocalFavoriteInfoEntity().apply {
+                this.gid = gid
+                this.token = token
+                this.title = title
+                // category is a site bitmask (up to 512); it is written to its own
+                // column only and must never leak into favoriteSlot.
+                this.category = category
+                this.favoriteSlot = clampedSlot
+                this.time = now
+                // A7-1 stamping：新行当场落属主与同步水位（adoptNullOwnership 已短路）。
+                this.username = usernameProvider.currentUsername()
+                this.lastModified = now
+            }
+            existing.deleted -> existing.apply {
+                this.token = token
+                this.title = title
+                this.category = category
+                this.favoriteSlot = clampedSlot
+                this.time = now
+                this.deleted = false
+                if (this.username == null) this.username = usernameProvider.currentUsername()
+                this.lastModified = now
+            }
+            else -> return false
         }
         favoriteRepository.save(entity)
         // 任务 D：回写来源历史行的 favoriteSlot（与收藏行一致，取夹紧后的值）。
@@ -156,24 +175,38 @@ class FavoriteService(
         }
         // 已下载画廊的详情读取链 download 分支优先于 history 分支，下载列表行
         // 同样以 download 行为 favoriteSlot 来源——来源行是 download 行时也要
-        // 回写，否则重进详情/下载列表仍显示未收藏。
-        downloadRepository.findByGid(gid)?.let {
+        // 回写，否则重进详情/下载列表仍显示未收藏。D11：墓碑下载行跳过（回写
+        // 不得复活删除）。
+        downloadRepository.findByGid(gid)?.takeIf { !it.deleted }?.let {
             it.favoriteSlot = entity.favoriteSlot
+            it.lastModified = System.currentTimeMillis()
             downloadRepository.save(it)
         }
         return true
     }
 
+    /**
+     * A7-2：取消收藏 = 墓碑化（deleted=true + lastModified bump），行保留。
+     * 物理删会让删除永不传播（增量 pull 里只是「消失」，App 差分方向相反收不到
+     * 信号），且 App 下次 push 同 gid 时 union-merge 会静默重建——Web 删除被撤销。
+     * 已是墓碑的行幂等返回 true，不再重复 bump 水位制造无谓 pull 流量。
+     */
     fun removeFavorite(gid: Long): Boolean {
         val existing = favoriteRepository.findByGid(gid) ?: return false
-        favoriteRepository.delete(existing)
+        if (existing.deleted) return true
+        existing.deleted = true
+        existing.lastModified = System.currentTimeMillis()
+        if (existing.username == null) existing.username = usernameProvider.currentUsername()
+        favoriteRepository.save(existing)
         // 任务 D：对称清除来源历史行的 favoriteSlot（置回未收藏），重进详情
         // 不残留收藏态；无历史行则本就无状态可残留，降级为日志。
         if (!historyService.updateFavoriteSlot(gid, SLOT_NOT_FAVORITED)) {
             logger.debug("removeFavorite gid={}: no history row, favoriteSlot reset skipped", gid)
         }
-        downloadRepository.findByGid(gid)?.let {
+        // D11：墓碑下载行跳过（回写不得复活删除）。
+        downloadRepository.findByGid(gid)?.takeIf { !it.deleted }?.let {
             it.favoriteSlot = SLOT_NOT_FAVORITED
+            it.lastModified = System.currentTimeMillis()
             downloadRepository.save(it)
         }
         return true
