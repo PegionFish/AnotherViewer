@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { createPinia, setActivePinia } from 'pinia'
-import PageMode from '../PageMode.vue'
+import PageMode, { pageImageUrl, pageImageSrcset } from '../PageMode.vue'
 import { usePreferencesStore } from '@/stores/preferences'
 import { markDown, markUnknown } from '@/stores/availability'
 import {
@@ -225,5 +225,28 @@ describe('PageMode — EH 熔断：跳过指数退避直接终态（plan-2026-08
     await fireImageError(wrapper)
     expect(wrapper.find('.page-mode__overlay--error').exists()).toBe(false)
     wrapper.unmount()
+  })
+})
+
+describe('PageMode — pageImageUrl server base 路由（PWA C2）', () => {
+  afterEach(() => {
+    localStorage.removeItem('server-base')
+  })
+
+  it('serverBase 未配置（空串）：URL 与 srcset 与旧字面量逐字节一致（零回归锚点）', () => {
+    localStorage.removeItem('server-base')
+    expect(pageImageUrl(123456, 0, 800)).toBe('/api/v1/image/123456/0?w=800')
+    expect(pageImageUrl(7, 3, 800.6)).toBe('/api/v1/image/7/3?w=801')
+    expect(pageImageSrcset(9, 2, 400)).toBe(
+      '/api/v1/image/9/2?w=400 1x, /api/v1/image/9/2?w=800 2x',
+    )
+  })
+
+  it('serverBase 配置后：URL 与 srcset 带 `${base}/api/v1` 绝对前缀', () => {
+    localStorage.setItem('server-base', 'http://x:1')
+    expect(pageImageUrl(123456, 0, 800)).toBe('http://x:1/api/v1/image/123456/0?w=800')
+    expect(pageImageSrcset(9, 2, 400)).toBe(
+      'http://x:1/api/v1/image/9/2?w=400 1x, http://x:1/api/v1/image/9/2?w=800 2x',
+    )
   })
 })

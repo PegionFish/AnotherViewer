@@ -13,6 +13,7 @@
  * (`SiteProxyController.isGallerySiteHost`): `e-hentai.org`, `exhentai.org`,
  * `lofi.e-hentai.org`, `ehgt.org` and their subdomains.
  */
+import { resolveApiUrl } from '@/stores/server'
 
 /** The Gallery Site primary domain (SiteUrl.DOMAIN_E in the app). */
 export const SITE_ASSET_DOMAIN = 'e-hentai.org'
@@ -54,5 +55,5 @@ export function rewriteSiteAssetUrl(url: string | null | undefined): string {
   if (!isSiteAssetUrl(url)) {
     return url
   }
-  return `/api/v1/image/proxy?url=${encodeURIComponent(url)}`
+  return resolveApiUrl(`/image/proxy?url=${encodeURIComponent(url)}`)
 }

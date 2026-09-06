@@ -234,4 +234,26 @@ describe('useEnhancedImage (T-F2)', () => {
     expect(wsConnect).toHaveBeenCalledTimes(2)
     expect(wsSubscribe).toHaveBeenCalledTimes(2)
   })
+
+  it('无 serverBase：增强图 URL 与旧字面量逐字节一致（零回归锚点，PWA C2）', () => {
+    localStorage.removeItem('server-base')
+    const { api } = mountEnhanced(7)
+    api.connect()
+
+    lastHandler()(readyPayload())
+    expect(FakeImage.instances.at(-1)!.src).toBe('/api/v1/image/7/2?w=800&enhanced=1')
+  })
+
+  it('配置 serverBase：增强图 URL 带 `${base}/api/v1` 绝对前缀（PWA C2）', () => {
+    localStorage.setItem('server-base', 'http://x:1')
+    try {
+      const { api } = mountEnhanced(7)
+      api.connect()
+
+      lastHandler()(readyPayload())
+      expect(FakeImage.instances.at(-1)!.src).toBe('http://x:1/api/v1/image/7/2?w=800&enhanced=1')
+    } finally {
+      localStorage.removeItem('server-base')
+    }
+  })
 })

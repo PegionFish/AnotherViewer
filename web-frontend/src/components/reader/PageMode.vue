@@ -102,6 +102,7 @@ import { onBeforeUnmount, onMounted } from 'vue'
 import type { Ref } from 'vue'
 import { useSwipeGesture } from '@/composables/useSwipeGesture'
 import { useTapZoom } from '@/composables/useTapZoom'
+import { resolveApiUrl } from '@/stores/server'
 
 /** Android `Settings.READING_DIRECTION_*`: LTR / RTL / vertical (scroll). */
 export type ReadingDirection = 'ltr' | 'rtl' | 'vertical'
@@ -156,7 +157,7 @@ export const READER_PINCH_ZOOM_MIN = 1
  * `styles/privacy-mask.css`（<html>.privacy-mask 作用域）全局遮蔽。
  */
 export function pageImageUrl(gid: number, page: number, widthPx: number): string {
-  return `/api/v1/image/${gid}/${page}?w=${Math.max(1, Math.round(widthPx))}`
+  return resolveApiUrl(`/image/${gid}/${page}?w=${Math.max(1, Math.round(widthPx))}`)
 }
 
 /**

@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, afterEach } from 'vitest'
 import { rewriteSiteAssetUrl, isSiteAssetUrl, SITE_ASSET_DOMAIN } from '../siteAsset'
 
 describe('rewriteSiteAssetUrl (R4-9 thumbnail/cover proxy rewrite)', () => {
@@ -57,5 +57,29 @@ describe('isSiteAssetUrl', () => {
     expect(isSiteAssetUrl('https://notexhentai.org/x')).toBe(false)
     expect(isSiteAssetUrl('https://exhentai.org.evil.example/x')).toBe(false)
     expect(isSiteAssetUrl('garbage')).toBe(false)
+  })
+})
+
+describe('rewriteSiteAssetUrl — server base 路由（PWA C2）', () => {
+  const raw = 'https://ehgt.org/t/123/cover.jpg'
+  /** 改前（硬拼 /api/v1）的逐字节旧值——零回归锚点。 */
+  const legacy = '/api/v1/image/proxy?url=' + encodeURIComponent(raw)
+
+  afterEach(() => {
+    localStorage.removeItem('server-base')
+  })
+
+  it('serverBase 未配置（空串）：产出 URL 与旧字面量逐字节一致', () => {
+    localStorage.removeItem('server-base')
+    expect(rewriteSiteAssetUrl(raw)).toBe(legacy)
+  })
+
+  it('serverBase 配置后：产出 `${base}/api/v1/...` 绝对前缀', () => {
+    localStorage.setItem('server-base', 'http://x:1')
+    expect(rewriteSiteAssetUrl(raw)).toBe(
+      'http://x:1/api/v1/image/proxy?url=' + encodeURIComponent(raw),
+    )
+    // 非 site URL 仍然原样返回，不加前缀。
+    expect(rewriteSiteAssetUrl('https://example.com/x.jpg')).toBe('https://example.com/x.jpg')
   })
 })

@@ -32,6 +32,7 @@ import {
 } from 'vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import type { WsEnvelope, ProcessingType } from '@/composables/useWebSocket'
+import { resolveApiUrl } from '@/stores/server'
 
 /* ------------------------------------------------------------------ */
 /* Wire types (contracts/websocket-protocol.md §3.3 + Appendix A)      */
@@ -147,7 +148,7 @@ export function useEnhancedImage(gid: Ref<number>): {
    * numbers are **0-based**, matching the composable's internal map.
    */
   function buildEnhancedUrl(galleryId: number, pageIndex: number, width: number): string {
-    return `/api/v1/image/${galleryId}/${pageIndex}?w=${Math.max(1, Math.round(width))}&enhanced=1`
+    return resolveApiUrl(`/image/${galleryId}/${pageIndex}?w=${Math.max(1, Math.round(width))}&enhanced=1`)
   }
 
   /**
