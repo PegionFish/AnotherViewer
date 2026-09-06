@@ -124,7 +124,7 @@ describe('AdminEhSession (EH 会话)', () => {
   it('navigates to the pairing page from the guide', async () => {
     const w = await mountView()
     await w.findAll('button').find((b) => b.text() === '配对设备')!.trigger('click')
-    expect(pushMock).toHaveBeenCalledWith('/admin/devices')
+    expect(pushMock).toHaveBeenCalledWith('/settings/server/devices')
   })
 
   it('refreshes the session state via the guide button', async () => {

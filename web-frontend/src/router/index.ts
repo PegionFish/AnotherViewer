@@ -43,34 +43,48 @@ export const routes: RouteRecordRaw[] = [
       name: 'Search',
       component: () => import('@/views/SearchView.vue'),
     },
+    /**
+     * A5-1: 统一设置面板 —— 原 /settings（偏好，preferencesApi）与 /admin
+     * （服务器，settingsApi/backupApi 等）双面板合并。分组：
+     *   偏好   = general / reader / privacy / transfer（路径不变）
+     *   服务器 = 原 /admin 十页，整体迁至 /settings/server/*
+     * `/settings` exact 不再路由级 redirect：窄屏渲染分组索引页
+     * （SettingsIndex），宽屏由其 setup 内 matchMedia 一次性检查后 replace
+     * 到默认子页。旧 /admin/* 全部 redirect 兜底（见下方记录）。
+     */
     {
       path: '/settings',
       component: () => import('@/views/settings/SettingsLayout.vue'),
       children: [
-        { path: '', redirect: '/settings/general' },
+        { path: '', name: 'SettingsIndex', component: () => import('@/views/settings/SettingsIndex.vue') },
         { path: 'general', name: 'SettingsGeneral', component: () => import('@/views/settings/GeneralSettings.vue') },
         { path: 'reader', name: 'SettingsReader', component: () => import('@/views/settings/ReaderSettings.vue') },
         { path: 'privacy', name: 'SettingsPrivacy', component: () => import('@/views/settings/PrivacySettings.vue') },
         { path: 'transfer', name: 'SettingsTransfer', component: () => import('@/views/settings/TransferSettings.vue') },
+        { path: 'server/download', name: 'SettingsServerDownload', component: () => import('@/views/admin/AdminDownload.vue') },
+        { path: 'server/filter-slots', name: 'SettingsServerFilterSlots', component: () => import('@/views/admin/AdminFilterSlots.vue') },
+        { path: 'server/server', name: 'SettingsServerServer', component: () => import('@/views/admin/AdminServer.vue') },
+        { path: 'server/backup', name: 'SettingsServerBackup', component: () => import('@/views/admin/AdminBackup.vue') },
+        { path: 'server/devices', name: 'SettingsServerDevices', component: () => import('@/views/admin/AdminDevices.vue') },
+        { path: 'server/eh', name: 'SettingsServerEh', component: () => import('@/views/admin/AdminEhSession.vue') },
+        { path: 'server/access', name: 'SettingsServerAccess', component: () => import('@/views/admin/AdminAccess.vue') },
+        { path: 'server/processing', name: 'SettingsServerProcessing', component: () => import('@/views/admin/AdminProcessing.vue') },
+        { path: 'server/advanced', name: 'SettingsServerAdvanced', component: () => import('@/views/admin/AdminAdvanced.vue') },
+        { path: 'server/about', name: 'SettingsServerAbout', component: () => import('@/views/admin/AdminAbout.vue') },
       ],
     },
-    {
-      path: '/admin',
-      component: () => import('@/views/admin/AdminLayout.vue'),
-      children: [
-        { path: '', redirect: '/admin/download' },
-        { path: 'download', name: 'AdminDownload', component: () => import('@/views/admin/AdminDownload.vue') },
-        { path: 'filter-slots', name: 'AdminFilterSlots', component: () => import('@/views/admin/AdminFilterSlots.vue') },
-        { path: 'server', name: 'AdminServer', component: () => import('@/views/admin/AdminServer.vue') },
-        { path: 'backup', name: 'AdminBackup', component: () => import('@/views/admin/AdminBackup.vue') },
-        { path: 'devices', name: 'AdminDevices', component: () => import('@/views/admin/AdminDevices.vue') },
-        { path: 'eh', name: 'AdminEhSession', component: () => import('@/views/admin/AdminEhSession.vue') },
-        { path: 'access', name: 'AdminAccess', component: () => import('@/views/admin/AdminAccess.vue') },
-        { path: 'processing', name: 'AdminProcessing', component: () => import('@/views/admin/AdminProcessing.vue') },
-        { path: 'advanced', name: 'AdminAdvanced', component: () => import('@/views/admin/AdminAdvanced.vue') },
-        { path: 'about', name: 'AdminAbout', component: () => import('@/views/admin/AdminAbout.vue') },
-      ],
-    },
+    // A5-1: 旧 /admin 深链兜底（含 HomeView 的 /admin/eh EH 会话跳转）。
+    { path: '/admin', redirect: '/settings/server/download' },
+    { path: '/admin/download', redirect: '/settings/server/download' },
+    { path: '/admin/filter-slots', redirect: '/settings/server/filter-slots' },
+    { path: '/admin/server', redirect: '/settings/server/server' },
+    { path: '/admin/backup', redirect: '/settings/server/backup' },
+    { path: '/admin/devices', redirect: '/settings/server/devices' },
+    { path: '/admin/eh', redirect: '/settings/server/eh' },
+    { path: '/admin/access', redirect: '/settings/server/access' },
+    { path: '/admin/processing', redirect: '/settings/server/processing' },
+    { path: '/admin/advanced', redirect: '/settings/server/advanced' },
+    { path: '/admin/about', redirect: '/settings/server/about' },
     {
       path: '/smb-backup',
       name: 'SmbBackup',

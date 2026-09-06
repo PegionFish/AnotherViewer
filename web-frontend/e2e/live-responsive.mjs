@@ -32,8 +32,12 @@ const LIST_ROUTES = [
   { path: '/history', slug: 'history' },
   { path: '/favorites', slug: 'favorites' },
   { path: '/downloads', slug: 'downloads' },
+  // A5-3 设置域：/settings 根（窄屏=分组索引页）、偏好子页、服务器子页，
+  // 以及旧 /admin/eh 深链（应被路由表 redirect 到 /settings/server/eh）。
+  { path: '/settings', slug: 'settings-index' },
   { path: '/settings/general', slug: 'settings-general' },
-  { path: '/admin/download', slug: 'admin-download' },
+  { path: '/settings/server/download', slug: 'settings-server-download' },
+  { path: '/admin/eh', slug: 'settings-server-eh-redirect' },
 ]
 
 fs.mkdirSync(OUT, { recursive: true })

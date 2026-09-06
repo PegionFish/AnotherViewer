@@ -402,9 +402,9 @@ async function onSiteChange(value: string): Promise<void> {
   }
 }
 
-/** 跳到「设备与配对」页生成配对码。 */
+/** 跳到「设备与配对」页生成配对码（A5-1: /admin/devices → /settings/server/devices）。 */
 function goPairDevices(): void {
-  void router.push('/admin/devices')
+  void router.push('/settings/server/devices')
 }
 
 /** 重新拉取 EH 会话状态，检测 Android 端登录是否已同步到本服务器。 */

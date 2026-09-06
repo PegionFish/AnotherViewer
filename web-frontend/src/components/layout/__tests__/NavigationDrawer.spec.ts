@@ -5,10 +5,10 @@ import type { NavItem } from '@/types/components'
 
 describe('NavigationDrawer', () => {
   describe('menu items', () => {
-    it('renders exactly the canonical 9 menu items in order', () => {
+    it('renders exactly the canonical 8 menu items in order', () => {
       const wrapper = mount(NavigationDrawer, { props: { open: true } })
       const items = wrapper.findAll('[data-testid="drawer-item"]')
-      expect(items).toHaveLength(9)
+      expect(items).toHaveLength(8)
       expect(items.map((i) => i.text())).toEqual([
         '首页',
         '订阅',
@@ -18,7 +18,6 @@ describe('NavigationDrawer', () => {
         '历史',
         '下载',
         '设置',
-        '管理面板',
       ])
     })
 
@@ -32,14 +31,21 @@ describe('NavigationDrawer', () => {
         'history',
         'downloads',
         'settings',
-        'admin',
       ])
+    })
+
+    it('retired the web-only admin entry (A5-2: merged into /settings)', () => {
+      expect(DEFAULT_NAV_ITEMS.some((i) => i.id === 'admin')).toBe(false)
+      const wrapper = mount(NavigationDrawer, { props: { open: true } })
+      expect(wrapper.text()).not.toContain('管理面板')
+      // The web-only divider above the admin entry is gone too.
+      expect(wrapper.find('[role="separator"]').exists()).toBe(false)
     })
 
     it('renders an icon for every item', () => {
       const wrapper = mount(NavigationDrawer, { props: { open: true } })
       const icons = wrapper.findAll('[data-testid="drawer-item"] .app-icon')
-      expect(icons).toHaveLength(9)
+      expect(icons).toHaveLength(8)
     })
 
     it('renders menu items as real `<a>` links with the target path as href (B2)', () => {

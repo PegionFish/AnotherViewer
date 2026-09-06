@@ -35,12 +35,11 @@
         </div>
       </slot>
 
-      <!-- Menu: 9-item single-select group (nav_drawer_main.xml + admin). -->
+      <!-- Menu: 8-item single-select group (nav_drawer_main.xml).
+           A5-2: the web-only admin entry (and its divider) is retired —
+           admin merged into /settings (统一设置面板). -->
       <nav class="navigation-drawer__menu" role="menu" aria-label="菜单">
         <template v-for="item in items" :key="item.id">
-          <!-- Web-only admin entry is visually separated from the Android
-               mirror items by a divider. -->
-          <div v-if="item.id === 'admin'" class="navigation-drawer__divider" role="separator" />
           <slot name="item" :item="item" :active="item.id === activeId">
             <!-- B2 link semantics: a real `<a href>` (target path per
                  NAV_TARGET_PATHS) so middle-click / Ctrl+click / the new-tab
@@ -113,8 +112,8 @@ import type { NavItem } from '@/types/components'
  * `res/menu/nav_drawer_main.xml` (homepage / subscription / whats_hot /
  * top_lists / favourite / history / downloads / settings), Chinese labels
  * per the CN fork's strings, icons from the converted VectorDrawable
- * registry (`v_*_black_x24.svg`). A 9th web-only entry (admin panel) is
- * appended after settings.
+ * registry (`v_*_black_x24.svg`). A5-2: the former 9th web-only entry
+ * (admin panel) was retired — admin lives in the unified /settings panel.
  */
 export const DEFAULT_NAV_ITEMS: NavItem[] = [
   { id: 'homepage', label: '首页', icon: 'homepage-black' },
@@ -125,7 +124,6 @@ export const DEFAULT_NAV_ITEMS: NavItem[] = [
   { id: 'history', label: '历史', icon: 'history-black' },
   { id: 'downloads', label: '下载', icon: 'download-black' },
   { id: 'settings', label: '设置', icon: 'settings-black' },
-  { id: 'admin', label: '管理面板', icon: 'settings-dark' },
 ]
 
 /**
@@ -144,7 +142,6 @@ export const NAV_TARGET_PATHS: Readonly<Record<string, string>> = {
   history: '/history',
   downloads: '/downloads',
   settings: '/settings',
-  admin: '/admin',
 }
 </script>
 
@@ -153,7 +150,7 @@ export const NAV_TARGET_PATHS: Readonly<Record<string, string>> = {
  * NavigationDrawer — web replica of the Android DrawerLayout
  * (roadmap §导航结构): 280px panel with a 160px header (sadpanda low-poly
  * background placeholder, 64px circular avatar, 14px white username), the
- * 9-item single-select menu group, and a footer with the LimitsCountView
+ * 8-item single-select menu group, and a footer with the LimitsCountView
  * quota replica + theme toggle.
  *
  * Responsive behavior: modal overlay with scrim on narrow viewports;
@@ -420,13 +417,6 @@ function onThemeToggle(): void {
 
 .navigation-drawer__item.is-active .navigation-drawer__item-icon {
   color: var(--color-primary);
-}
-
-/* Divider above the web-only admin entry. */
-.navigation-drawer__divider {
-  height: 1px;
-  margin: var(--spacing) var(--keyline-margin);
-  background: var(--color-divider);
 }
 
 /* ---------------------------------- footer ------------------------------ */

@@ -97,13 +97,13 @@ const routeToNav: Record<string, string> = {
   '/history': 'history',
   '/downloads': 'downloads',
   '/settings': 'settings',
-  '/admin': 'admin',
   '/search': 'homepage',
 }
 
+// A5-2: /admin 子树并入 /settings —— startsWith('/settings') 已覆盖
+// /settings/server/*（原 /admin 十页），旧 /admin 由路由表 redirect 兜底。
 const activeNavId = computed(() => {
   if (route.path.startsWith('/settings')) return 'settings'
-  if (route.path.startsWith('/admin')) return 'admin'
   return routeToNav[route.path] ?? null
 })
 
