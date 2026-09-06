@@ -620,3 +620,43 @@ describe('useWebSocket — mock Client：构造配置接线与过期会话帧守
     expect(received).toEqual([{ value: 1 }])
   })
 })
+
+describe('useWebSocket — SockJS 端点由 wsUrl() 派生', () => {
+  it('同源锚点：localStorage 无 server-base 时 SockJS 构造入参为相对路径 /ws', async () => {
+    expect(localStorage.getItem('server-base')).toBeNull()
+    const ws = await loadWs(true)
+    ws.connect()
+
+    expect(MockClient.instances).toHaveLength(1)
+    const factory = MockClient.instances[0].opts.webSocketFactory
+    expect(typeof factory).toBe('function')
+    const socket = (factory as () => FakeSockJS)()
+    expect(socket).toBeInstanceOf(FakeSockJS)
+    expect(socket.url).toBe('/ws')
+  })
+
+  it('远程模式：server-base 存在时 SockJS 构造入参为 http(s) 绝对 URL（/ws 后缀），绝不出现 ws://', async () => {
+    localStorage.setItem('server-base', 'http://x:1')
+    try {
+      const ws = await loadWs(true)
+      ws.connect()
+
+      expect(MockClient.instances).toHaveLength(1)
+      const factory = MockClient.instances[0].opts.webSocketFactory as () => FakeSockJS
+
+      const socketHttp = factory()
+      expect(socketHttp).toBeInstanceOf(FakeSockJS)
+      expect(socketHttp.url).toBe('http://x:1/ws')
+      expect(socketHttp.url).not.toContain('ws://')
+
+      // https 基址同样原样拼接，不被改写成 ws://。
+      localStorage.setItem('server-base', 'https://y:2')
+      const socketHttps = factory()
+      expect(socketHttps.url).toBe('https://y:2/ws')
+      expect(socketHttps.url).not.toContain('ws://')
+    } finally {
+      // 防串扰双保险：beforeEach/afterEach 均已 localStorage.clear()。
+      localStorage.removeItem('server-base')
+    }
+  })
+})

@@ -54,6 +54,7 @@ import { Client, ReconnectionTimeMode } from '@stomp/stompjs'
 import type { IMessage, StompSubscription } from '@stomp/stompjs'
 import SockJS from 'sockjs-client/dist/sockjs'
 import type { JobType } from '@/api/jobs'
+import { wsUrl } from '@/stores/server'
 
 /* ------------------------------------------------------------------ */
 /* Wire types (contracts/websocket-protocol.md)                        */
@@ -182,8 +183,6 @@ export function isJobEventType(type: string): type is JobEventType {
 /* Constants                                                           */
 /* ------------------------------------------------------------------ */
 
-/** SockJS endpoint — relative path, no hardcoded host (proxied to the server). */
-const WS_ENDPOINT = '/ws'
 /** localStorage key holding the bearer token (see `stores/auth.ts`). */
 const TOKEN_STORAGE_KEY = 'token'
 /** Backoff initial delay (contract §1.5). */
@@ -410,7 +409,7 @@ function ensureClient(): Client {
   if (client) return client
 
   client = new Client({
-    webSocketFactory: () => new SockJS(WS_ENDPOINT),
+    webSocketFactory: () => new SockJS(wsUrl()),
     // Exponential backoff: 1s → 2s → 4s → 8s … capped at 30s; the library
     // resets to the initial delay on every successful connect (contract §1.5).
     reconnectDelay: INITIAL_RECONNECT_DELAY_MS,
