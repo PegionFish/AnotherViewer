@@ -1,13 +1,15 @@
 <!--
-  AdminServer.vue — 管理面板「服务器」页（Wave 6）.
+  AdminServer.vue — 管理面板「缓存与存储」页（Wave 6；2026-09-07 自
+  「服务器」改名，F6——页面内容即缓存 + SMB 存储入口）.
 
   复用 AdminLayout 内容区（本组件渲染在其 <router-view /> 内）与 settings 页
   的偏好分组样式（.pref-group / .pref-card / .pref / .switch），并沿用其
   服务端设置持久化模式（PUT /settings）：
 
     - 缓存路径 / 缓存大小 → settingsApi.update({ cache: { ... } })；
-    - SMB 备份开关 → settingsApi.update({ smb: { enabled } })，
-      开启后展示「前往备份页面」链接（/smb-backup）；
+    - SMB 备份 → 只读状态行：真实开关是 SmbBackupView 写的
+      GET/PUT /smb/config 的 enabled；PUT /settings {smb.enabled} 写的
+      config.smb.enabled 无任何消费方（F2），本页不再读写该字段；
     - 缓存统计 → imageApi.getCacheStatus()（缓存条目数）；
     - 清除缓存 → imageApi.clearCacheAsync()：202 提交 CACHE_CLEAR Job，
       WS 进度（JobProgressPanel「清缓存」）+ jobsApi 轮询兜底，完成后刷新统计。
@@ -18,9 +20,10 @@
   <div class="server">
     <div class="server__column">
       <header class="server__header">
-        <h1 class="server__title">服务器</h1>
-        <span v-if="server" class="server__status" role="status">
-          {{ server.smb.enabled ? 'SMB 备份已开启' : 'SMB 备份已关闭' }}
+        <h1 class="server__title">缓存与存储</h1>
+        <!-- 加载中/读取失败不显示（同一 smbEnabled 来源，null=未知）。 -->
+        <span v-if="smbEnabled !== null" class="server__status" role="status">
+          {{ smbEnabled ? 'SMB 备份已开启' : 'SMB 备份已关闭' }}
         </span>
       </header>
 
@@ -73,25 +76,13 @@
       <section>
         <SectionHeader title="SMB 备份" />
         <PrefCard>
-          <PrefRow
-            icon="history-black"
-            title="SMB 备份"
-            :summary="server?.smb.enabled ? '已开启，备份到 SMB 共享' : '已关闭'"
-          >
-            <AppSwitch
-              :model-value="server?.smb.enabled ?? false"
-              aria-label="SMB 备份"
-              :disabled="!server"
-              @update:model-value="toggleSmb"
-            />
+          <!-- 只读状态行（F2）：真实开关在「备份」页，此处不提供控件。 -->
+          <PrefRow icon="history-black" title="SMB 备份" :summary="smbSummary" />
+          <PrefRow icon="go-to-dark" title="前往备份页面" summary="配置连接与启停，并手动触发同步">
+            <router-link to="/smb-backup" class="server__link" aria-label="前往备份页面">
+              <AppIcon name="go-to-dark" size="20px" />
+            </router-link>
           </PrefRow>
-          <template v-if="server?.smb.enabled">
-            <PrefRow icon="go-to-dark" title="前往备份页面" summary="配置连接并手动触发同步">
-              <router-link to="/smb-backup" class="server__link" aria-label="前往备份页面">
-                <AppIcon name="go-to-dark" size="20px" />
-              </router-link>
-            </PrefRow>
-          </template>
         </PrefCard>
       </section>
     </div>
@@ -108,18 +99,30 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import type { Settings } from '@/api/settings'
 import { settingsApi } from '@/api/settings'
 import { imageApi } from '@/api/image'
+import { smbApi } from '@/api/smb'
 import { jobsApi, type Job, type JobType } from '@/api/jobs'
 import JobProgressPanel from '@/components/jobs/JobProgressPanel.vue'
 import { useWebSocket } from '@/composables/useWebSocket'
 import type { JobWsEnvelope } from '@/composables/useWebSocket'
 import axios from 'axios'
 import AppIcon from '@/components/atoms/AppIcon.vue'
-import { AppSwitch, AppTextField, PrefCard, PrefRow, SectionHeader } from '@/components/form'
+import { AppTextField, PrefCard, PrefRow, SectionHeader } from '@/components/form'
 
 const server = ref<Settings | null>(null)
 const pathDraft = ref('')
 const sizeDraft = ref<number | null>(null)
 const cacheSize = ref<number | null>(null)
+
+/**
+ * SMB 真实开关（GET /smb/config 激活连接的 enabled）；null=加载中/失败。
+ * 未配置任何连接（后端返回 null body）按「停用」展示。
+ */
+const smbEnabled = ref<boolean | null>(null)
+
+const smbSummary = computed(() => {
+  if (smbEnabled.value === null) return '状态未知'
+  return smbEnabled.value ? '已启用，备份到 SMB 共享' : '已停用（到备份页配置）'
+})
 
 const snack = ref('')
 let snackTimer: number | undefined
@@ -363,20 +366,6 @@ async function clearCache(): Promise<void> {
 
 /* ------------------------------- SMB 备份 -------------------------------- */
 
-async function toggleSmb(): Promise<void> {
-  if (!server.value) return
-  const next = !server.value.smb.enabled
-  server.value.smb.enabled = next
-  try {
-    await settingsApi.update({ smb: { enabled: next } })
-    showSnack(next ? 'SMB 备份已开启' : 'SMB 备份已关闭')
-  } catch (error) {
-    server.value.smb.enabled = !next
-    console.error('[AdminServer] failed to save SMB settings', error)
-    showSnack('无法在服务器上保存 SMB 备份设置')
-  }
-}
-
 /* ---------------------------------- boot ---------------------------------- */
 
 onMounted(async () => {
@@ -390,6 +379,16 @@ onMounted(async () => {
   }
   void refreshCacheSize()
   await recoverJob('CACHE_CLEAR', onClearCompleted, onClearFailed)
+  // 只读状态（GET /smb/config）：静默降级——本页主功能是缓存，读失败保持
+  // 「状态未知」即可，不弹 snackbar。
+  smbApi
+    .getConfig()
+    .then((config) => {
+      smbEnabled.value = config?.enabled ?? false
+    })
+    .catch((error) => {
+      console.error('[AdminServer] failed to load SMB config', error)
+    })
 })
 </script>
 

@@ -240,6 +240,7 @@ import type { FavoriteItem } from '@/api/favorite'
 import { useFilterSlots } from '@/composables/useFilterSlots'
 import { usePagedList } from '@/composables/usePagedList'
 import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import {
   CATEGORY_BIT_VALUES,
@@ -494,9 +495,14 @@ function displayTitle(item: FavoriteItem): string {
   return maskedTitle(item.title || item.titleJpn || `#${item.gid}`, item.gid)
 }
 
-/** 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）。 */
+/**
+ * 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）；
+ * showJpnTitle 加载后为 false 也隐藏（协议默认 false，prefs 未加载按显示
+ * 渲染防闪失——T2 定案，判定收敛在 utils/jpnSubtitle）。
+ */
 function displaySubtitle(item: FavoriteItem): string | null {
-  return !privacyMaskEnabled.value && item.titleJpn ? item.titleJpn : null
+  if (privacyMaskEnabled.value || !item.titleJpn) return null
+  return isJpnSubtitleVisible(preferencesStore.prefs?.general) ? item.titleJpn : null
 }
 
 /** Numeric category bit → `GalleryCategory` key (undefined when unknown). */

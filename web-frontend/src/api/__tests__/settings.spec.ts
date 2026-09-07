@@ -15,7 +15,6 @@ function settingsFixture(): Settings {
   return {
     download: {
       path: '/data/downloads',
-      workerCount: 3,
       downloadDelay: 0,
       downloadTimeout: 30,
       maxConcurrentGalleries: 1,

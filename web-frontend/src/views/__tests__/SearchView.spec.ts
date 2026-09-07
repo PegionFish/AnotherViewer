@@ -619,15 +619,34 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
 
     it('renders one shared AppListRow per result (A4 — legacy card rows are gone)', async () => {
       mockResults([galleryFixture(), galleryFixture({ gid: 2 })])
+      // T2：showJpnTitle 是副题的偏好开关（fixture 默认 false）——要看到副题需显式开。
+      vi.mocked(preferencesApi.get).mockResolvedValue(prefsFixture({ showJpnTitle: true }))
       await mountView()
 
       expect(wrapper.findAll('.app-list-row')).toHaveLength(2)
-      // 打码关闭 → 标题原文，副题 = 日文标题。
+      // 打码关闭 + showJpnTitle=true → 标题原文，副题 = 日文标题。
       expect(wrapper.find('.app-list-row__title').text()).toBe('Test Gallery')
       expect(wrapper.find('.app-list-row__subtitle').text()).toBe('テストギャラリー')
       // meta 行：页数 + 评分星。
       expect(wrapper.find('.search-item__pages').text()).toBe('20P')
       expect(wrapper.find('.app-list-row__meta').exists()).toBe(true)
+    })
+
+    it('hides the jpn subtitle when loaded prefs keep showJpnTitle=false (T2 — protocol default)', async () => {
+      mockResults([galleryFixture()])
+      // beforeEach 默认 prefsFixture()：showJpnTitle: false → 副题不渲染。
+      await mountView()
+
+      expect(wrapper.find('.app-list-row__title').text()).toBe('Test Gallery')
+      expect(wrapper.find('.app-list-row__subtitle').exists()).toBe(false)
+    })
+
+    it('shows the jpn subtitle while prefs are still loading (anti-flash fallback, T2)', async () => {
+      mockResults([galleryFixture()])
+      vi.mocked(preferencesApi.get).mockReturnValue(new Promise(() => {})) // never settles
+      await mountView()
+
+      expect(wrapper.find('.app-list-row__subtitle').text()).toBe('テストギャラリー')
     })
 
     it('routes the row title through maskedTitle (mask on → #gid, no leaks)', async () => {

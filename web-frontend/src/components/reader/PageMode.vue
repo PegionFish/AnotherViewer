@@ -130,18 +130,22 @@ export const PAGE_MODE_PREFS: readonly PageModePref[] = ['auto', 'single', 'dual
 export const AUTO_PLAY_INTERVALS_MS: readonly number[] = [2000, 3000, 5000, 8000]
 
 /* ------------------------------------------------------------------------ */
-/* Unified zoom semantics (plan-2026-09-05 A7)                               */
+/* Unified zoom semantics (plan-2026-09-05 A7 + 偏好接线批次)                 */
 /*                                                                           */
 /* The settings sheet, keyboard +/-, double-tap/click and pinch all move in  */
-/* the same units: 0.25 steps within [0.5, 3]; the double-tap cycle is       */
-/* 1 → 1.5 → 2 → 1; pinch never shrinks below fit (clamped to [1, 3]).       */
+/* the same units: additive steps (default 0.25) within [0.5, maxZoom pref]; */
+/* the double-tap cycle is 1 → 1.5 → 2 → 1; pinch never shrinks below fit    */
+/* (clamped to [1, maxZoom pref]). READER_ZOOM_MAX / READER_ZOOM_STEP are    */
+/* now the DEFAULTS / upper-bound reference — the live values come from the  */
+/* reader.maxZoom / reader.zoomStep preferences (consumers clamp to ≥1 /     */
+/* [0.05, 1] respectively).                                                  */
 /* ------------------------------------------------------------------------ */
 
 /** Lowest zoom — reachable via the settings sheet / keyboard (shrink page). */
 export const READER_ZOOM_MIN = 0.5
-/** Highest zoom — every channel clamps here. */
+/** 最高缩放的默认值/上限参考——生效值 = reader.maxZoom 偏好钳 [1, 本常量]。 */
 export const READER_ZOOM_MAX = 3
-/** Unified step for keyboard +/- and the settings sheet buttons. */
+/** 键盘/快捷面板 ± 的默认步长（加法倍率）——生效值 = reader.zoomStep 钳 [0.05, 1]。 */
 export const READER_ZOOM_STEP = 0.25
 /** Double-tap / double-click cycle: fit → 150% → 200% → fit. */
 export const READER_DOUBLE_TAP_STEPS: readonly number[] = [1, 1.5, 2]
@@ -170,15 +174,21 @@ export function pageImageSrcset(gid: number, page: number, cssWidth: number): st
 
 /**
  * Spread (dual-page) index containing a 0-based page.
- * Page 0 (cover) is spread 0 and displayed alone; pages (1,2) → spread 1,
- * (3,4) → spread 2, … matching "pairs (2,3), (4,5)" in 1-based terms.
+ * firstPageCover=true（默认，现行为）: page 0 (cover) is spread 0 and displayed
+ * alone; pages (1,2) → spread 1, (3,4) → spread 2, … matching "pairs (2,3),
+ * (4,5)" in 1-based terms.
+ * firstPageCover=false: the cover pairs with page 1 — spreads (0,1), (2,3), …
+ * （两参版本供 ReaderView 翻页与 DualPageMode 铺摊共用，保证导航与渲染
+ * 使用同一套换算，progress/页码语义不受影响。）
  */
-export function spreadIndexOf(page: number): number {
+export function spreadIndexOf(page: number, firstPageCover = true): number {
+  if (!firstPageCover) return Math.floor(Math.max(page, 0) / 2)
   return page <= 0 ? 0 : Math.floor((page - 1) / 2) + 1
 }
 
 /** First (reading-order) 0-based page of a spread index. */
-export function firstPageOfSpread(spread: number): number {
+export function firstPageOfSpread(spread: number, firstPageCover = true): number {
+  if (!firstPageCover) return Math.max(spread, 0) * 2
   return spread <= 0 ? 0 : 2 * spread - 1
 }
 
@@ -341,7 +351,13 @@ const props = withDefaults(defineProps<PageModeProps>(), {
 const emit = defineEmits<PageModeEmits>()
 
 const ZOOM_MIN = READER_PINCH_ZOOM_MIN
-const ZOOM_MAX = READER_ZOOM_MAX
+/** 生效最大缩放：reader.maxZoom 偏好钳 [1, READER_ZOOM_MAX]（活消费）。 */
+const zoomMax = computed(() => {
+  const raw = preferencesStore.prefs?.reader.maxZoom
+  return typeof raw === 'number' && Number.isFinite(raw)
+    ? Math.min(READER_ZOOM_MAX, Math.max(1, raw))
+    : READER_ZOOM_MAX
+})
 /** Auto-retry budget for transient image failures before the error page. */
 const MAX_AUTO_RETRIES = 3
 
@@ -445,10 +461,11 @@ watch(
     hasLoaded.value = false
     retryAttempts.value = 0
     retryDelayMs.value = 0
-    // 每页从中性位置开始：翻页会显式清零平移（fit 下 zoom 复位顺带清零，
-    // 非 fit 缩放跨页保持 zoom=1，同样从中性位置起读）。
+    // 每页从中性位置开始：翻页会显式清零平移并复位锚点状态（fit 下 zoom
+    // 复位顺带清零，非 fit 缩放跨页保持 zoom=1，同样从中性位置起读）。
     panX.value = 0
     panY.value = 0
+    userPanned.value = false
     if (retryTimer) clearTimeout(retryTimer)
     retryTimer = undefined
   },
@@ -458,6 +475,8 @@ function onImageLoad() {
   loaded.value = true
   hasLoaded.value = true
   clampPan()
+  // 溢出时（放大 / 非 fit 布局）按偏好锚角就位；用户已手动平移则不打扰。
+  if (!userPanned.value) applyStartAnchor()
 }
 
 function onImageError() {
@@ -528,12 +547,57 @@ watch(
 /* ------------------------------------------------------------------ */
 
 function clampZoom(value: number): number {
-  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, value))
+  return Math.min(zoomMax.value, Math.max(ZOOM_MIN, value))
 }
 
 function cycleZoom() {
   const next = READER_DOUBLE_TAP_STEPS.find((step) => step > props.zoom + 0.01) ?? 1
-  emit('update:zoom', next)
+  // 循环档位 [1,1.5,2] 不变，但非 1 终点受生效上限钳制（maxZoom 偏好）。
+  emit('update:zoom', next > 1 ? Math.min(next, zoomMax.value) : 1)
+}
+
+/* ------------------------------------------------------------------ */
+/* startPosition 偏好——App 语义平移：页面溢出视口时的初始对齐角          */
+/*                                                                    */
+/* App 端 startPosition 不是「起始页」而是 ImageView.setScaleOffset 的  */
+/* 锚角（ImageView.java:426-447：TOP_RIGHT → dst.left = screenWidth -  */
+/* targetWidth，即图片超出屏幕时先露出哪个角；PagerLayoutManager 对每   */
+/* 一页 setScaleOffset 应用它）。Web 在 zoom=1 + fit 下图片不溢出，故   */
+/* 只在放大/溢出时把未手动平移过的页面锚到偏好角；不参与起始页解析      */
+/* （resolveStartPage 的深链 > 阅读进度优先级不受影响）。               */
+/* ------------------------------------------------------------------ */
+
+type StartAnchor = 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | 'center'
+
+const startAnchor = computed<StartAnchor>(() => {
+  // 存量后端值是 snake_case（top_right），与设置页 normalizeStartPosition 同规则归一。
+  const raw = (preferencesStore.prefs?.reader.startPosition ?? '').replace(/_/g, '-').toLowerCase()
+  switch (raw) {
+    case 'top-left':
+    case 'top-right':
+    case 'bottom-left':
+    case 'bottom-right':
+    case 'center':
+      return raw
+    default:
+      // App ImageView 默认 START_POSITION_TOP_RIGHT（ImageView.java:60/94）。
+      return 'top-right'
+  }
+})
+
+/** 本页内用户已手动平移/捏合过——此后锚点不再自动回拉，直到翻页重置。 */
+const userPanned = ref(false)
+
+/** 把溢出量代入偏好锚角：translate(+max) 露出图左/上，−max 露出右/下。 */
+function applyStartAnchor() {
+  const img = imgRef.value
+  const stage = stageRef.value
+  if (!img || !stage) return
+  const maxX = Math.max(0, (img.clientWidth * props.zoom - stage.clientWidth) / 2)
+  const maxY = Math.max(0, (img.clientHeight * props.zoom - stage.clientHeight) / 2)
+  const anchor = startAnchor.value
+  panX.value = anchor.includes('left') ? maxX : anchor.includes('right') ? -maxX : 0
+  panY.value = anchor.startsWith('top') ? maxY : anchor.startsWith('bottom') ? -maxY : 0
 }
 
 const imgTransform = computed(() => ({
@@ -554,10 +618,13 @@ function clampPan() {
 watch(
   () => props.zoom,
   () => {
-    // 仅在完全无平移必要时归零（未放大）；放大状态下夹紧偏移。
+    // 仅在完全无平移必要时归零（未放大）；放大且用户未手动平移时按偏好
+    // 锚角定位（App setScaleOffset 每次缩放都重摆锚点），动过则只夹紧。
     if (!pannable.value) {
       panX.value = 0
       panY.value = 0
+    } else if (!userPanned.value) {
+      applyStartAnchor()
     } else {
       clampPan()
     }
@@ -603,6 +670,8 @@ function onTouchStart(event: TouchEvent) {
 function onTouchMove(event: TouchEvent) {
   if (pinchStartDist > 0 && event.touches.length === 2) {
     const scale = touchDistance(event) / pinchStartDist
+    // 捏合视为手动调整——此后锚点不再自动回拉（与本页拖拽同权）。
+    userPanned.value = true
     emit('update:zoom', clampZoom(pinchStartZoom * scale))
     gestures.suppressTaps()
   }
@@ -643,6 +712,8 @@ let panLastY = 0
 
 function onPointerDown(event: PointerEvent) {
   if (!pannable.value || pinchStartDist > 0) return
+  // 进入拖拽平移即视为手动定位——锚点不再自动回拉。
+  userPanned.value = true
   panPointerId = event.pointerId
   panLastX = event.clientX
   panLastY = event.clientY

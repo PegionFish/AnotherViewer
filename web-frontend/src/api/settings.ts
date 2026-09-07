@@ -2,7 +2,6 @@ import client from './client'
 
 export interface DownloadSettings {
   path: string
-  workerCount: number
   downloadDelay: number
   downloadTimeout: number
   maxConcurrentGalleries: number

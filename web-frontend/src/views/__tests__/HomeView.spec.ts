@@ -193,6 +193,8 @@ describe('HomeView (首页)', () => {
   /* ---------------- A4 单列密信息行（AppListRow，瀑布流出局） ---------------- */
 
   it('renders gallery rows as single-column AppListRow rows (A4 — no grid/waterfall)', async () => {
+    // T2：showJpnTitle 是副题的偏好开关（协议默认 false）——要看到副题需显式开。
+    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({ showJpnTitle: true }))
     await mountHome([
       gallery({ gid: 1, title: 'Gallery One', titleJpn: '日本語一', pages: 10, category: 2 }),
       gallery({ gid: 2, title: 'Gallery Two', titleJpn: '', pages: 0, category: 2 }),
@@ -201,7 +203,7 @@ describe('HomeView (首页)', () => {
     const rows = wrapper.findAll('.app-list-row')
     expect(rows).toHaveLength(2)
     expect(rows[0].find('.app-list-row__title').text()).toBe('Gallery One')
-    // 日文标题作为副题（打码关闭时）。
+    // 日文标题作为副题（打码关闭 + showJpnTitle=true）。
     expect(rows[0].find('.app-list-row__subtitle').text()).toBe('日本語一')
     // 元信息行：分类 chip + 页数（pages ≤ 0 不渲染页数角标）。
     expect(rows[0].find('.app-list-row__meta .category-chip').exists()).toBe(true)
@@ -221,6 +223,18 @@ describe('HomeView (首页)', () => {
     expect(row.find('.app-list-row__title').text()).toBe('#7')
     // 打码开启时日文副题一并隐藏（同 GalleryCard 的 !privacyMaskEnabled 守卫）。
     expect(row.find('.app-list-row__subtitle').exists()).toBe(false)
+  })
+
+  it('hides the jpn subtitle once prefs load without showJpnTitle=true (T2 — protocol default false)', async () => {
+    // beforeEach 默认 makePrefs({})：加载完成、无该键 → 与协议默认 false 同判（隐藏）。
+    await mountHome([gallery({ gid: 1, title: 'Gallery One', titleJpn: '日本語一' })])
+    expect(wrapper.find('.app-list-row__subtitle').exists()).toBe(false)
+  })
+
+  it('shows the jpn subtitle while prefs are still loading (anti-flash fallback, T2)', async () => {
+    vi.mocked(preferencesApi.get).mockReturnValue(new Promise(() => {})) // never settles
+    await mountHome([gallery({ gid: 1, title: 'Gallery One', titleJpn: '日本語一' })])
+    expect(wrapper.find('.app-list-row__subtitle').text()).toBe('日本語一')
   })
 
   it('opens the gallery detail from the thumbnail click zone (A4)', async () => {

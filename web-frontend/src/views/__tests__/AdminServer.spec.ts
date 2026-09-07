@@ -3,6 +3,7 @@ import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
 import AdminServer from '../admin/AdminServer.vue'
 import { settingsApi, type Settings } from '@/api/settings'
 import { imageApi } from '@/api/image'
+import { smbApi, type SmbConfig } from '@/api/smb'
 import { jobsApi, type Job, type JobType } from '@/api/jobs'
 import type { JobWsEnvelope } from '@/composables/useWebSocket'
 import { AppSwitch, AppTextField, PrefRow, SectionHeader } from '@/components/form'
@@ -13,6 +14,10 @@ vi.mock('@/api/settings', () => ({
 
 vi.mock('@/api/image', () => ({
   imageApi: { getCacheStatus: vi.fn(), clearCacheAsync: vi.fn() },
+}))
+
+vi.mock('@/api/smb', () => ({
+  smbApi: { getConfig: vi.fn() },
 }))
 
 vi.mock('@/api/jobs', () => ({
@@ -51,7 +56,6 @@ function fullSettings(): Settings {
   return {
     download: {
       path: '/data',
-      workerCount: 4,
       downloadDelay: 1000,
       downloadTimeout: 30000,
       maxConcurrentGalleries: 2,
@@ -65,13 +69,20 @@ function fullSettings(): Settings {
   }
 }
 
-describe('AdminServer (服务器)', () => {
+/** F2：真实开关在 /smb/config（SmbConfigResponse.enabled）；本页只读展示。 */
+function smbConfig(enabled: boolean): SmbConfig {
+  return { id: 1, host: 'nas', port: 445, share: 'backup', path: null, loginMode: 'GUEST', username: null, enabled }
+}
+
+describe('AdminServer (缓存与存储)', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
     vi.mocked(settingsApi.get).mockResolvedValue(fullSettings())
     vi.mocked(settingsApi.update).mockResolvedValue(true)
     vi.mocked(imageApi.getCacheStatus).mockResolvedValue({ cacheSize: 5 })
+    // 缺省：无已配置连接（后端返回 null body）→ 按「已停用」展示。
+    vi.mocked(smbApi.getConfig).mockResolvedValue(null)
     vi.mocked(jobsApi.getActiveJob).mockRejectedValue(new Error('404'))
     vi.mocked(jobsApi.getJob).mockRejectedValue(new Error('404'))
     ws.subscribeJob.mockClear()
@@ -96,23 +107,22 @@ describe('AdminServer (服务器)', () => {
     return ws.subscribeJob.mock.calls[0]![1] as unknown as (event: JobWsEnvelope) => void
   }
 
-  it('renders shared primitives with AppTextField and AppSwitch', async () => {
+  it('renders shared primitives with AppTextField and no SMB switch', async () => {
     const w = await mountView()
+    expect(w.find('.server__title').text()).toBe('缓存与存储')
     expect(w.findAllComponents(SectionHeader).map((h) => h.props('title'))).toEqual(['缓存', 'SMB 备份'])
     const titles = w.findAllComponents(PrefRow).map((r) => r.props('title'))
-    expect(titles).toEqual(['缓存路径', '缓存大小 (MB)', '缓存统计', '清除缓存', 'SMB 备份'])
+    // F2：SMB 开关行改为只读状态行；「前往备份页面」常驻。
+    expect(titles).toEqual(['缓存路径', '缓存大小 (MB)', '缓存统计', '清除缓存', 'SMB 备份', '前往备份页面'])
     expect(w.find('select').exists()).toBe(false)
     expect(w.find('.switch').exists()).toBe(false)
+    // 本页不再有任何开关（真实 SMB 开关在「备份」页）。
+    expect(w.findComponent(AppSwitch).exists()).toBe(false)
 
     const fields = w.findAllComponents(AppTextField)
     expect(fields.length).toBe(2)
     expect(fields.map((f) => f.props('ariaLabel'))).toEqual(['缓存路径', '缓存大小'])
     expect(fields[1].props('type')).toBe('number')
-
-    const sw = w.findComponent(AppSwitch)
-    expect(sw.exists()).toBe(true)
-    expect(sw.attributes('aria-label')).toBe('SMB 备份')
-    expect(sw.attributes('aria-checked')).toBe('false')
   })
 
   it('persists the cache path after typing pauses', async () => {
@@ -137,14 +147,31 @@ describe('AdminServer (服务器)', () => {
     )
   })
 
-  it('toggles SMB backup and reveals the backup page link', async () => {
+  it('shows the real SMB enabled state read from GET /smb/config', async () => {
+    vi.mocked(smbApi.getConfig).mockResolvedValue(smbConfig(true))
     const w = await mountView()
-    const sw = w.findComponent(AppSwitch)
-    await sw.trigger('click')
-    await flushPromises()
-    expect(settingsApi.update).toHaveBeenCalledWith(expect.objectContaining({ smb: { enabled: true } }))
-    expect(w.text()).toContain('前往备份页面')
+    expect(smbApi.getConfig).toHaveBeenCalledWith()
+    expect(w.text()).toContain('已启用，备份到 SMB 共享')
+    expect(w.text()).toContain('SMB 备份已开启')
     expect(w.find('.server__link').exists()).toBe(true)
+    // F2：settings 的 smb 字段（config.smb.enabled）无消费方，不再写入。
+    expect(settingsApi.update).not.toHaveBeenCalledWith(expect.objectContaining({ smb: expect.anything() }))
+  })
+
+  it('shows the disabled state when no SMB config exists', async () => {
+    const w = await mountView()
+    expect(w.text()).toContain('已停用（到备份页配置）')
+    expect(w.text()).toContain('SMB 备份已关闭')
+    expect(w.find('.server__link').exists()).toBe(true)
+  })
+
+  it('degrades silently to an unknown state when the SMB config request fails', async () => {
+    vi.mocked(smbApi.getConfig).mockRejectedValue(new Error('offline'))
+    const w = await mountView()
+    expect(w.text()).toContain('状态未知')
+    // 页头状态徽标在未知态不渲染，也不打扰用户（本页主功能是缓存）。
+    expect(w.find('.server__status').exists()).toBe(false)
+    expect(w.text()).not.toContain('SMB 备份已')
   })
 
   it('loads and renders the cache size on mount', async () => {

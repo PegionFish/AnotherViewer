@@ -7,6 +7,7 @@ type BarProps = {
   currentPage: number
   totalPages: number
   visible: boolean
+  showProgress?: boolean
 }
 
 function factory(props: Partial<BarProps> = {}) {
@@ -146,6 +147,21 @@ describe('ReaderStatusBar', () => {
       expect(battery.exists()).toBe(true)
       expect(battery.find('svg').exists()).toBe(true)
       expect(battery.attributes('aria-label')).toBe('电量')
+    })
+  })
+
+  describe('showProgress（reader.showProgress 偏好接线）', () => {
+    it('默认显示进度行（现行为不变）', () => {
+      const wrapper = factory({ currentPage: 3, totalPages: 10 })
+      expect(progressOf(wrapper).exists()).toBe(true)
+      expect(progressOf(wrapper).text()).toBe('3/10')
+    })
+
+    it('false 时只隐藏进度行，时钟/电量保留', () => {
+      const wrapper = factory({ currentPage: 3, totalPages: 10, showProgress: false })
+      expect(progressOf(wrapper).exists()).toBe(false)
+      expect(wrapper.find('.reader-status-bar__clock').exists()).toBe(true)
+      expect(wrapper.find('.reader-status-bar__battery').exists()).toBe(true)
     })
   })
 })

@@ -48,9 +48,9 @@ export interface ReaderPreferences {
   tapZoneScheme: string
   /** Wave-1 A: 键盘翻页 */
   keyboardPaging: boolean
-  /** Wave-1 A: 缩放步进（>1） */
+  /** Wave-1 A: 加法缩放步进（倍率，0.05–1；键盘/面板每次 ± 的步长） */
   zoomStep: number
-  /** Wave-1 A: 最大缩放（≥1） */
+  /** Wave-1 A: 最大缩放（1–5，与阅读器捏合/双击的上限共用） */
   maxZoom: number
   /** Wave-1 A: 双页间距 px（≥0） */
   dualPageGap: number
@@ -109,13 +109,17 @@ export const DEFAULT_READER_PREFERENCES: ReaderPreferences = {
   autoPlayIntervalSec: 2,
   showProgress: true,
   showPageInterval: true,
-  fullscreen: true,
+  // false 才能维持既有行为（进入阅读器 chrome 可见）：消费侧是
+  // 「chromeVisible 初值 = !fullscreen」，默认 true 会让 chrome 一进就藏。
+  fullscreen: false,
   brightness: 0,
   backgroundColor: 'black',
   tapZoneScheme: 'threeZone',
   keyboardPaging: true,
-  zoomStep: 1.5,
-  maxZoom: 5,
+  // 加法步进语义（非乘法倍率）：与既有 READER_ZOOM_STEP 常量同值，存量行为不变。
+  zoomStep: 0.25,
+  // 与阅读器既有 READER_ZOOM_MAX 常量同值，存量行为不变。
+  maxZoom: 3,
   dualPageGap: 8,
   splitWidePages: false,
   preloadCount: 2,

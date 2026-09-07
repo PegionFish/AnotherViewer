@@ -288,6 +288,7 @@ import { isOfflineError, isEhUnavailableError } from '@/api/client'
 import { availability, loadAvailability, markDown } from '@/stores/availability'
 import { usePagedList } from '@/composables/usePagedList'
 import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
 import AvailabilityBanner from '@/components/common/AvailabilityBanner.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import CategoryChip from '@/components/atoms/CategoryChip.vue'
@@ -779,9 +780,14 @@ function displayTitle(gallery: GalleryInfo): string {
   return maskedTitle(gallery.title || gallery.titleJpn || `#${gallery.gid}`, gallery.gid)
 }
 
-/** 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）。 */
+/**
+ * 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）；
+ * showJpnTitle 加载后为 false 也隐藏（协议默认 false，prefs 未加载按显示
+ * 渲染防闪失——T2 定案，判定收敛在 utils/jpnSubtitle）。
+ */
 function displaySubtitle(gallery: GalleryInfo): string | null {
-  return !privacyMaskEnabled.value && gallery.titleJpn ? gallery.titleJpn : null
+  if (privacyMaskEnabled.value || !gallery.titleJpn) return null
+  return isJpnSubtitleVisible(preferencesStore.prefs?.general) ? gallery.titleJpn : null
 }
 
 /* -------------------------------- category ------------------------------ */

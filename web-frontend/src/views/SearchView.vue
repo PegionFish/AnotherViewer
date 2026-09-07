@@ -348,6 +348,7 @@ import { useThemeStore } from '@/stores/theme'
 import { usePreferencesStore } from '@/stores/preferences'
 import { usePagedList } from '@/composables/usePagedList'
 import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
 import NavigationDrawer, { DEFAULT_NAV_ITEMS } from '@/components/layout/NavigationDrawer.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
@@ -699,10 +700,16 @@ function displayTitle(gallery: GalleryInfo): string {
   return maskedTitle(gallery.title || gallery.titleJpn || 'Untitled', gallery.gid)
 }
 
-/** 副题（日文标题）：打码开启时隐藏（GalleryCard title-jpn 同一门控）。 */
+/**
+ * 副题（日文标题）：打码开启时隐藏（GalleryCard title-jpn 同一门控）；
+ * showJpnTitle 加载后为 false 同样隐藏（协议默认 false，prefs 未加载按
+ * 显示渲染防闪失——T2 定案）。
+ */
 function displaySubtitle(gallery: GalleryInfo): string | null {
   if (privacyMaskEnabled.value) return null
-  return gallery.titleJpn || null
+  if (!gallery.titleJpn) return null
+  if (!isJpnSubtitleVisible(generalPrefs.value)) return null
+  return gallery.titleJpn
 }
 
 /**

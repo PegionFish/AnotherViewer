@@ -51,7 +51,6 @@ function settingsWithProxy(overrides: Partial<Settings['proxy']> = {}): Settings
   return {
     download: {
       path: '/data',
-      workerCount: 4,
       downloadDelay: 1000,
       downloadTimeout: 30000,
       maxConcurrentGalleries: 2,

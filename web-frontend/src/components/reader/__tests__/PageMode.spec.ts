@@ -8,6 +8,7 @@ import {
   DEFAULT_PREFERENCES,
   DEFAULT_READER_PREFERENCES,
 } from '@/api/preferences'
+import { firstPageOfSpread, spreadIndexOf } from '../PageMode.vue'
 
 function prefsWithScaling(pageScaling: string): void {
   const store = usePreferencesStore()
@@ -84,6 +85,26 @@ describe('PageMode — 放大平移（既有语义回归）', () => {
   it('zoom > 1 时舞台可平移', () => {
     const wrapper = mountPageMode(2)
     expect(wrapper.find('.page-mode').classes()).toContain('page-mode--zoomed')
+  })
+})
+
+describe('PageMode — firstPageCover 铺摊换算（偏好接线批次）', () => {
+  it('默认参数保持封面独页语义（不破坏既有调用方）', () => {
+    expect(spreadIndexOf(0)).toBe(0)
+    expect(spreadIndexOf(1)).toBe(1)
+    expect(firstPageOfSpread(1)).toBe(1)
+  })
+
+  it('firstPageCover=false：第 0 页与第 1 页并摊，铺摊边界整体前移一位', () => {
+    expect(spreadIndexOf(0, false)).toBe(0)
+    expect(spreadIndexOf(1, false)).toBe(0)
+    expect(spreadIndexOf(2, false)).toBe(1)
+    expect(spreadIndexOf(3, false)).toBe(1)
+    expect(spreadIndexOf(49, false)).toBe(24)
+
+    expect(firstPageOfSpread(0, false)).toBe(0)
+    expect(firstPageOfSpread(1, false)).toBe(2)
+    expect(firstPageOfSpread(24, false)).toBe(48)
   })
 })
 

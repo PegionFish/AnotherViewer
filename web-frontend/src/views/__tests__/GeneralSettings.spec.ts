@@ -108,7 +108,7 @@ describe('GeneralSettings (通用设置)', () => {
     const selects = w.findAllComponents(AppSelect)
     expect(selects).toHaveLength(3)
 
-    const expectedCounts = [9, 2, 3]
+    const expectedCounts = [5, 2, 3]
     for (let i = 0; i < selects.length; i++) {
       const trigger = selects[i].find('button.app-select__trigger')
       await trigger.trigger('click')
@@ -125,10 +125,11 @@ describe('GeneralSettings (通用设置)', () => {
     expect(labels).toEqual(expect.arrayContaining(['首页', '搜索', '收藏', '历史', '下载']))
   })
 
-  it('shows a visible label for the stored launchPage value in the AppSelect trigger (UX-03)', async () => {
+  it('normalizes the stored legacy launchPage value for display (UX-03)', async () => {
     const w = await mountView()
     const launchSelect = w.findAllComponents(AppSelect)[0]
-    expect(launchSelect.props('modelValue')).toBe('homepage')
+    // 存储值仍是后端默认 homepage；传给 AppSelect 的是归一后的 home，标签照常可见。
+    expect(launchSelect.props('modelValue')).toBe('home')
     expect(launchSelect.find('.app-select__value').text()).toBe('首页')
   })
 
@@ -137,7 +138,7 @@ describe('GeneralSettings (通用设置)', () => {
     const store = usePreferencesStore()
     const trigger = w.findAllComponents(AppSelect)[0].find('button.app-select__trigger')
     await trigger.trigger('click')
-    menuOptions()[2].click()
+    menuOptions()[1].click()
     await wrapper.vm.$nextTick()
     expect(store.prefs!.general.launchPage).toBe('search')
   })
@@ -175,7 +176,9 @@ describe('GeneralSettings (通用设置)', () => {
     const buttons = segmented[0].findAll('.app-segmented__btn')
     expect(buttons).toHaveLength(3)
     const active = buttons.find((b) => b.classes().includes('app-segmented__btn--active'))
-    expect(active?.text()).toBe('亮色')
+    // fixture 存的是 theme: 'dark'；theme 双源修复后服务器值会回灌 themeStore，
+    // 高亮应跟随存储值（旧断言期望「亮色」编码的是回灌前的脱节行为）。
+    expect(active?.text()).toBe('暗色')
   })
 
   it('switches the theme from the segmented control and persists it', async () => {

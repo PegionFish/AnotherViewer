@@ -1342,6 +1342,9 @@ watch(
 onMounted(() => {
   connect()
   void load({ silent: true })
+  // 深链直入时无其他视图代为预热偏好；不加载则 showReadProgress 角标
+  // 按空 prefs 的防御默认隐藏（HomeView 同款守卫）。
+  if (!preferencesStore.prefs && !preferencesStore.loading) void preferencesStore.load()
 })
 
 onUnmounted(() => {

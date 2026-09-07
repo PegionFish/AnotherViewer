@@ -44,7 +44,7 @@
             </PrefRow>
             <PrefRow icon="homepage-black" title="启动页" summary="打开应用时显示的页面">
               <AppSelect
-                :model-value="prefs.general.launchPage"
+                :model-value="normalizeLaunchPage(prefs.general.launchPage)"
                 :options="LAUNCH_PAGE_OPTIONS"
                 @update:model-value="(v) => updateGeneralValue('launchPage', v)"
               />
@@ -234,20 +234,28 @@ const THEME_OPTIONS: Array<{ value: Theme; label: string }> = [
   { value: 'black', label: '纯黑' },
 ]
 
-// UX-03: every storable launchPage value must resolve to a visible label —
-// web main routes (home/search/favorites/history/downloads) + legacy values
-// (subscription/hot) + backend defaults (homepage/whats_hot).
+// 启动页只列 WebUI 真实存在的主路由（UX-03）；后端默认值 homepage 与
+// Android 旧值（subscription/hot/whats_hot）经 normalizeLaunchPage 归一到
+// 最接近的展示项，避免下拉里出现同名牌（曾渲染两个「首页」/两个「热门」）。
+// 归一仅作用于显示层，不改写已存储的旧值。
 const LAUNCH_PAGE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'home', label: '首页' },
-  { value: 'homepage', label: '首页' },
   { value: 'search', label: '搜索' },
   { value: 'favorites', label: '收藏' },
   { value: 'history', label: '历史' },
   { value: 'downloads', label: '下载' },
-  { value: 'subscription', label: '订阅' },
-  { value: 'hot', label: '热门' },
-  { value: 'whats_hot', label: '热门' },
 ]
+
+const LAUNCH_PAGE_ALIASES: Readonly<Record<string, string>> = {
+  homepage: 'home',
+  subscription: 'home',
+  hot: 'home',
+  whats_hot: 'home',
+}
+
+function normalizeLaunchPage(value: string): string {
+  return LAUNCH_PAGE_ALIASES[value] ?? value
+}
 
 const DETAIL_SIZE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'long', label: '长' },

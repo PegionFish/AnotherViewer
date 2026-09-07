@@ -58,7 +58,7 @@
             </PrefRow>
             <PrefRow icon="go-to-dark" title="起始位置" :summary="startPositionLabel">
               <AppSelect
-                :model-value="reader.startPosition"
+                :model-value="normalizeStartPosition(reader.startPosition)"
                 :options="START_POSITION_OPTIONS"
                 @update:model-value="(v) => onSelectValueChange('startPosition', v)"
               />
@@ -167,13 +167,13 @@
                 @update:model-value="(v) => onSelectValueChange('pageTransition', v)"
               />
             </PrefRow>
-            <PrefRow icon="magnify-dark" title="缩放步进" summary="每次缩放的倍数，需大于 1">
+            <PrefRow icon="magnify-dark" title="缩放步进" summary="每次缩放的步进幅度">
               <label class="num-field">
                 <input
                   type="number"
-                  min="1.1"
-                  max="10"
-                  step="0.1"
+                  min="0.05"
+                  max="1"
+                  step="0.05"
                   :value="reader.zoomStep"
                   aria-label="缩放步进"
                   @change="onReaderNumberChange('zoomStep', $event)"
@@ -185,7 +185,7 @@
                 <input
                   type="number"
                   min="1"
-                  max="50"
+                  max="5"
                   step="0.5"
                   :value="reader.maxZoom"
                   aria-label="最大缩放"
@@ -282,14 +282,23 @@ const PAGE_SCALING_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'original', label: '原始' },
 ]
 
-// UX-03: keep a label for the backend default snake_case value too.
+// 只列 kebab-case 规范值；后端默认的 snake_case 旧值 top_right 由
+// normalizeStartPosition 归一展示，避免下拉出现两个「右上」。
+// 归一仅作用于显示层，不改写已存储的旧值。
 const START_POSITION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'top-right', label: '右上' },
-  { value: 'top_right', label: '右上' },
   { value: 'top-left', label: '左上' },
   { value: 'bottom-right', label: '右下' },
   { value: 'bottom-left', label: '左下' },
 ]
+
+const START_POSITION_ALIASES: Readonly<Record<string, string>> = {
+  top_right: 'top-right',
+}
+
+function normalizeStartPosition(value: string): string {
+  return START_POSITION_ALIASES[value] ?? value
+}
 
 /* --------------------------- Wave-1 A 组选项 ---------------------------- */
 
@@ -311,19 +320,19 @@ const PAGE_TRANSITION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'none', label: '无' },
 ]
 
-/** 数字键的 clamp 范围（与后端 @field 校验一致，输入侧先 clamp） */
+/** 数字键的 clamp 范围（与后端 @field 校验一致，输入侧先 clamp）。
+ *  zoomStep 是加法步进（非乘法倍率）：0.05–1，消费端键盘/快捷面板 ± 时用。 */
 const READER_NUMBER_BOUNDS: Partial<
   Record<keyof ReaderPreferences, { min: number; max: number; fallback: number; decimals?: number }>
 > = {
-  zoomStep: { min: 1.1, max: 10, fallback: 1.5, decimals: 1 },
-  maxZoom: { min: 1, max: 50, fallback: 5, decimals: 1 },
+  zoomStep: { min: 0.05, max: 1, fallback: 0.25, decimals: 2 },
+  maxZoom: { min: 1, max: 5, fallback: 3, decimals: 1 },
   dualPageGap: { min: 0, max: 100, fallback: 8 },
   preloadCount: { min: 0, max: 20, fallback: 2 },
 }
 
 const START_POSITION_LABELS: Readonly<Record<string, string>> = {
   'top-right': '从右上角开始',
-  'top_right': '从右上角开始',
   'top-left': '从左上角开始',
   'bottom-right': '从右下角开始',
   'bottom-left': '从左下角开始',
@@ -353,7 +362,7 @@ const pageScalingLabel = computed<string>(
 )
 
 const startPositionLabel = computed<string>(
-  () => START_POSITION_LABELS[reader.value?.startPosition ?? ''] ?? '',
+  () => START_POSITION_LABELS[normalizeStartPosition(reader.value?.startPosition ?? '')] ?? '',
 )
 
 /* -------------------------------- handlers -------------------------------- */

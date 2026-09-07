@@ -106,7 +106,7 @@ describe('ReaderSettings (阅读器设置)', () => {
     const selects = w.findAllComponents(AppSelect)
     expect(selects).toHaveLength(6)
 
-    const expectedCounts = [4, 4, 5, 3, 3, 3]
+    const expectedCounts = [4, 4, 4, 3, 3, 3]
     for (let i = 0; i < selects.length; i++) {
       const trigger = selects[i].find('button.app-select__trigger')
       await trigger.trigger('click')
@@ -115,10 +115,11 @@ describe('ReaderSettings (阅读器设置)', () => {
     }
   })
 
-  it('shows a visible label for the stored startPosition value (UX-03)', async () => {
+  it('normalizes the stored legacy startPosition value for display (UX-03)', async () => {
     const w = await mountView()
     const startSelect = w.findAllComponents(AppSelect)[2]
-    expect(startSelect.props('modelValue')).toBe('top_right')
+    // 存储值仍是后端默认 top_right；传给 AppSelect 的是归一后的 top-right，标签照常可见。
+    expect(startSelect.props('modelValue')).toBe('top-right')
     expect(startSelect.find('.app-select__value').text()).toBe('右上')
   })
 
@@ -228,25 +229,26 @@ describe('ReaderSettings (阅读器设置)', () => {
     expect(store.prefs!.reader.splitWidePages).toBe(true)
   })
 
-  it('clamps zoomStep above 1', async () => {
+  it('clamps zoomStep into the additive-step range [0.05, 1]', async () => {
     const w = await mountView()
     const store = usePreferencesStore()
     const input = numberInput(w, '缩放步进')
 
+    // 加法步进语义：0.5 是合法步长（旧「需大于 1」的乘法倍率语义已废弃）。
     await input.setValue('0.5')
     await input.trigger('change')
-    expect(store.prefs!.reader.zoomStep).toBe(1.1)
+    expect(store.prefs!.reader.zoomStep).toBe(0.5)
 
     await input.setValue('99')
     await input.trigger('change')
-    expect(store.prefs!.reader.zoomStep).toBe(10)
+    expect(store.prefs!.reader.zoomStep).toBe(1)
 
-    await input.setValue('2')
+    await input.setValue('0.01')
     await input.trigger('change')
-    expect(store.prefs!.reader.zoomStep).toBe(2)
+    expect(store.prefs!.reader.zoomStep).toBe(0.05)
   })
 
-  it('clamps maxZoom to at least 1', async () => {
+  it('clamps maxZoom into [1, 5]', async () => {
     const w = await mountView()
     const store = usePreferencesStore()
     const input = numberInput(w, '最大缩放')
@@ -257,7 +259,7 @@ describe('ReaderSettings (阅读器设置)', () => {
 
     await input.setValue('999')
     await input.trigger('change')
-    expect(store.prefs!.reader.maxZoom).toBe(50)
+    expect(store.prefs!.reader.maxZoom).toBe(5)
   })
 
   // ---- Wave-1 A 组: 双页 / 性能 ----

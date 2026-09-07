@@ -11,6 +11,16 @@
 
     <!-- Mirrors the 48dp FrameLayout wrapping ReversibleSeekBar in activity_gallery.xml -->
     <div class="seekbar-panel__track">
+      <!-- reader.showPageInterval：页间隔刻度（N-1 个分界点，分页模式专属；
+           纯 CSS 绝对定位复用轨道结构，不参与指针交互） -->
+      <div v-if="tickPercents.length" class="seekbar-panel__ticks" aria-hidden="true">
+        <i
+          v-for="(pct, i) in tickPercents"
+          :key="i"
+          class="seekbar-panel__tick"
+          :style="{ left: `${pct}%` }"
+        />
+      </div>
       <input
         class="seekbar-panel__slider"
         :class="{ 'seekbar-panel__slider--reversed': reversed }"
@@ -71,8 +81,18 @@ interface SeekBarPanelExtraEmits extends SeekBarPanelEmits {
   (e: 'seek-end'): void
 }
 
-const props = withDefaults(defineProps<SeekBarPanelProps>(), {
+/** 组件侧扩展（frozen 契约在 @/types/components，不改冻结文件）。 */
+interface SeekBarPanelExtraProps extends SeekBarPanelProps {
+  /**
+   * reader.showPageInterval（已由父级与「分页模式」合并）：true 时在滑轨上
+   * 渲染页间隔刻度（N-1 个分界点；页数 ≤ 2 无意义不渲染）。默认 false。
+   */
+  showIntervalTicks?: boolean
+}
+
+const props = withDefaults(defineProps<SeekBarPanelExtraProps>(), {
   reversed: false,
+  showIntervalTicks: false,
 })
 
 const emit = defineEmits<SeekBarPanelExtraEmits>()
@@ -114,6 +134,22 @@ const rightText = computed(() =>
 const fillPercent = computed(() =>
   sliderMax.value === 0 ? 0 : (sliderValue.value / sliderMax.value) * 100,
 )
+
+/*
+ * 页间隔刻度位置（%）：滑轨 0-based 值域 [0, N-1]（同 sliderMax 映射），
+ * N 页给出 N-1 个分界点 i/(N-1)（i = 1..N-1）；reversed 时滑轨被
+ * scaleX(-1) 镜像，刻度按 100-p 同步镜像才能与拇指位置对齐。
+ */
+const tickPercents = computed<number[]>(() => {
+  if (!props.showIntervalTicks || props.totalPages <= 2) return []
+  const n = props.totalPages
+  const positions: number[] = []
+  for (let i = 1; i <= n - 1; i++) {
+    const pct = (i / (n - 1)) * 100
+    positions.push(props.reversed ? 100 - pct : pct)
+  }
+  return positions
+})
 
 function onPointerDown() {
   dragging.value = true
@@ -191,11 +227,30 @@ function onChange(event: Event) {
 
 /* The 48dp FrameLayout that vertically centers the seek bar. */
 .seekbar-panel__track {
+  position: relative; /* 页间隔刻度的定位基准 */
   flex: 1 1 0;
   min-width: 0;
   display: flex;
   align-items: center;
   height: var(--seekbar-panel-height);
+}
+
+/* 页间隔刻度：纯视觉层，悬浮在滑轨上方，不拦截指针。刻度线与 2px 轨道
+   同一水平中心（track 48px、input 44px 居中，50% 即轨道中线）。 */
+.seekbar-panel__ticks {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.seekbar-panel__tick {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 2px;
+  border-radius: 50%;
+  transform: translate(-50%, -50%);
+  background: rgba(255, 255, 255, 0.45);
 }
 
 /*

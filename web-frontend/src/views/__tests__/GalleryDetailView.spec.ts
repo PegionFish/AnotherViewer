@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { mount, flushPromises, type VueWrapper } from '@vue/test-utils'
+import { createPinia, setActivePinia } from 'pinia'
 import GalleryDetailView from '../GalleryDetailView.vue'
 import { EhUnavailableError } from '@/api/client'
 import { availability, markDown } from '@/stores/availability'
@@ -7,6 +8,9 @@ import { galleryApi } from '@/api/gallery'
 import { commentApi } from '@/api/comment'
 import { favoriteApi } from '@/api/favorite'
 import { downloadApi } from '@/api/download'
+import { preferencesApi } from '@/api/preferences'
+import { usePreferencesStore } from '@/stores/preferences'
+import type { Preferences } from '@/api/preferences'
 import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 import type { CommentItem } from '@/api/comment'
 import type { GalleryDetail } from '@/types'
@@ -36,6 +40,10 @@ vi.mock('@/api/favorite', () => ({
 
 vi.mock('@/api/download', () => ({
   downloadApi: { add: vi.fn() },
+}))
+
+vi.mock('@/api/preferences', () => ({
+  preferencesApi: { get: vi.fn(), update: vi.fn() },
 }))
 
 vi.mock('@/api/site', () => ({
@@ -69,6 +77,19 @@ function makeDetail(overrides: Partial<GalleryDetail> = {}): GalleryDetail {
 
 function makeComment(id: number): CommentItem {
   return { id, uploader: `user${id}`, comment: `body ${id}`, time: '2026-08-01', score: 0 }
+}
+
+// T1/T2：视图消费 preferencesStore——文件内所有用例都要有活跃 Pinia；偏好
+// 请求默认永不落定（等价「prefs 未加载」的防闪没兜底态），需要真实偏好值
+// 的用例用 seedGeneral 直接注入（走 load 会引入时序竞争）。
+beforeEach(() => {
+  setActivePinia(createPinia())
+  vi.mocked(preferencesApi.get).mockReturnValue(new Promise(() => {})) // never settles
+})
+
+/** Seed the preferences store directly (avoids the async preferences load). */
+function seedGeneral(general: Record<string, unknown>): void {
+  usePreferencesStore().prefs = { general } as unknown as Preferences
 }
 
 describe('GalleryDetailView (F6 评论加载失败态)', () => {
@@ -682,5 +703,56 @@ describe('GalleryDetailView — token 透传与 EH 熔断提示（plan-2026-08-3
     expect(wrapper.find('[data-testid="comments-retry"]').exists()).toBe(false)
     expect(wrapper.text()).not.toContain('评论加载失败')
     expect(wrapper.text()).not.toContain('No comments')
+  })
+})
+
+describe('GalleryDetailView — 详情页偏好开关（T1/T2）', () => {
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    vi.clearAllMocks()
+    setPrivacyMaskEnabled(false)
+  })
+
+  it('prefs 未加载时页数/评分/评论区/日文副题全渲染（防闪没兜底），且自发预热偏好', async () => {
+    const w = await mountDetail({ titleJpn: '日本語のタイトル' })
+
+    const metaText = w.findAll('.detail-header__meta-item').map((i) => i.text()).join()
+    expect(metaText).toContain('Pages')
+    expect(w.find('.detail-header__rating').exists()).toBe(true)
+    expect(w.find('.detail-comments').exists()).toBe(true)
+    expect(w.find('.detail-header__title-jpn').text()).toBe('日本語のタイトル')
+    // 深链直达详情页时没有其他视图代为加载——视图要自发预热（HomeView 同款）。
+    expect(preferencesApi.get).toHaveBeenCalled()
+  })
+
+  it('showGalleryPages/showGalleryRating/showGalleryComment=false 时对应块隐藏（T1）', async () => {
+    seedGeneral({ showGalleryPages: false, showGalleryRating: false, showGalleryComment: false })
+    const w = await mountDetail()
+
+    const metaText = w.findAll('.detail-header__meta-item').map((i) => i.text()).join()
+    expect(metaText).not.toContain('Pages')
+    expect(w.find('.detail-header__rating').exists()).toBe(false)
+    expect(w.find('.detail-comments').exists()).toBe(false)
+    // 无开关的区块（Posted 元信息、标签）不受影响。
+    expect(metaText).toContain('Posted')
+    expect(w.find('.detail-tags').exists()).toBe(true)
+  })
+
+  it('showJpnTitle=false（协议默认）加载后隐藏日文副题，true 恢复（T2）', async () => {
+    seedGeneral({ showJpnTitle: false })
+    const hidden = await mountDetail({ titleJpn: '日本語のタイトル' })
+    expect(hidden.find('.detail-header__title-jpn').exists()).toBe(false)
+
+    seedGeneral({ showJpnTitle: true })
+    const shown = await mountDetail({ titleJpn: '日本語のタイトル' })
+    expect(shown.find('.detail-header__title-jpn').exists()).toBe(true)
+  })
+
+  it('打码开启时日文副题无论偏好如何都隐藏（T2）', async () => {
+    setPrivacyMaskEnabled(true)
+    seedGeneral({ showJpnTitle: true })
+    const w = await mountDetail({ titleJpn: '日本語のタイトル' })
+    expect(w.find('.detail-header__title-jpn').exists()).toBe(false)
   })
 })

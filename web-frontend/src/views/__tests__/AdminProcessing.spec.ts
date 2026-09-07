@@ -12,7 +12,6 @@ function settingsWithProcessing(overrides: Partial<Settings['processing']> = {})
   return {
     download: {
       path: '/data',
-      workerCount: 4,
       downloadDelay: 1000,
       downloadTimeout: 30000,
       maxConcurrentGalleries: 2,

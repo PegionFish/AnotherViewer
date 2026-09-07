@@ -15,7 +15,36 @@
             <ProgressSpinner size="small" />
           </div>
         </Transition>
+        <!--
+          splitWidePages：宽幅页（宽高比 > 1.2）拆左右两半并排铺满整行，
+          页码/进度语义不变（仍是同一页索引）。左半在视图左、右半在右，
+          不随 RTL 再镜像（行内页面顺序已由现有 RTL 槽位分配负责）。
+        -->
+        <div
+          v-if="isSplit(spread.first)"
+          class="dual-page__split"
+          :style="{ aspectRatio: splitAspect(spread.first) }"
+        >
+          <div
+            v-for="half in SPLIT_HALVES"
+            :key="half"
+            class="dual-page__half"
+            :class="{ 'dual-page__half--right': half === 'right' }"
+          >
+            <img
+              class="dual-page__split-img"
+              :class="{ 'dual-page__split-img--loaded': loadedPages.has(spread.first) }"
+              :src="srcForFull(spread.first)"
+              :srcset="srcsetForFull(spread.first)"
+              :alt="`Page ${spread.first + 1} of ${totalPages}`"
+              draggable="false"
+              decoding="async"
+              @load="onPageLoad(spread.first, $event)"
+            />
+          </div>
+        </div>
         <img
+          v-else
           class="dual-page__img dual-page__img--alone"
           :class="{ 'dual-page__img--loaded': loadedPages.has(spread.first) }"
           :src="srcFor(spread.first)"
@@ -23,7 +52,7 @@
           :alt="`Page ${spread.first + 1} of ${totalPages}`"
           draggable="false"
           decoding="async"
-          @load="onPageLoad(spread.first)"
+          @load="onPageLoad(spread.first, $event)"
         />
       </div>
 
@@ -35,7 +64,31 @@
               <ProgressSpinner size="small" />
             </div>
           </Transition>
+          <div
+            v-if="isSplit(spread.left)"
+            class="dual-page__split"
+            :style="{ aspectRatio: splitAspect(spread.left) }"
+          >
+            <div
+              v-for="half in SPLIT_HALVES"
+              :key="half"
+              class="dual-page__half"
+              :class="{ 'dual-page__half--right': half === 'right' }"
+            >
+              <img
+                class="dual-page__split-img"
+                :class="{ 'dual-page__split-img--loaded': loadedPages.has(spread.left) }"
+                :src="srcForFull(spread.left)"
+                :srcset="srcsetForFull(spread.left)"
+                :alt="`Page ${spread.left + 1} of ${totalPages}`"
+                draggable="false"
+                decoding="async"
+                @load="onPageLoad(spread.left, $event)"
+              />
+            </div>
+          </div>
           <img
+            v-else
             class="dual-page__img"
             :class="{ 'dual-page__img--loaded': loadedPages.has(spread.left) }"
             :src="srcFor(spread.left)"
@@ -43,7 +96,7 @@
             :alt="`Page ${spread.left + 1} of ${totalPages}`"
             draggable="false"
             decoding="async"
-            @load="onPageLoad(spread.left)"
+            @load="onPageLoad(spread.left, $event)"
           />
         </div>
         <div class="dual-page__slot">
@@ -52,7 +105,31 @@
               <ProgressSpinner size="small" />
             </div>
           </Transition>
+          <div
+            v-if="isSplit(spread.right)"
+            class="dual-page__split"
+            :style="{ aspectRatio: splitAspect(spread.right) }"
+          >
+            <div
+              v-for="half in SPLIT_HALVES"
+              :key="half"
+              class="dual-page__half"
+              :class="{ 'dual-page__half--right': half === 'right' }"
+            >
+              <img
+                class="dual-page__split-img"
+                :class="{ 'dual-page__split-img--loaded': loadedPages.has(spread.right) }"
+                :src="srcForFull(spread.right)"
+                :srcset="srcsetForFull(spread.right)"
+                :alt="`Page ${spread.right + 1} of ${totalPages}`"
+                draggable="false"
+                decoding="async"
+                @load="onPageLoad(spread.right, $event)"
+              />
+            </div>
+          </div>
           <img
+            v-else
             class="dual-page__img"
             :class="{ 'dual-page__img--loaded': loadedPages.has(spread.right) }"
             :src="srcFor(spread.right)"
@@ -60,7 +137,7 @@
             :alt="`Page ${spread.right + 1} of ${totalPages}`"
             draggable="false"
             decoding="async"
-            @load="onPageLoad(spread.right)"
+            @load="onPageLoad(spread.right, $event)"
           />
         </div>
       </template>
@@ -105,11 +182,17 @@
  * DualPageMode.vue — two pages side by side, replicating Android
  * `SpreadLayoutManager` (GalleryView `LAYOUT_DUAL_PAGE`):
  *
- * - Page 1 (0-based 0, the cover) is displayed ALONE and centered; pairing
+ * - Page pairing follows `firstPageCover`（reader 偏好，活消费）：默认 true
+ *   时 page 1 (0-based 0, the cover) is displayed ALONE and centered, pairing
  *   starts after it — 1-based pairs (2,3), (4,5)… = 0-based (1,2), (3,4)…
- *   (`contracts/responsive-strategy.md` §6 rule 4).
+ *   (`contracts/responsive-strategy.md` §6 rule 4); false 时第 0 页与第 1 页
+ *   并摊（0-based (0,1), (2,3)…），换算经 PageMode 带参 helper 与
+ *   ReaderView 翻页共用。
  * - RTL reading direction reverses the spread: the reading-order-first page
  *   sits on the RIGHT (`SpreadLayoutManager.SPREAD_RIGHT_TO_LEFT`).
+ * - splitWidePages（reader 偏好）：开启时宽幅页（load 后量得宽高比 > 1.2）
+ *   在槽位内拆成左右两半并排显示（overflow:hidden 半容器 + 宽 200% 的
+ *   img 偏移 0/-100%），页码/进度语义不变；单页/滚动模式不拆。
  * - Navigation moves by whole spreads, like the Android pager.
  * - Per responsive-strategy §8, each page requests `?w=` at HALF the
  *   container width (× DPR).
@@ -121,6 +204,7 @@
  */
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import ProgressSpinner from '@/components/atoms/ProgressSpinner.vue'
+import { usePreferencesStore } from '@/stores/preferences'
 import {
   firstPageOfSpread,
   pageImageSrcset,
@@ -151,6 +235,14 @@ const props = withDefaults(defineProps<DualPageModeProps>(), {
   enhancedUrls: undefined,
 })
 const emit = defineEmits<DualPageModeEmits>()
+
+const preferencesStore = usePreferencesStore()
+
+/* firstPageCover / splitWidePages 偏好（活消费；prefs 未载入时回退默认）。
+ * 直接读 store 与 PageMode 的 pageScaling/tapZoneScheme 同模式——比经
+ * ImageReader 层层透传 props 改动面更小，且设置改动即时生效。 */
+const firstPageCover = computed(() => preferencesStore.prefs?.reader.firstPageCover ?? true)
+const splitWidePages = computed(() => preferencesStore.prefs?.reader.splitWidePages ?? false)
 
 const rootRef = ref<HTMLElement | null>(null)
 const rootWidth = ref(800)
@@ -189,7 +281,13 @@ onBeforeUnmount(() => {
 const spread = computed(() => {
   const total = props.totalPages
   const index = Math.min(Math.max(props.page, 0), Math.max(0, total - 1))
-  const first = index === 0 ? 0 : firstPageOfSpread(spreadIndexOf(index))
+  // firstPageCover=false：第 0 页与第 1 页并摊，铺摊边界整体前移一位
+  // （(0,1), (2,3)…）；换算与 ReaderView 翻页共用同一带参 helper。
+  const first = firstPageCover.value
+    ? index === 0
+      ? 0
+      : firstPageOfSpread(spreadIndexOf(index))
+    : firstPageOfSpread(spreadIndexOf(index, false), false)
   const second = first + 1 < total ? first + 1 : null
   const rtl = props.direction === 'rtl'
   return {
@@ -223,7 +321,46 @@ function srcsetFor(page: number): string | undefined {
   return pageImageSrcset(props.gid, page, rootWidth.value / 2)
 }
 
-function onPageLoad(page: number) {
+/* 拆分页横跨整行显示（= 整页宽度），按整行宽取图，避免半宽图放大发虚。 */
+function srcForFull(page: number): string {
+  const enhanced = props.enhancedUrls?.get(page)
+  if (enhanced) return enhanced
+  return pageImageUrl(props.gid, page, rootWidth.value * devicePixelRatio())
+}
+
+function srcsetForFull(page: number): string | undefined {
+  if (props.enhancedUrls?.get(page)) return undefined
+  return pageImageSrcset(props.gid, page, rootWidth.value)
+}
+
+/* ------------------------------------------------------------------ */
+/* splitWidePages — 宽幅页拆左右两半（双页模式限定）                     */
+/* ------------------------------------------------------------------ */
+
+/** 宽幅判定阈值：宽高比超过它才拆（协议定案值）。 */
+const SPLIT_WIDE_RATIO = 1.2
+const SPLIT_HALVES = ['left', 'right'] as const
+
+/** 页面宽高比缓存：普通渲染 img load 时量 naturalWidth/Height（首次为准，
+ *  增强 hot-swap 换图不重测——罕见且重测会引起布局跳变）。 */
+const pageRatios = reactive(new Map<number, number>())
+
+/** 该页是否按拆分渲染：偏好开 + 已量得比例且超阈值。 */
+function isSplit(page: number): boolean {
+  const ratio = pageRatios.get(page)
+  return splitWidePages.value && ratio !== undefined && ratio > SPLIT_WIDE_RATIO
+}
+
+/** 拆分容器的整页 aspect-ratio（两半 = 整页，保证中缝对齐不失真）。 */
+function splitAspect(page: number): string {
+  return String(pageRatios.get(page) ?? SPLIT_WIDE_RATIO)
+}
+
+function onPageLoad(page: number, event?: Event) {
+  const img = event?.target as HTMLImageElement | undefined
+  if (img?.naturalWidth && img?.naturalHeight) {
+    pageRatios.set(page, img.naturalWidth / img.naturalHeight)
+  }
   loadedPages.add(page)
 }
 
@@ -323,6 +460,10 @@ useReaderGestures({
   position: relative;
   display: grid;
   grid-template-columns: 1fr 1fr;
+  /* reader.dualPageGap 偏好：变量由 ReaderView 写在阅读器根元素上，经 CSS
+   * 自定义属性继承到这里（决策表兜底 fallback 8px 仅防根元素缺席）。
+   * RTL 无需镜像——列宽对称，间隙居中不变。 */
+  column-gap: var(--reader-dual-gap, 8px);
   align-items: center;
   width: 100%;
   height: 100%;
@@ -386,6 +527,44 @@ useReaderGestures({
 }
 
 .dual-page__img--loaded {
+  opacity: 1;
+}
+
+/*
+ * splitWidePages 拆分渲染：外层按整页比例（aspect-ratio 由内联样式按实测
+ * naturalWidth/Height 给出），两个 overflow:hidden 半容器各占一半；内部 img
+ * 宽 200%、右半再偏移 -100%（= 一个半容器宽），恰好拼回整页且中缝对齐。
+ * max-width 钳到槽位时的极端情况由 object-fit: contain 兜底（不裁切变形）。
+ */
+.dual-page__split {
+  display: flex;
+  height: 100%;
+  max-width: 100%;
+  margin: 0 auto;
+}
+
+.dual-page__half {
+  position: relative;
+  width: 50%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.dual-page__split-img {
+  display: block;
+  width: 200%;
+  height: 100%;
+  max-width: none;
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity var(--duration-scene-opacity) var(--ease-decelerate-quart);
+}
+
+.dual-page__half--right .dual-page__split-img {
+  margin-left: -100%;
+}
+
+.dual-page__split-img--loaded {
   opacity: 1;
 }
 

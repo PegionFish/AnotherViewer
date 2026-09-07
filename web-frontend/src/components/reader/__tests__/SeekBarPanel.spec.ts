@@ -7,6 +7,7 @@ type PanelProps = {
   currentPage: number
   totalPages: number
   reversed?: boolean
+  showIntervalTicks?: boolean
 }
 
 function factory(props: Partial<PanelProps> = {}): VueWrapper<InstanceType<typeof SeekBarPanel>> {
@@ -215,6 +216,40 @@ describe('SeekBarPanel', () => {
       const wrapper = factory()
       expect(wrapper.attributes('role')).toBe('group')
       expect(wrapper.attributes('aria-label')).toBeTruthy()
+    })
+  })
+
+  describe('页间隔刻度（reader.showPageInterval 偏好接线）', () => {
+    it('默认不渲染（prop 缺省 false，基线不受影响）', () => {
+      const wrapper = factory({ currentPage: 3, totalPages: 10 })
+      expect(wrapper.find('.seekbar-panel__ticks').exists()).toBe(false)
+    })
+
+    it('开启时渲染 N-1 个分界刻度点', () => {
+      const wrapper = factory({ currentPage: 3, totalPages: 10, showIntervalTicks: true })
+      expect(wrapper.findAll('.seekbar-panel__tick')).toHaveLength(9)
+    })
+
+    it('页数 ≤ 2 不渲染刻度', () => {
+      const wrapper = factory({ currentPage: 1, totalPages: 2, showIntervalTicks: true })
+      expect(wrapper.find('.seekbar-panel__ticks').exists()).toBe(false)
+    })
+
+    it('LTR：第 1 个分界点位于 1/(N-1) 处', () => {
+      const wrapper = factory({ currentPage: 1, totalPages: 10, showIntervalTicks: true })
+      const style = wrapper.findAll('.seekbar-panel__tick')[0].attributes('style') ?? ''
+      expect(style).toContain('left: 11.11')
+    })
+
+    it('reversed (RTL)：刻度随滑轨镜像（第 1 个分界点贴右端）', () => {
+      const wrapper = factory({
+        currentPage: 1,
+        totalPages: 10,
+        reversed: true,
+        showIntervalTicks: true,
+      })
+      const style = wrapper.findAll('.seekbar-panel__tick')[0].attributes('style') ?? ''
+      expect(style).toContain('left: 88.88')
     })
   })
 })

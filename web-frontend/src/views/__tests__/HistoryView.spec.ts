@@ -150,6 +150,18 @@ describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
     expect(sub.text()).toBe('日本語')
   })
 
+  it('hides the jpn subtitle when seeded prefs keep showJpnTitle=false (T2 — protocol default)', async () => {
+    seedPrefs({ showJpnTitle: false })
+    await mountHistory([makeHistoryItem({ gid: 3, title: 'T', titleJpn: '日本語' })])
+    expect(wrapper.find('.app-list-row__subtitle').exists()).toBe(false)
+  })
+
+  it('keeps the jpn subtitle when seeded prefs set showJpnTitle=true (T2)', async () => {
+    seedPrefs({ showJpnTitle: true })
+    await mountHistory([makeHistoryItem({ gid: 3, title: 'T', titleJpn: '日本語' })])
+    expect(wrapper.find('.app-list-row__subtitle').text()).toBe('日本語')
+  })
+
   it('falls back to #<gid> for title-less rows (R4-6)', async () => {
     await mountHistory([makeHistoryItem({ gid: 7, title: '', titleJpn: '' })])
     expect(wrapper.find('.app-list-row__title').text()).toBe('#7')

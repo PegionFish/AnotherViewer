@@ -41,7 +41,10 @@
 
           <div class="detail-header__info">
             <h1 class="detail-header__title">{{ displayTitle }}</h1>
-            <p v-if="gallery.titleJpn && !privacyMaskEnabled" class="detail-header__title-jpn">
+            <p
+              v-if="gallery.titleJpn && !privacyMaskEnabled && showJpnSubtitle"
+              class="detail-header__title-jpn"
+            >
               {{ gallery.titleJpn }}
             </p>
 
@@ -61,7 +64,7 @@
                 <dt>Posted</dt>
                 <dd>{{ gallery.posted || '—' }}</dd>
               </div>
-              <div class="detail-header__meta-item">
+              <div v-if="showPagesRow" class="detail-header__meta-item">
                 <dt>Pages</dt>
                 <dd>{{ gallery.pages }}</dd>
               </div>
@@ -71,7 +74,7 @@
               </div>
             </dl>
 
-            <div class="detail-header__rating">
+            <div v-if="showRatingBlock" class="detail-header__rating">
               <RatingStars :rating="gallery.rating" />
               <span class="detail-header__rating-num">{{ gallery.rating.toFixed(1) }}</span>
             </div>
@@ -164,8 +167,12 @@
         </section>
 
         <!-- ④ Comments (`gallery_detail_comments.xml`).
-             隐私打码：评论文本是内容，整段不出（回退到空态占位）。 -->
-        <section class="detail-comments" aria-label="Gallery comments">
+             隐私打码：评论文本是内容，整段不出（回退到空态占位）。
+             T1：整个评论区受 general.showGalleryComment 门控——v-if 在
+             section 渲染层（含打码占位一并隐藏）；评论请求照发不跳过：
+             prefs 加载时序与 loadComments 挂钩会引入「先隐藏后补拉」的
+             补偿 watch，复杂度不值，幂等 GET 留着无副作用。 -->
+        <section v-if="showCommentsSection" class="detail-comments" aria-label="Gallery comments">
           <template v-if="!privacyMaskEnabled">
             <p v-if="commentsStatus" class="detail-comments__status">{{ commentsStatus }}</p>
             <!-- F6: 加载失败不再伪装「No comments」——错误占位 + 重试入口。 -->
@@ -234,6 +241,8 @@ import { CATEGORY_BY_BIT } from '@/types/components'
 import type { GalleryDetail } from '@/types'
 import { rewriteSiteAssetUrl } from '@/utils/siteAsset'
 import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
+import { usePreferencesStore } from '@/stores/preferences'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import ProgressSpinner from '@/components/atoms/ProgressSpinner.vue'
 import RatingStars from '@/components/atoms/RatingStars.vue'
@@ -276,6 +285,35 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined
 
 /* ---------------------------------------------------------- derived --- */
 const galleryId = computed(() => Number(props.gid))
+
+/**
+ * T1/T2：详情页展示开关读 `general` 偏好（showGalleryPages / showGalleryRating /
+ * showGalleryComment / showJpnTitle）。prefs 未加载时一律按「显示」渲染防闪没，
+ * 加载完成后按服务器真实值——注意 showGalleryPages 与 showJpnTitle 的协议默认
+ * 是 false（api/preferences.ts），与任务书里「默认 true」的表述冲突，此处以
+ * API 文件为准：仅「未加载」这个过渡态按 true 兜底。
+ */
+const preferencesStore = usePreferencesStore()
+const generalPrefs = computed(() => preferencesStore.prefs?.general)
+
+/** 「页数」信息行（general.showGalleryPages）。 */
+const showPagesRow = computed(() =>
+  generalPrefs.value ? generalPrefs.value.showGalleryPages === true : true,
+)
+
+/** 评分块（general.showGalleryRating）。 */
+const showRatingBlock = computed(() =>
+  generalPrefs.value ? generalPrefs.value.showGalleryRating === true : true,
+)
+
+/** 评论区 section（general.showGalleryComment）。 */
+const showCommentsSection = computed(() =>
+  generalPrefs.value ? generalPrefs.value.showGalleryComment === true : true,
+)
+
+/** 日文标题副题（general.showJpnTitle，打码守卫在模板里另判）。 */
+const showJpnSubtitle = computed(() => isJpnSubtitleVisible(generalPrefs.value))
+
 /** Token from the entry link (?token=): lets the backend fetch the detail
  *  straight from the site when the gid is not in local history. */
 const route = useRoute()
@@ -341,6 +379,11 @@ const downloadLabel = computed(() => {
 
 /* ---------------------------------------------------------- loading --- */
 async function load() {
+  // 偏好懒预热（HomeView/FavoriteView 同款守卫）：深链直达详情页时没有其他
+  // 视图代为加载，T1/T2 开关会永远停在「未加载兜底」态。
+  if (!preferencesStore.prefs && !preferencesStore.loading) {
+    void preferencesStore.load()
+  }
   const seq = ++loadSeq
   loading.value = true
   error.value = null

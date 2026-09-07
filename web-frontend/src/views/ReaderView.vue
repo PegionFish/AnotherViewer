@@ -65,7 +65,7 @@
  *   in 1-based terms), matching `SpreadLayoutManager` paging.
  * - Keyboard: ←/→ (or A/D) turn pages — mirrored under RTL — Home/End jump,
  *   Space/Esc toggle the chrome; +/− zoom in single-page mode only (A7),
- *   in unified 0.25 steps within [0.5, 3].
+ *   additive steps (reader.zoomStep, default 0.25) within [0.5, maxZoom].
  * - Auto-play advances on a 100 ms-ticked timer (progress drives the countdown
  *   chip) and stops at the last page; it pauses while the tab is hidden.
  * - WebSocket: subscribes to `/topic/gallery/{gid}/enhanced` and hot-swaps
@@ -108,7 +108,6 @@ import { maskedTitle } from '@/utils/privacyMask'
 import ProgressSpinner from '@/components/atoms/ProgressSpinner.vue'
 import ImageReader from '@/components/reader/ImageReader.vue'
 import {
-  AUTO_PLAY_INTERVALS_MS,
   PAGE_MODE_PREFS,
   READING_DIRECTIONS,
   READER_ZOOM_MAX,
@@ -341,7 +340,10 @@ function onPageChange(page: number) {
 function nextPage(): boolean {
   const max = totalPages.value - 1
   if (resolvedMode.value === 'dual') {
-    const target = firstPageOfSpread(spreadIndexOf(currentPage.value) + 1)
+    // firstPageCover=false 时铺摊边界整体前移一位（(0,1),(2,3)…），与
+    // DualPageMode 的渲染换算共用同一带参 helper。
+    const cover = readerPrefs.value.firstPageCover
+    const target = firstPageOfSpread(spreadIndexOf(currentPage.value, cover) + 1, cover)
     if (totalPages.value > 0 && (target > max || target === currentPage.value)) return false
     currentPage.value = target
     return true
@@ -354,7 +356,8 @@ function nextPage(): boolean {
 /** Step back one page — to the start of the previous spread in dual mode. */
 function prevPage(): boolean {
   if (resolvedMode.value === 'dual') {
-    const target = firstPageOfSpread(spreadIndexOf(currentPage.value) - 1)
+    const cover = readerPrefs.value.firstPageCover
+    const target = firstPageOfSpread(spreadIndexOf(currentPage.value, cover) - 1, cover)
     if (target >= currentPage.value) return false
     currentPage.value = target
     return true
@@ -379,16 +382,26 @@ function goBack() {
 /* ------------------------------------------------------------------ */
 
 /**
- * Unified zoom semantics (plan-2026-09-05 A7): 0.25 steps clamped to
- * [0.5, 3] — the same units as the reader settings sheet, the double-tap
- * cycle and the pinch clamp.
+ * Unified zoom semantics (plan-2026-09-05 A7 + 偏好接线批次): 加法步进，
+ * 步长/上限活取 reader 偏好——zoomStep 钳 [0.05, 1]（默认 0.25）、
+ * maxZoom 钳 [1, READER_ZOOM_MAX]（默认 3）；常量退为默认值/上限参考。
  */
+const zoomStepPref = computed(() => {
+  const raw = readerPrefs.value.zoomStep
+  return Number.isFinite(raw) ? Math.min(1, Math.max(0.05, raw)) : READER_ZOOM_STEP
+})
+
+const zoomMaxPref = computed(() => {
+  const raw = readerPrefs.value.maxZoom
+  return Number.isFinite(raw) ? Math.min(READER_ZOOM_MAX, Math.max(1, raw)) : READER_ZOOM_MAX
+})
+
 function zoomIn(): void {
-  zoom.value = Math.min(READER_ZOOM_MAX, Math.round((zoom.value + READER_ZOOM_STEP) * 100) / 100)
+  zoom.value = Math.min(zoomMaxPref.value, Math.round((zoom.value + zoomStepPref.value) * 100) / 100)
 }
 
 function zoomOut(): void {
-  zoom.value = Math.max(READER_ZOOM_MIN, Math.round((zoom.value - READER_ZOOM_STEP) * 100) / 100)
+  zoom.value = Math.max(READER_ZOOM_MIN, Math.round((zoom.value - zoomStepPref.value) * 100) / 100)
 }
 
 useKeyboardNav({
@@ -431,9 +444,18 @@ useKeyboardNav({
 
 const AUTO_PLAY_TICK_MS = 100
 
+/**
+ * 播放器初始间隔的三方归一：以 reader.autoPlayIntervalSec 偏好（秒）为源，
+ * 快捷面板 chips 选中时写回同一键、设置页步进器直接改它。非法/缺省回退 3s。
+ */
+function autoPlayIntervalMs(): number {
+  const sec = readerPrefs.value.autoPlayIntervalSec
+  return (Number.isFinite(sec) && sec > 0 ? sec : 3) * 1000
+}
+
 const autoPlay = ref<AutoPlayState>({
   enabled: false,
-  intervalMs: AUTO_PLAY_INTERVALS_MS[1] ?? 3000,
+  intervalMs: autoPlayIntervalMs(),
 })
 const autoPlayProgress = ref(0)
 let autoPlayTimer: ReturnType<typeof setInterval> | null = null
@@ -759,7 +781,7 @@ function resetReaderState() {
   totalPages.value = 0
   currentPage.value = 0
   zoom.value = 1
-  autoPlay.value = { enabled: false, intervalMs: AUTO_PLAY_INTERVALS_MS[1] ?? 3000 }
+  autoPlay.value = { enabled: false, intervalMs: autoPlayIntervalMs() }
   autoPlayProgress.value = 0
   if (autoPlayTimer !== null) clearInterval(autoPlayTimer)
   autoPlayTimer = null

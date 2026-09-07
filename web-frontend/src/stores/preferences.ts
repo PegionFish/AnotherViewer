@@ -1,6 +1,10 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { preferencesApi, type Preferences, type GeneralPreferences, type ReaderPreferences, type PrivacyPreferences } from '@/api/preferences'
+// 循环依赖说明：theme.ts 也 import 本模块（setTheme 写穿偏好）。两边都只在
+// 函数体内调用对方的 useXxxStore()，模块顶层不触碰对方导出——ESM 循环加载
+// 下安全（见 theme.ts 顶部同款注释）。
+import { useThemeStore, isTheme } from '@/stores/theme'
 
 export const usePreferencesStore = defineStore('preferences', () => {
   const prefs = ref<Preferences | null>(null)
@@ -22,6 +26,15 @@ export const usePreferencesStore = defineStore('preferences', () => {
       const next = await preferencesApi.get()
       if (seq !== loadSeq || dirty) return
       prefs.value = next
+      // T3-1 主题回灌：服务器 theme 是唯一权威，加载成功后写回 themeStore
+      //（连带 localStorage / data-theme）。仅当值合法且与本地不同才 setTheme；
+      // setTheme 的写穿守卫看到「偏好值 === 回灌值」会跳过 updateGeneral，
+      // 所以这里不会形成 load → setTheme → PUT 的回环。
+      const serverTheme = next.general?.theme
+      if (isTheme(serverTheme)) {
+        const themeStore = useThemeStore()
+        if (themeStore.currentTheme !== serverTheme) themeStore.setTheme(serverTheme)
+      }
     } catch (e) {
       if (seq !== loadSeq) return
       loadError.value = true

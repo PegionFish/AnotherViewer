@@ -6,7 +6,8 @@
   >
     <time class="reader-status-bar__clock">{{ clockText }}</time>
 
-    <span class="reader-status-bar__progress">{{ progressText }}</span>
+    <!-- reader.showProgress=false 时整行隐藏；电量/时钟照常（CSS 显式列位兜住网格布局） -->
+    <span v-if="showProgress" class="reader-status-bar__progress">{{ progressText }}</span>
 
     <span class="reader-status-bar__battery" role="img" aria-label="电量">
       <!-- Static placeholder glyph standing in for hippo BatteryView -->
@@ -60,6 +61,11 @@ interface ReaderStatusBarProps {
   totalPages: number
   /** Whether the bar is shown. v-model:visible. */
   visible: boolean
+  /**
+   * reader.showProgress 偏好：false 隐藏中央页码行（状态栏其余部分不受
+   * 影响）。默认 true 保持既有行为。@default true
+   */
+  showProgress?: boolean
 }
 
 interface ReaderStatusBarEmits {
@@ -71,7 +77,9 @@ interface ReaderStatusBarEmits {
   (e: 'idle'): void
 }
 
-const props = defineProps<ReaderStatusBarProps>()
+const props = withDefaults(defineProps<ReaderStatusBarProps>(), {
+  showProgress: true,
+})
 const emit = defineEmits<ReaderStatusBarEmits>()
 
 /** `GalleryActivity.HIDE_SLIDER_DELAY`. */
@@ -176,6 +184,9 @@ onBeforeUnmount(() => {
 
 /* Clock — textColorSecondary-ish over imagery, tabular so it never jitters */
 .reader-status-bar__clock {
+  /* 显式列位：showProgress 隐藏中列时网格仍按 1fr/auto/1fr 对齐，
+   * 电量不会掉进中间 auto 列。 */
+  grid-column: 1;
   justify-self: start;
   color: rgba(255, 255, 255, 0.7);
   font-size: var(--text-little-small); /* 16sp */
@@ -203,6 +214,7 @@ onBeforeUnmount(() => {
 
 /* Battery placeholder — static glyph in place of hippo BatteryView */
 .reader-status-bar__battery {
+  grid-column: 3;
   justify-self: end;
   display: inline-flex;
   align-items: center;

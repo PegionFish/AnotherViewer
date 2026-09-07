@@ -2,8 +2,11 @@
   AdminDownload.vue — 管理面板 · 下载设置（Wave 6）。
 
   服务端设置（PUT /settings，防抖提交）:
-    - download.path / workerCount / downloadDelay / downloadTimeout
+    - download.path / downloadDelay / downloadTimeout
     - download.maxConcurrentGalleries / maxConcurrentImages
+
+  （workerCount「并发线程数」行已于 2026-09-07 删除：下载引擎零消费的死旋钮，
+  后端 DTO 同步移除。）
 
   设备本地设置（localStorage `anotherviewer-admin-download-ui`，仅本设备生效）:
     - 预加载图片数、排序方向、自动开始下载（旧版遗留键如 paginated 读取时忽略）
@@ -35,29 +38,6 @@
               <button type="button" class="pref-action-btn" aria-label="修改下载路径" @click="openPathDialog">
                 <AppIcon name="pencil-dark" size="20px" />
               </button>
-            </PrefRow>
-            <PrefRow icon="download-dark" title="并发线程数" summary="获取图片的工作线程数（1–10）">
-              <div class="stepper">
-                <button
-                  type="button"
-                  class="stepper__btn"
-                  aria-label="减少并发线程数"
-                  :disabled="!server || server.download.workerCount <= 1"
-                  @click="bump('workerCount', -1, 1, 10)"
-                >
-                  −
-                </button>
-                <span class="stepper__value">{{ server?.download.workerCount ?? '–' }}</span>
-                <button
-                  type="button"
-                  class="stepper__btn"
-                  aria-label="增加并发线程数"
-                  :disabled="!server || server.download.workerCount >= 10"
-                  @click="bump('workerCount', 1, 1, 10)"
-                >
-                  +
-                </button>
-              </div>
             </PrefRow>
             <PrefRow icon="pause-dark" title="下载延迟" summary="两次下载请求之间的间隔（毫秒）">
               <label class="num-field">
@@ -382,7 +362,7 @@ function flashSaved(): void {
 }
 
 function bump(
-  field: 'workerCount' | 'maxConcurrentGalleries' | 'maxConcurrentImages',
+  field: 'maxConcurrentGalleries' | 'maxConcurrentImages',
   delta: number,
   min: number,
   max: number,

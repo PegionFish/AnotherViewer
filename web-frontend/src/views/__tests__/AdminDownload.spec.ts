@@ -31,7 +31,6 @@ function fullSettings(): Settings {
   return {
     download: {
       path: '/data',
-      workerCount: 4,
       downloadDelay: 1000,
       downloadTimeout: 30000,
       maxConcurrentGalleries: 2,
@@ -86,7 +85,8 @@ describe('AdminDownload (下载设置)', () => {
 
     const titles = w.findAllComponents(PrefRow).map((r) => r.props('title'))
     expect(titles).toContain('下载路径')
-    expect(titles).toContain('并发线程数')
+    // F3：并发线程数（workerCount）为引擎零消费的死旋钮，行已删除。
+    expect(titles).not.toContain('并发线程数')
     expect(titles).toContain('下载延迟')
     expect(titles).toContain('下载超时')
     expect(titles).toContain('最大并发画廊数')
@@ -101,7 +101,7 @@ describe('AdminDownload (下载设置)', () => {
 
     expect(w.find('select').exists()).toBe(false)
     expect(w.find('.switch').exists()).toBe(false)
-    expect(w.findAll('.stepper').length).toBe(4)
+    expect(w.findAll('.stepper').length).toBe(3)
     expect(w.findAll('.num-field').length).toBe(2)
 
     // 排序/每页条数用 AppSelect 下拉，自动开始仍为 AppSwitch。
@@ -146,16 +146,16 @@ describe('AdminDownload (下载设置)', () => {
     expect(JSON.parse(raw!).autoStart).toBe(true)
   })
 
-  it('bumps the worker count stepper and persists via debounce', async () => {
+  it('bumps the max-concurrent-galleries stepper and persists via debounce', async () => {
     const w = await mountView()
     vi.useFakeTimers()
-    const row = w.findAllComponents(PrefRow).find((r) => r.props('title') === '并发线程数')!
-    const plus = row.findAll('.stepper__btn').find((b) => b.attributes('aria-label') === '增加并发线程数')!
+    const row = w.findAllComponents(PrefRow).find((r) => r.props('title') === '最大并发画廊数')!
+    const plus = row.findAll('.stepper__btn').find((b) => b.attributes('aria-label') === '增加最大并发画廊数')!
     await plus.trigger('click')
     expect(settingsApi.update).not.toHaveBeenCalled()
     await vi.advanceTimersByTimeAsync(700)
     expect(settingsApi.update).toHaveBeenCalledWith(
-      expect.objectContaining({ download: expect.objectContaining({ workerCount: 5 }) }),
+      expect.objectContaining({ download: expect.objectContaining({ maxConcurrentGalleries: 3 }) }),
     )
   })
 

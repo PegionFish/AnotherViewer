@@ -76,7 +76,7 @@
           </div>
         </section>
 
-        <!-- Zoom — 25% steps in [50%, 300%]; the value resets on tap -->
+        <!-- Zoom — 加法步进（reader.zoomStep）+ 上限 reader.maxZoom；点击数值复位 -->
         <section class="reader-settings__section">
           <h3 class="reader-settings__label">缩放</h3>
           <div class="reader-settings__zoom">
@@ -85,7 +85,7 @@
               class="reader-settings__zoom-step"
               :disabled="zoom <= zoomMin + 0.001"
               aria-label="缩小"
-              @click="stepZoom(-0.25)"
+              @click="stepZoom(-zoomStep)"
             >
               −
             </button>
@@ -102,7 +102,7 @@
               class="reader-settings__zoom-step"
               :disabled="zoom >= zoomMax - 0.001"
               aria-label="放大"
-              @click="stepZoom(0.25)"
+              @click="stepZoom(zoomStep)"
             >
               +
             </button>
@@ -137,7 +137,7 @@
                 class="reader-settings__chip"
                 :class="{ 'reader-settings__chip--active': autoPlay.intervalMs === intervalMs }"
                 :disabled="!autoPlay.enabled"
-                @click="emit('update:autoPlay', { enabled: true, intervalMs })"
+                @click="pickInterval(intervalMs)"
               >
                 {{ intervalMs / 1000 }}s
               </button>
@@ -161,7 +161,7 @@
               @input="onBrightnessInput"
             />
             <span class="reader-settings__brightness-value">
-              {{ brightness === 0 ? '跟随系统' : `${brightness}%` }}
+              {{ brightness === 0 ? '系统' : `${brightness}%` }}
             </span>
           </div>
         </section>
@@ -178,15 +178,23 @@
  * - Reading direction: `READING_DIRECTION_LTR / RTL / VERTICAL`
  * - Page mode: auto (landscape → dual per responsive-strategy §6 rule 3),
  *   single, dual, scroll
- * - Zoom: 25% steps in [50%, 300%] (pinch / double-tap also adjust it live)
- * - Auto-play: toggle + interval (Android `auto_transfer`)
+ * - Zoom: 加法步进（reader.zoomStep 偏好，默认 0.25），上限 reader.maxZoom
+ *   （默认 3）；捏合 / 双击 / 键盘同一套单位
+ * - Auto-play: toggle + interval (Android `auto_transfer`)；间隔选中即写回偏好
  * - Brightness: 0 = follow system, 1–100 dims the page via a black mask
  *   (the `ColorView` mask in `activity_gallery.xml`)
  *
  * Every value is v-model'd upward; persistence is the parent's concern.
  */
-import { AUTO_PLAY_INTERVALS_MS, READER_ZOOM_MAX, READER_ZOOM_MIN } from './PageMode.vue'
+import { computed } from 'vue'
+import {
+  AUTO_PLAY_INTERVALS_MS,
+  READER_ZOOM_MAX,
+  READER_ZOOM_MIN,
+  READER_ZOOM_STEP,
+} from './PageMode.vue'
 import type { AutoPlayState, PageModePref, ReadingDirection } from './PageMode.vue'
+import { usePreferencesStore } from '@/stores/preferences'
 
 interface ReaderSettingsProps {
   visible: boolean
@@ -210,15 +218,31 @@ interface ReaderSettingsEmits {
 const props = defineProps<ReaderSettingsProps>()
 const emit = defineEmits<ReaderSettingsEmits>()
 
-// A7: 缩放语义统一——范围与阅读器其余通道（键盘 +/-、双击、捏合）共用
-// PageMode 的常量，步长固定 0.25。
-const zoomMin = READER_ZOOM_MIN
-const zoomMax = READER_ZOOM_MAX
+const preferencesStore = usePreferencesStore()
 
+/**
+ * A7 + 偏好接线：缩放步长/上限从 reader 偏好活取（与键盘 +/-、捏合、双击
+ * 同源），PageMode 常量退为缺省值。zoomStep 是加法步进，钳 [0.05, 1]；
+ * maxZoom 钳 [1, READER_ZOOM_MAX]。v-model 接口不变。
+ */
+const zoomStep = computed(() => {
+  const raw = preferencesStore.prefs?.reader.zoomStep
+  return Number.isFinite(raw) ? Math.min(1, Math.max(0.05, raw!)) : READER_ZOOM_STEP
+})
+
+const zoomMax = computed(() => {
+  const raw = preferencesStore.prefs?.reader.maxZoom
+  return Number.isFinite(raw) ? Math.min(READER_ZOOM_MAX, Math.max(1, raw!)) : READER_ZOOM_MAX
+})
+
+const zoomMin = READER_ZOOM_MIN
+
+// 与设置页 /settings/reader 的 DIRECTION_OPTIONS 保持同一套文案，
+// 避免同一取值在两个表面出现两种名称。
 const directionOptions: ReadonlyArray<{ value: ReadingDirection; label: string }> = [
-  { value: 'ltr', label: '从左到右' },
-  { value: 'rtl', label: '从右到左' },
-  { value: 'vertical', label: '竖向' },
+  { value: 'ltr', label: '左到右' },
+  { value: 'rtl', label: '右到左' },
+  { value: 'vertical', label: '纵向' },
 ]
 
 const modeOptions: ReadonlyArray<{ value: PageModePref; label: string }> = [
@@ -229,8 +253,20 @@ const modeOptions: ReadonlyArray<{ value: PageModePref; label: string }> = [
 ]
 
 function stepZoom(delta: number) {
-  const next = Math.min(zoomMax, Math.max(zoomMin, Math.round((props.zoom + delta) * 100) / 100))
+  const next = Math.min(
+    zoomMax.value,
+    Math.max(zoomMin, Math.round((props.zoom + delta) * 100) / 100),
+  )
   emit('update:zoom', next)
+}
+
+/**
+ * 自动播放间隔三方归一：选中 chip 除改运行值外写回 reader.autoPlayIntervalSec
+ * （设置页步进器与播放器初始值同源；store 未载入时 updateReader 自行 no-op）。
+ */
+function pickInterval(intervalMs: number) {
+  emit('update:autoPlay', { enabled: true, intervalMs })
+  preferencesStore.updateReader({ autoPlayIntervalSec: intervalMs / 1000 })
 }
 
 function toggleAutoPlay() {

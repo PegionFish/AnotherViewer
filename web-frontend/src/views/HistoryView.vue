@@ -227,6 +227,7 @@ import type { HistoryItem } from '@/api/history'
 import { useFilterSlots } from '@/composables/useFilterSlots'
 import { usePagedList } from '@/composables/usePagedList'
 import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
 import { usePreferencesStore } from '@/stores/preferences'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import {
@@ -440,9 +441,16 @@ function displayTitle(item: HistoryItem): string {
   return maskedTitle(item.title || item.titleJpn || `#${item.gid}`, item.gid)
 }
 
-/** 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）。 */
+/**
+ * 日文副题：打码开启时一并隐藏（同 GalleryCard 的标题日文行守卫）；
+ * showJpnTitle 加载后为 false 也隐藏（协议默认 false，prefs 未加载按显示
+ * 渲染防闪失——T2 定案，判定收敛在 utils/jpnSubtitle）。本视图刻意不自发
+ * preferences load（只读不 load 的既有约定），副题可能在 load 完成前短暂
+ * 显示后按 false 收起，可接受。
+ */
 function displaySubtitle(item: HistoryItem): string | null {
-  return !privacyMaskEnabled.value && item.titleJpn ? item.titleJpn : null
+  if (privacyMaskEnabled.value || !item.titleJpn) return null
+  return isJpnSubtitleVisible(preferences.prefs?.general) ? item.titleJpn : null
 }
 
 /** Numeric category bit → `GalleryCategory` key (undefined when unknown). */
@@ -597,6 +605,9 @@ async function confirmClear(): Promise<void> {
 
 onMounted(() => {
   void load()
+  // 深链直入时无其他视图代为预热偏好；不加载则 showReadProgress 角标
+  // 按空 prefs 的防御默认隐藏（HomeView/DownloadView 同款守卫）。
+  if (!preferences.prefs && !preferences.loading) void preferences.load()
 })
 </script>
 

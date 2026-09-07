@@ -55,6 +55,7 @@
         :current-page="currentPage + 1"
         :total-pages="totalPages"
         :visible="chromeVisible"
+        :show-progress="showProgressPref"
         @idle="onStatusBarIdle"
       />
     </div>
@@ -77,6 +78,7 @@
         :current-page="currentPage + 1"
         :total-pages="totalPages"
         :reversed="direction === 'rtl'"
+        :show-interval-ticks="showIntervalTicks"
         @change="onSeekCommit"
         @update:current-page="onSeekPreview"
         @seek-start="onSeekStart"
@@ -221,13 +223,30 @@ const rootWidth = ref(0)
 /** The status bar instance — its idle countdown is re-armed on mouse wake. */
 const statusBarRef = ref<InstanceType<typeof ReaderStatusBar> | null>(null)
 
-/** Chrome (status bar + toolbar + seek bar) visibility — tap to toggle. */
-const chromeVisible = ref(true)
+/**
+ * Chrome (status bar + toolbar + seek bar) visibility — tap to toggle.
+ * 初值接 reader.fullscreen 偏好（true = 进阅读器即全屏、chrome 藏起）；
+ * 默认 false 维持既有行为（进入时 chrome 可见）。不接 Fullscreen API，
+ * 退出/切页/tap 切换语义不变。
+ */
+const chromeVisible = ref(!(preferencesStore.prefs?.reader.fullscreen ?? false))
 const settingsVisible = ref(false)
 /** True while the seek bar is being scrubbed. */
 const seeking = ref(false)
 /** Bumped to remount ReaderStatusBar and restart its idle countdown. */
 const statusBarEpoch = ref(0)
+
+/* ------------------------------------------------------------------ */
+/* Wave-1 偏好活消费：showProgress / showPageInterval                   */
+/* ------------------------------------------------------------------ */
+
+/** reader.showProgress：只隐藏状态栏的页码行，其余 chrome 不受影响。 */
+const showProgressPref = computed(() => preferencesStore.prefs?.reader.showProgress ?? true)
+
+/** 页间隔刻度：分页模式 + 偏好开启才渲染（滚动模式不显示；页数≤2 由面板内再兜）。 */
+const showIntervalTicks = computed(
+  () => props.mode !== 'scroll' && (preferencesStore.prefs?.reader.showPageInterval ?? true),
+)
 
 /* ------------------------------------------------------------------ */
 /* Back / exit — Android 系统返回语义                                    */

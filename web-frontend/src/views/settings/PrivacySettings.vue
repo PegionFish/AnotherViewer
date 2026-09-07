@@ -2,8 +2,12 @@
   PrivacySettings.vue — 设置 · 隐私（对齐管理面板的页面逻辑：页头 + 保存
   反馈 + 图标行 + 偏好分组卡片）.
 
-  变更通过 preferencesStore（防抖 PUT /preferences）持久化；保存成功后
+  偏好变更通过 preferencesStore（防抖 PUT /preferences）持久化；保存成功后
   页头闪现「已保存」。
+
+  内容打码模式（2026-09-07 自管理面板「高级 > 隐私」迁入，F5）不走
+  preferencesStore：其权威持久化在服务端 /privacy/mask（对 Agent 等无头
+  客户端同样生效），本地只做乐观切换。
 -->
 <template>
   <div class="privacy-settings">
@@ -22,6 +26,17 @@
         <section>
           <SectionHeader title="隐私" />
           <PrefCard>
+            <PrefRow
+              icon="sec-primary"
+              title="内容打码模式"
+              summary="标题以内容序列号 #gid 显示，图片替换为占位符——便于截图协作"
+            >
+              <AppSwitch
+                :model-value="privacyMaskEnabled"
+                aria-label="内容打码模式"
+                @update:model-value="togglePrivacyMask"
+              />
+            </PrefRow>
             <PrefRow icon="sec-primary" title="启用统计" summary="帮助改进应用体验">
               <AppSwitch
                 :model-value="prefs.privacy.enableAnalytics"
@@ -49,6 +64,8 @@
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { usePreferencesStore } from '@/stores/preferences'
 import { AppSwitch, PrefCard, PrefRow, SectionHeader } from '@/components/form'
+import { privacyApi } from '@/api/privacy'
+import { privacyMaskEnabled, setPrivacyMaskEnabled } from '@/utils/privacyMask'
 
 const preferencesStore = usePreferencesStore()
 
@@ -59,6 +76,18 @@ const prefs = computed(() => preferencesStore.prefs)
 function toggleAnalytics(): void {
   if (!prefs.value) return
   preferencesStore.updatePrivacy({ enableAnalytics: !prefs.value.privacy.enableAnalytics })
+}
+
+/** 内容打码：乐观切换本地展示层，权威持久化在服务端（/privacy/mask）；
+ *  与 preferencesStore 的防抖保存无关，失败回滚并提示。 */
+function togglePrivacyMask(): void {
+  const next = !privacyMaskEnabled.value
+  setPrivacyMaskEnabled(next)
+  privacyApi.setMask(next).catch((error) => {
+    console.error('[PrivacySettings] failed to persist privacy mask', error)
+    setPrivacyMaskEnabled(!next)
+    showSnack('打码状态保存失败', 5000)
+  })
 }
 
 /* ------------------------------- save feedback ---------------------------- */
@@ -80,12 +109,12 @@ watch(
 const snack = ref('')
 let snackTimer: number | undefined
 
-function showSnack(message: string): void {
+function showSnack(message: string, duration = 2600): void {
   snack.value = message
   if (snackTimer) window.clearTimeout(snackTimer)
   snackTimer = window.setTimeout(() => {
     snack.value = ''
-  }, 2600)
+  }, duration)
 }
 
 watch(

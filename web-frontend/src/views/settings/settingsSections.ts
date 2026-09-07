@@ -37,7 +37,7 @@ export const SETTINGS_GROUPS: SettingsSectionGroup[] = [
     items: [
       { path: '/settings/server/download', label: '下载', icon: 'download-dark' },
       { path: '/settings/server/filter-slots', label: '筛选槽位', icon: 'magnify-dark' },
-      { path: '/settings/server/server', label: '服务器', icon: 'settings-dark' },
+      { path: '/settings/server/server', label: '缓存与存储', icon: 'settings-dark' },
       { path: '/settings/server/backup', label: '备份', icon: 'download-box-dark' },
       { path: '/settings/server/devices', label: '设备', icon: 'mobile-hand-left' },
       { path: '/settings/server/eh', label: 'EH 会话', icon: 'cookie-brown' },

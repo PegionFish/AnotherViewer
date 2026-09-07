@@ -8,6 +8,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { usePreferencesStore } from '../preferences'
+import { useThemeStore } from '../theme'
 import { preferencesApi, type Preferences } from '@/api/preferences'
 
 vi.mock('@/api/preferences', () => ({
@@ -69,5 +70,56 @@ describe('preferences store — save failure releases the load gate (audit P2)',
     await vi.advanceTimersByTimeAsync(700)
     expect(store.saveError).toBeNull()
     expect(preferencesApi.update).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('preferences store — theme backfill into the theme store (T3-1)', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    localStorage.clear()
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('pushes a valid server theme into the theme store (and localStorage)', async () => {
+    const themeStore = useThemeStore()
+    expect(themeStore.currentTheme).toBe('light')
+
+    const store = usePreferencesStore()
+    vi.mocked(preferencesApi.get).mockResolvedValueOnce(serverPrefs('black'))
+    await store.load()
+
+    expect(themeStore.currentTheme).toBe('black')
+    expect(localStorage.getItem('anotherviewer-theme')).toBe('black')
+    // 回灌不回写：setTheme 的写穿守卫看到「偏好值 === 回灌值」→ 不触发 PUT。
+    expect(preferencesApi.update).not.toHaveBeenCalled()
+  })
+
+  it('ignores non-theme values from the server', async () => {
+    const themeStore = useThemeStore()
+
+    const store = usePreferencesStore()
+    vi.mocked(preferencesApi.get).mockResolvedValueOnce(serverPrefs('server-v1'))
+    await store.load()
+
+    expect(themeStore.currentTheme).toBe('light')
+    expect(localStorage.getItem('anotherviewer-theme')).toBeNull()
+    expect(preferencesApi.update).not.toHaveBeenCalled()
+  })
+
+  it('does not touch the theme store when server theme already matches', async () => {
+    localStorage.setItem('anotherviewer-theme', 'dark')
+    const themeStore = useThemeStore()
+    expect(themeStore.currentTheme).toBe('dark')
+
+    const store = usePreferencesStore()
+    vi.mocked(preferencesApi.get).mockResolvedValueOnce(serverPrefs('dark'))
+    await store.load()
+
+    expect(themeStore.currentTheme).toBe('dark')
+    expect(preferencesApi.update).not.toHaveBeenCalled()
   })
 })
