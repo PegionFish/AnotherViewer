@@ -87,6 +87,23 @@ class PrivacyMaskFilterTest {
         assertEquals("/data/downloads", root["download"]["path"].asText())
     }
 
+    @Test
+    fun `archive torrent and downloadDir fields are scrubbed under gid anchor`() {
+        val json = """
+            {"archives":[{"gid":700,"url":"https://e-hentai.org/archiver/x","name":"Title Archive.zip","size":"100 MB","price":"1000","credit":"0"}],
+             "torrents":[{"gid":700,"token":"t","name":"Title Torrent","size":"80 MB","addedTime":"2026-01-01"}],
+             "downloads":[{"gid":800,"title":"#800","downloadDir":"/server/AnotherViewer/data/downloads/800-Title"}]}
+        """.trimIndent()
+        val root = objectMapper.readTree(json)
+
+        assertTrue(PrivacyMaskFilter.redact(root))
+
+        assertEquals("#700", root["archives"][0]["name"].asText())
+        assertEquals("", root["archives"][0]["url"].asText())
+        assertEquals("#700", root["torrents"][0]["name"].asText())
+        assertEquals("", root["downloads"][0]["downloadDir"].asText())
+    }
+
     // ── 过滤器接线（MockMvc 集成） ──────────────────────────────
 
     @Test

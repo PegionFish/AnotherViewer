@@ -79,6 +79,9 @@ class PrivacyMaskFilter(
             "/api/v1/history",
             "/api/v1/download",
             "/api/v1/search",
+            "/api/v1/comment",
+            "/api/v1/archive",
+            "/api/v1/torrent",
         )
 
         /** 打码序列号的形态（# + 纯数字）——历史回写据此拒绝污染标题。 */
@@ -128,6 +131,15 @@ class PrivacyMaskFilter(
                 changed = putEmptyArray(obj, "simpleTags") || changed
                 changed = putEmptyArray(obj, "tags") || changed
                 changed = putEmptyText(obj, "galleryUrl") || changed
+                // 归档/种子条目（ArchiveItem/TorrentItem）：name 即标题
+                val name = obj["name"]
+                if (name != null && name.isTextual && name.asText().isNotBlank()) {
+                    obj.put("name", "#${gid.asLong()}")
+                    changed = true
+                }
+                // 归档下载地址（含站点域）与下载行本地路径（目录名含标题）
+                changed = putEmptyText(obj, "url") || changed
+                changed = putEmptyText(obj, "downloadDir") || changed
             }
 
             // 评论对象：comment 文本 + 上传者名（评论对象无 gid，靠字段组合识别）
