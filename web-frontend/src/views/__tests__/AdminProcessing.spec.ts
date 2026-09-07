@@ -25,6 +25,11 @@ function settingsWithProcessing(overrides: Partial<Settings['processing']> = {})
       defaultType: 'UPSCALE_2X',
       outputFormat: 'png',
       outputQuality: 90,
+      entrypointUrl: 'http://192.168.6.141:9800',
+      entrypointTokenSet: false,
+      automationEnabled: false,
+      periodicEnabled: false,
+      periodicIntervalMinutes: 60,
       ...overrides,
     },
     proxy: { enabled: false, type: 'http', host: '', port: 0, username: '', password: '' },
@@ -70,6 +75,7 @@ describe('AdminProcessing (图像处理)', () => {
       { value: 'UPSCALE_4X', label: '4X 放大' },
       { value: 'DENOISE', label: '降噪' },
       { value: 'DENOISE_UPSCALE', label: '降噪 + 放大' },
+      { value: 'REMOVE_BG', label: '抠图（去背景）' },
     ])
     expect(selects[1].props('options')).toEqual([
       { value: 'png', label: 'PNG' },

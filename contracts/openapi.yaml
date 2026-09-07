@@ -3919,6 +3919,26 @@ components:
           type: string
         outputQuality:
           type: integer
+        entrypointUrl:
+          type: string
+          description: Base URL of the EntryPoint inference service (image processing backend)
+        entrypointToken:
+          type: string
+          description: Write-only; empty/absent keeps the stored token, which is never returned
+        entrypointTokenSet:
+          type: boolean
+          description: Whether an EntryPoint API token is currently stored on the server
+        automationEnabled:
+          type: boolean
+          description: Trigger processing automatically when a download finishes
+        periodicEnabled:
+          type: boolean
+          description: Periodically scan downloaded galleries and process not-yet-enhanced pages
+        periodicIntervalMinutes:
+          type: integer
+          minimum: 15
+          maximum: 10080
+          default: 60
 
     ProxySettings:
       type: object

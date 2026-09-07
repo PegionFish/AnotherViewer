@@ -93,6 +93,17 @@ data class ProcessingSettingsUpdate(
     @field:Min(1, message = "outputQuality must be between 1 and 100")
     @field:Max(100, message = "outputQuality must be between 1 and 100")
     val outputQuality: Int? = null,
+    // EntryPoint（图像处理管线副武器）接线。
+    @field:Size(max = 255, message = "entrypointUrl must be at most 255 characters")
+    val entrypointUrl: String? = null,
+    /** Write-only: empty/absent keeps the stored token (mirrors proxy.password). */
+    @field:Size(max = 255, message = "entrypointToken must be at most 255 characters")
+    val entrypointToken: String? = null,
+    val automationEnabled: Boolean? = null,
+    val periodicEnabled: Boolean? = null,
+    @field:Min(15, message = "periodicIntervalMinutes must be at least 15")
+    @field:Max(10080, message = "periodicIntervalMinutes must be at most 10080")
+    val periodicIntervalMinutes: Int? = null,
 )
 
 data class ProxySettingsUpdate(
@@ -126,6 +137,15 @@ data class ProcessingSettings(
     @field:Min(1, message = "outputQuality must be between 1 and 100")
     @field:Max(100, message = "outputQuality must be between 1 and 100")
     val outputQuality: Int = 90,
+    // EntryPoint（图像处理管线副武器）接线；token 永不回传，只报是否已配置。
+    @field:Size(max = 255, message = "entrypointUrl must be at most 255 characters")
+    val entrypointUrl: String = "http://192.168.6.141:9800",
+    val entrypointTokenSet: Boolean = false,
+    val automationEnabled: Boolean = false,
+    val periodicEnabled: Boolean = false,
+    @field:Min(15, message = "periodicIntervalMinutes must be at least 15")
+    @field:Max(10080, message = "periodicIntervalMinutes must be at most 10080")
+    val periodicIntervalMinutes: Int = 60,
 )
 
 data class ProxySettings(

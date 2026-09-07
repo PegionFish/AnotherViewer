@@ -55,6 +55,11 @@ anotherviewer:
     concurrency: 1
     task-ttl-ms: 600000
     max-tasks: 100
+    # 单页业务超时（分钟）：到点 cancel(降级) 后标 FAILED(TIMEOUT)——手册 D15。
+    task-timeout-minutes: 30
+    automation:
+      # 定期补跑扫描心跳（实际触发间隔由 serverConfig periodic_interval_minutes 控制）。
+      scan-interval-ms: 60000
   smb:
     enabled: false
   security:

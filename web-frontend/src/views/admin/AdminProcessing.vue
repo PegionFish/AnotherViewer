@@ -89,7 +89,7 @@ import { AppSelect, AppSwitch, PrefCard, PrefRow, SectionHeader } from '@/compon
 /* ------------------------------ option lists ----------------------------- */
 
 /** 后端 ImageProcessor.kt ProcessingType 枚举，defaultType 以字符串存储。 */
-type ProcessingType = 'UPSCALE_2X' | 'UPSCALE_4X' | 'DENOISE' | 'DENOISE_UPSCALE'
+type ProcessingType = 'UPSCALE_2X' | 'UPSCALE_4X' | 'DENOISE' | 'DENOISE_UPSCALE' | 'REMOVE_BG'
 type OutputFormat = 'png' | 'jpeg' | 'webp'
 
 const TYPE_OPTIONS: Array<{ value: ProcessingType; label: string }> = [
@@ -97,6 +97,7 @@ const TYPE_OPTIONS: Array<{ value: ProcessingType; label: string }> = [
   { value: 'UPSCALE_4X', label: '4X 放大' },
   { value: 'DENOISE', label: '降噪' },
   { value: 'DENOISE_UPSCALE', label: '降噪 + 放大' },
+  { value: 'REMOVE_BG', label: '抠图（去背景）' },
 ]
 
 const FORMAT_OPTIONS: Array<{ value: OutputFormat; label: string }> = [
@@ -116,6 +117,11 @@ const DEFAULT_PROCESSING: ProcessingSettings = {
   defaultType: 'UPSCALE_2X',
   outputFormat: 'png',
   outputQuality: 90,
+  entrypointUrl: 'http://192.168.6.141:9800',
+  entrypointTokenSet: false,
+  automationEnabled: false,
+  periodicEnabled: false,
+  periodicIntervalMinutes: 60,
 }
 
 const processing = reactive<ProcessingSettings>({ ...DEFAULT_PROCESSING })

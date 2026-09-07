@@ -73,6 +73,7 @@ dependencies {
     implementation("org.tukaani:xz:1.10")
     runtimeOnly("org.springframework.boot:spring-boot-starter-actuator")
     testImplementation("org.springframework.boot:spring-boot-starter-test")
+    testImplementation("com.squareup.okhttp3:mockwebserver:4.12.0")
 }
 
 tasks.withType<Test> {

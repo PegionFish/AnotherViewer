@@ -25,7 +25,7 @@ function settingsWithSecurity(overrides: Partial<Settings['security']> = {}): Se
     cache: { path: '/cache', sizeMb: 5120 },
     smb: { enabled: false },
     security: { requireAuth: false, sessionTimeout: 86400, ...overrides },
-    processing: { enabled: false, defaultType: 'UPSCALE_2X', outputFormat: 'png', outputQuality: 90 },
+    processing: { enabled: false, defaultType: 'UPSCALE_2X', outputFormat: 'png', outputQuality: 90, entrypointUrl: 'http://192.168.6.141:9800', entrypointTokenSet: false, automationEnabled: false, periodicEnabled: false, periodicIntervalMinutes: 60 },
     proxy: { enabled: false, type: 'http', host: '', port: 0, username: '', password: '' },
   }
 }

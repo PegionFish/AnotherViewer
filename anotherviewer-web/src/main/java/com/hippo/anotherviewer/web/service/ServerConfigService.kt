@@ -16,9 +16,8 @@ class ServerConfigService(
 
     fun get(key: String, default: String = ""): String {
         val raw = repo.findById(key).map { it.value }.orElse(default)
-        if (key == WebProxyManager.KEY_PASSWORD && raw.startsWith(ENC_PREFIX)) {
-            // Encrypted at rest; decrypt transparently so consumers (WebProxyManager,
-            // ProxyController, SettingsService) keep reading plaintext.
+        if (isSecretKey(key) && raw.startsWith(ENC_PREFIX)) {
+            // Encrypted at rest; decrypt transparently so consumers keep reading plaintext.
             return runCatching { encryptionService.decrypt(raw.removePrefix(ENC_PREFIX), encryptionKey()) }
                 .getOrDefault("")
         }
@@ -38,8 +37,8 @@ class ServerConfigService(
         get(key, default.toString()).toLongOrNull() ?: default
 
     fun set(key: String, value: String) {
-        val stored = if (key == WebProxyManager.KEY_PASSWORD && value.isNotEmpty()) {
-            // Encrypt proxy passwords at rest; never store plaintext.
+        val stored = if (isSecretKey(key) && value.isNotEmpty()) {
+            // Encrypt secrets at rest; never store plaintext.
             ENC_PREFIX + encryptionService.encrypt(value, encryptionKey())
         } else {
             value
@@ -112,6 +111,18 @@ class ServerConfigService(
         // 对内容类 JSON 响应统一脱敏（Agent 等无头客户端也拿到脱敏数据）。
         const val KEY_PRIVACY_MASK = "privacy.mask_enabled"
 
+        // 图像处理×EntryPoint（2026-09-08）：端点/token 走 settings 双写；
+        // token 与 proxy.password 同走 enc:v1: 加密落盘（见 isSecretKey）。
+        const val KEY_ENTRYPOINT_URL = "processing.entrypoint_url"
+        const val KEY_ENTRYPOINT_TOKEN = "processing.entrypoint_token"
+        const val KEY_AUTOMATION_ENABLED = "processing.automation_enabled"
+        const val KEY_PERIODIC_ENABLED = "processing.periodic_enabled"
+        const val KEY_PERIODIC_INTERVAL = "processing.periodic_interval_minutes"
+        // ProcessingType.name() → {"module","capability","params":{...}} 的 JSON 映射表。
+        const val KEY_TYPE_MAPPING = "processing.type_mapping"
+        // 定期补跑上次触发时间（epoch millis，调度器自记录，无 UI）。
+        const val KEY_AUTOMATION_LAST_SCAN = "processing.automation_last_scan"
+
         val defaults = mapOf(
             // LAN personal deployment: auth is off by default; the operator
             // opts in via ANOTHERVIEWER_REQUIRE_AUTH or a DB value.
@@ -127,6 +138,15 @@ class ServerConfigService(
             KEY_SYNC_AUTO_SYNC_INTERVAL_SEC to "900",
             KEY_SITE_GALLERY to "0",
             KEY_PRIVACY_MASK to "false",
+            // EntryPoint 副武器（同机 141:9800）；token 默认空=未配置。
+            KEY_ENTRYPOINT_URL to "http://192.168.6.141:9800",
+            KEY_AUTOMATION_ENABLED to "false",
+            KEY_PERIODIC_ENABLED to "false",
+            KEY_PERIODIC_INTERVAL to "60",
         )
+
+        /** 落盘需加密的键（静态加密 enc:v1:，get 时透明解密）。 */
+        private fun isSecretKey(key: String): Boolean =
+            key == WebProxyManager.KEY_PASSWORD || key == KEY_ENTRYPOINT_TOKEN
     }
 }

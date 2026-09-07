@@ -33,7 +33,9 @@ enum class ProcessingType {
     /** Denoise only */
     DENOISE,
     /** Denoise + upscale */
-    DENOISE_UPSCALE
+    DENOISE_UPSCALE,
+    /** Background removal（EntryPoint rembg/remove_bg，2026-09-08 冒烟验证的唯一图像能力） */
+    REMOVE_BG
 }
 
 data class ProcessingOptions(

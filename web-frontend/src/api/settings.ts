@@ -27,6 +27,15 @@ export interface ProcessingSettings {
   defaultType: string
   outputFormat: string
   outputQuality: number
+  /** EntryPoint（图像处理副武器）端点；token 永不回传，只报 entrypointTokenSet。 */
+  entrypointUrl: string
+  /** True when an EntryPoint API token is stored server-side (GET only). */
+  entrypointTokenSet?: boolean
+  /** 下载完成后自动处理。 */
+  automationEnabled: boolean
+  /** 定期补跑未处理页。 */
+  periodicEnabled: boolean
+  periodicIntervalMinutes: number
 }
 
 export interface ProxySettings {

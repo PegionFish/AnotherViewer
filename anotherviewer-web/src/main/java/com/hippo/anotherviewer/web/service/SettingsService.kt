@@ -37,6 +37,14 @@ class SettingsService(
                 defaultType = serverConfig.get("processing.default_type", "UPSCALE_2X"),
                 outputFormat = serverConfig.get("processing.output_format", "png"),
                 outputQuality = serverConfig.get("processing.output_quality", "90").toIntOrNull() ?: 90,
+                entrypointUrl = serverConfig.get(
+                    ServerConfigService.KEY_ENTRYPOINT_URL, "http://192.168.6.141:9800"
+                ),
+                entrypointTokenSet = serverConfig.get(ServerConfigService.KEY_ENTRYPOINT_TOKEN).isNotEmpty(),
+                automationEnabled = serverConfig.getBoolean(ServerConfigService.KEY_AUTOMATION_ENABLED, false),
+                periodicEnabled = serverConfig.getBoolean(ServerConfigService.KEY_PERIODIC_ENABLED, false),
+                periodicIntervalMinutes = serverConfig.getLong(ServerConfigService.KEY_PERIODIC_INTERVAL, 60)
+                    .toInt().coerceIn(15, 10080),
             ),
             proxy = ProxySettings(
                 enabled = serverConfig.getBoolean(WebProxyManager.KEY_ENABLED, false),
@@ -97,6 +105,19 @@ class SettingsService(
             proc.defaultType?.let { serverConfig.set("processing.default_type", it) }
             proc.outputFormat?.let { serverConfig.set("processing.output_format", it) }
             proc.outputQuality?.let { serverConfig.set("processing.output_quality", it.toString()) }
+            proc.entrypointUrl?.takeIf { it.isNotBlank() }?.let {
+                serverConfig.set(ServerConfigService.KEY_ENTRYPOINT_URL, it)
+            }
+            // Empty/absent token keeps the stored one — GET never echoes it back
+            // (mirrors the proxy.password contract).
+            if (!proc.entrypointToken.isNullOrEmpty()) {
+                serverConfig.set(ServerConfigService.KEY_ENTRYPOINT_TOKEN, proc.entrypointToken)
+            }
+            proc.automationEnabled?.let { serverConfig.setBoolean(ServerConfigService.KEY_AUTOMATION_ENABLED, it) }
+            proc.periodicEnabled?.let { serverConfig.setBoolean(ServerConfigService.KEY_PERIODIC_ENABLED, it) }
+            proc.periodicIntervalMinutes?.let {
+                serverConfig.set(ServerConfigService.KEY_PERIODIC_INTERVAL, it.toString())
+            }
         }
         request.proxy?.let { proxy ->
             proxy.enabled?.let { serverConfig.setBoolean(WebProxyManager.KEY_ENABLED, it) }

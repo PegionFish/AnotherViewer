@@ -28,6 +28,11 @@ function settingsFixture(): Settings {
       defaultType: 'UPSCALE',
       outputFormat: 'jpg',
       outputQuality: 90,
+      entrypointUrl: 'http://192.168.6.141:9800',
+      entrypointTokenSet: false,
+      automationEnabled: false,
+      periodicEnabled: false,
+      periodicIntervalMinutes: 60,
     },
     proxy: {
       enabled: false,
