@@ -64,3 +64,4 @@ web-frontend/e2e/test-results/
 # zip 发布包产物
 /dist/
 __pycache__/
+scripts/audit-api-masking.py
