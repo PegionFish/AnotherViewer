@@ -31,6 +31,8 @@ export interface ProcessingSettings {
   entrypointUrl: string
   /** True when an EntryPoint API token is stored server-side (GET only). */
   entrypointTokenSet?: boolean
+  /** Write-only: GET never echoes the token; omitting it on PUT keeps the stored value (D1). */
+  entrypointToken?: string
   /** 下载完成后自动处理。 */
   automationEnabled: boolean
   /** 定期补跑未处理页。 */

@@ -2074,6 +2074,114 @@ paths:
         '404':
           description: Task not found
 
+  /api/v1/process/tasks:
+    get:
+      tags: [Processing]
+      operationId: getProcessingTasks
+      summary: List processing tasks (active snapshot or recent mixed list)
+      description: |
+        With `active=1`, returns the in-memory active tasks only (PENDING/
+        PROCESSING, including transient progress). Without the parameter,
+        returns the most recent 200 history records from the task store,
+        newest first (terminal + active mixed). Both variants share the same
+        ProcessingTaskRecordDto shape (handoff §4).
+      parameters:
+        - name: active
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: ["1"]
+          description: Set to 1 to return only the in-memory active tasks
+      responses:
+        '200':
+          description: Processing task list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingTaskListResponse'
+
+  /api/v1/process/history:
+    get:
+      tags: [Processing]
+      operationId: getProcessingHistory
+      summary: Paged processing task history (newest first)
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 0
+            minimum: 0
+          description: Zero-based page index
+        - name: size
+          in: query
+          required: false
+          schema:
+            type: integer
+            format: int32
+            default: 50
+            minimum: 1
+            maximum: 500
+          description: Page size, clamped server-side to 1..500 (D13)
+        - name: state
+          in: query
+          required: false
+          schema:
+            type: string
+            enum: [PENDING, PROCESSING, DONE, FAILED]
+          description: Optional task-state filter
+      responses:
+        '200':
+          description: History page
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingHistoryResponse'
+        '400':
+          description: Invalid query parameter (e.g. unknown state)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+
+  /api/v1/process/retry/{taskId}:
+    post:
+      tags: [Processing]
+      operationId: retryProcessing
+      summary: Retry a failed or cancelled processing task
+      description: |
+        Re-submits the original task's parameters for its failed pages only
+        (page-level dedup exemption, D8) and returns the newly created task.
+      parameters:
+        - name: taskId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Task ID of the failed task to retry
+      responses:
+        '200':
+          description: New processing task created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProcessingTaskResponse'
+        '404':
+          description: Task not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '409':
+          description: Task is not in a retryable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+
   # ============================================================
   # Sync
   # ============================================================
@@ -4063,7 +4171,7 @@ components:
       properties:
         type:
           type: string
-          enum: [UPSCALE_2X, UPSCALE_4X, DENOISE, DENOISE_UPSCALE]
+          enum: [UPSCALE_2X, UPSCALE_4X, DENOISE, DENOISE_UPSCALE, REMOVE_BG]
           default: UPSCALE_2X
           description: Processing type to apply
         outputFormat:
@@ -4126,6 +4234,104 @@ components:
           type: string
           nullable: true
           description: Error message if state is FAILED
+
+    ProcessingTaskRecordDto:
+      type: object
+      description: >-
+        JSON mirror of a processing_task row (handoff §3). Active tasks carry
+        the same shape with in-memory transient progress. All timestamps are
+        epoch milliseconds. Field-for-field identical to the web-frontend
+        `ProcessingTaskRecord` interface.
+      required: [taskId, galleryId, title, trigger, processingType, state,
+        pagesTotal, pagesDone, pagesFailed, sourceDir, outputDir, epTaskIds,
+        errorCode, errorMessage, createdAt, startedAt, finishedAt, updatedAt]
+      properties:
+        taskId:
+          type: string
+        galleryId:
+          type: integer
+          format: int64
+        title:
+          type: string
+          description: Gallery title (display only; may be empty)
+        trigger:
+          type: string
+          enum: [MANUAL, DOWNLOAD_AUTO, SCHEDULED]
+          description: What submitted the task
+        processingType:
+          type: string
+          enum: [UPSCALE_2X, UPSCALE_4X, DENOISE, DENOISE_UPSCALE, REMOVE_BG]
+        state:
+          type: string
+          enum: [PENDING, PROCESSING, DONE, FAILED]
+          description: Cancellation is recorded as FAILED with errorCode (no CANCELLED state)
+        pagesTotal:
+          type: integer
+        pagesDone:
+          type: integer
+        pagesFailed:
+          type: integer
+        sourceDir:
+          type: string
+          description: Absolute input-page directory (display only, D14)
+        outputDir:
+          type: string
+          description: Absolute enhanced-output directory (display only, D14)
+        epTaskIds:
+          type: array
+          items:
+            type: string
+          description: EntryPoint-side task ids (debugging/traceability)
+        errorCode:
+          type: string
+          description: Machine-readable error code (EP_UNREACHABLE/EP_TIMEOUT/...); empty when none
+        errorMessage:
+          type: string
+          description: Human-readable error message, truncated to 2048 chars (D12)
+        createdAt:
+          type: integer
+          format: int64
+          description: Epoch millis
+        startedAt:
+          type: integer
+          format: int64
+          description: Epoch millis (0 when not started)
+        finishedAt:
+          type: integer
+          format: int64
+          description: Epoch millis (0 when not finished)
+        updatedAt:
+          type: integer
+          format: int64
+          description: Epoch millis of the last state migration
+
+    ProcessingTaskListResponse:
+      type: object
+      required: [tasks]
+      properties:
+        tasks:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProcessingTaskRecordDto'
+
+    ProcessingHistoryResponse:
+      type: object
+      required: [items, total, page, size]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProcessingTaskRecordDto'
+        total:
+          type: integer
+          format: int64
+          description: Total number of records matching the filter (across all pages)
+        page:
+          type: integer
+          description: Echoed zero-based page index
+        size:
+          type: integer
+          description: Echoed (clamped) page size
 
     # ----------------------------------------------------------
     # Sync
