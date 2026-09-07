@@ -63,3 +63,4 @@ web-frontend/e2e/test-results/
 
 # zip 发布包产物
 /dist/
+__pycache__/
