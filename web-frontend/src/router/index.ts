@@ -49,8 +49,9 @@ export const routes: RouteRecordRaw[] = [
      *   偏好   = general / reader / privacy / transfer（路径不变）
      *   服务器 = 原 /admin 十页，整体迁至 /settings/server/*
      * `/settings` exact 不再路由级 redirect：窄屏渲染分组索引页
-     * （SettingsIndex），宽屏由其 setup 内 matchMedia 一次性检查后 replace
-     * 到默认子页。旧 /admin/* 全部 redirect 兜底（见下方记录）。
+     * （SettingsIndex），宽屏由其 matchMedia 断点监听 replace 到默认子页
+     * （跨 960px 时 change 补发，判定与 CSS 侧栏断点同寿命）。旧 /admin/*
+     * 全部 redirect 兜底（见下方记录）。
      */
     {
       path: '/settings',

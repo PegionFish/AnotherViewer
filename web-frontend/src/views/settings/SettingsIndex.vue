@@ -3,26 +3,45 @@
 
   Narrow viewports (<960px): 按「偏好 / 服务器」分组的大行列表，44px 触控行高，
   复用抽屉行形态（icon + label + hover/触屏豁免）。
-  Wide viewports (≥960px): 双栏布局不需要索引页 — setup 内 matchMedia
-  一次性检查后 router.replace 到默认子页（不做 CSS 双渲染取巧）。
+  Wide viewports (≥960px): 双栏布局不需要索引页 — matchMedia 断点监听
+  （响应式，不做 CSS 双渲染取巧）：宽屏落到 /settings exact 时 replace 到
+  默认子页；窄挂载后跨过断点（窗口拉宽/旋转）时由 change 补发同一跳转，
+  索引列表随 ref 即时隐藏（一次性判定会过期，线上出现过错成双列表）。
 -->
 <script setup lang="ts">
-import { useRouter } from 'vue-router'
+import { onUnmounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import { SETTINGS_DEFAULT_SUBPATH, SETTINGS_GROUPS, SETTINGS_WIDE_QUERY } from './settingsSections'
 
 const router = useRouter()
+const route = useRoute()
 const groups = SETTINGS_GROUPS
 
-// 宽屏一次性检查（不挂 resize 监听）：宽屏落到 /settings exact 时直接替换到
-// 默认子页；索引页本体只在窄屏渲染（v-if，避免宽屏闪一帧列表）。
-const isWideViewport =
-  typeof window !== 'undefined' &&
-  typeof window.matchMedia === 'function' &&
-  window.matchMedia(SETTINGS_WIDE_QUERY).matches
+// 宽屏判定必须与视口同寿命：CSS 侧栏断点是实时的，JS 判定若只查一次，
+// 跨 960px 后两者失步。索引页本体只在窄屏渲染（v-if 跟随判定）。
+const wideQuery =
+  typeof window !== 'undefined' && typeof window.matchMedia === 'function'
+    ? window.matchMedia(SETTINGS_WIDE_QUERY)
+    : null
 
-if (isWideViewport) {
-  void router.replace(SETTINGS_DEFAULT_SUBPATH)
+const isWideViewport = ref(wideQuery?.matches ?? false)
+
+function onWideChange(event: MediaQueryListEvent): void {
+  isWideViewport.value = event.matches
+  // 本组件只挂在 /settings exact；路径核对是防御（若日后入 KeepAlive，
+  // 停用实例的监听不得替其他路由发导航）。
+  if (event.matches && route.path === '/settings') {
+    void router.replace(SETTINGS_DEFAULT_SUBPATH)
+  }
+}
+
+if (wideQuery) {
+  wideQuery.addEventListener('change', onWideChange)
+  onUnmounted(() => wideQuery.removeEventListener('change', onWideChange))
+  if (isWideViewport.value) {
+    void router.replace(SETTINGS_DEFAULT_SUBPATH)
+  }
 }
 </script>
 

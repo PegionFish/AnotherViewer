@@ -44,14 +44,40 @@ function makeRouter() {
   })
 }
 
+type MqlListener = (event: MediaQueryListEvent) => void
+
+/**
+ * 断点桩：matchMedia 返回可编程的 MediaQueryList 桩；setWide(f) 手动翻转
+ * matches 并派发 change——模拟挂载后窗口跨 960px（一次性判定过期的场景）。
+ * lastMql 暴露 add/remove 侦听 spy 供卸载清理断言。
+ */
+let setWide: (matches: boolean) => void = () => {}
+let lastMql: {
+  addEventListener: ReturnType<typeof vi.fn>
+  removeEventListener: ReturnType<typeof vi.fn>
+} | null = null
+
 function stubMatchMedia(matches: boolean) {
+  const listeners = new Set<MqlListener>()
+  const onAdd = vi.fn((_type: string, cb: MqlListener) => {
+    listeners.add(cb)
+  })
+  const onRemove = vi.fn((_type: string, cb: MqlListener) => {
+    listeners.delete(cb)
+  })
+  lastMql = { addEventListener: onAdd, removeEventListener: onRemove }
   vi.stubGlobal(
     'matchMedia',
     vi.fn().mockImplementation((query: string) => ({
       matches,
       media: query,
+      addEventListener: onAdd,
+      removeEventListener: onRemove,
     })),
   )
+  setWide = (next: boolean) => {
+    for (const cb of [...listeners]) cb({ matches: next } as MediaQueryListEvent)
+  }
 }
 
 function layoutCss(): string {
@@ -160,6 +186,38 @@ describe('SettingsLayout (A5-1 合并 + A5-3 层级导航)', () => {
       const router = await mountAt('/settings/privacy', true)
       await flushPromises()
       expect(router.currentRoute.value.path).toBe('/settings/privacy')
+    })
+  })
+
+  describe('cross-breakpoint resize（响应式判定：窄挂载后拉宽窗口）', () => {
+    it('补发跳转：窄屏挂载 /settings 后跨过 960px，replace 到默认子页且列表不残留', async () => {
+      const router = await mountAt('/settings')
+      expect(wrapper.find('[data-testid="settings-index"]').exists()).toBe(true)
+
+      setWide(true)
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe('/settings/general')
+      expect(wrapper.find('[data-testid="settings-index"]').exists()).toBe(false)
+    })
+
+    it('窄挂载后跨回窄（change 抖动）不导航，索引页保持渲染', async () => {
+      const router = await mountAt('/settings')
+      setWide(false)
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe('/settings')
+      expect(wrapper.find('[data-testid="settings-index"]').exists()).toBe(true)
+    })
+
+    it('索引页卸载后移除断点监听（不泄漏到后续导航）', async () => {
+      const router = await mountAt('/settings')
+      await router.push('/settings/general')
+      await flushPromises()
+      expect(lastMql?.removeEventListener).toHaveBeenCalled()
+
+      // 监听已删：翻转断点不得再发任何导航，路径停在原处。
+      setWide(true)
+      await flushPromises()
+      expect(router.currentRoute.value.path).toBe('/settings/general')
     })
   })
 
