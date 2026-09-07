@@ -1,6 +1,7 @@
 package com.hippo.anotherviewer.web.dto
 
 import jakarta.validation.Valid
+import jakarta.validation.constraints.DecimalMax
 import jakarta.validation.constraints.DecimalMin
 import jakarta.validation.constraints.Max
 import jakarta.validation.constraints.Min
@@ -27,6 +28,9 @@ data class GeneralPreferences(
     val detailSize: String = "long",
     @field:Size(max = 64, message = "thumbSize must be at most 64 characters")
     val thumbSize: String = "middle",
+    // App 共享键（PreferenceSyncHelper 的 JSON_ 表）：只加下限不加紧上限，
+    // 防 App push 同一条偏好被 400 打断。
+    @field:Min(1, message = "historyInfoSize must be at least 1")
     val historyInfoSize: Int = 100,
     val showJpnTitle: Boolean = false,
     val showGalleryPages: Boolean = false,
@@ -63,10 +67,16 @@ data class ReaderPreferences(
     val pageScaling: String = "fit",
     @field:Size(max = 64, message = "startPosition must be at most 64 characters")
     val startPosition: String = "top_right",
+    // App 共享键：只加下限（同 historyInfoSize）。
+    @field:Min(1, message = "autoPlayIntervalSec must be at least 1")
     val autoPlayIntervalSec: Int = 2,
     val showProgress: Boolean = true,
     val showPageInterval: Boolean = true,
     val fullscreen: Boolean = true,
+    // App 共享键：0 = 跟随系统亮度。注意 App 端滑条技术上到 200（max=200），
+    // 但 App 同步走 sync/push 原样存储不经本校验；本端点仅 WebUI 消费，收在 100。
+    @field:Min(0, message = "brightness must be between 0 and 100")
+    @field:Max(100, message = "brightness must be between 0 and 100")
     val brightness: Int = 0,
     // ---- Wave-1 A 组（1c 阅读器深化，入 reader 节可同步） ----
     // black|gray|white
@@ -76,14 +86,23 @@ data class ReaderPreferences(
     @field:Size(max = 64, message = "tapZoneScheme must be at most 64 characters")
     val tapZoneScheme: String = "threeZone",
     val keyboardPaging: Boolean = true,
-    @field:DecimalMin(value = "1.0", inclusive = false, message = "zoomStep must be greater than 1")
-    val zoomStep: Double = 1.5,
-    @field:DecimalMin(value = "1.0", message = "maxZoom must be at least 1")
-    val maxZoom: Double = 5.0,
-    @field:Min(0, message = "dualPageGap must be non-negative")
+    // Web 本地键（不在 App PreferenceSyncHelper 的 JSON_ 表内）：语义为加法
+    // 缩放步进，默认 0.25；旧语义（乘法倍率 >1.0）已废弃，上下限一并收紧。
+    @field:DecimalMin(value = "0.05", message = "zoomStep must be between 0.05 and 1.0")
+    @field:DecimalMax(value = "1.0", message = "zoomStep must be between 0.05 and 1.0")
+    val zoomStep: Double = 0.25,
+    // Web 本地键：默认 3，钳制 1..5 防脏值撑爆内存渲染。
+    @field:DecimalMin(value = "1.0", message = "maxZoom must be between 1.0 and 5.0")
+    @field:DecimalMax(value = "5.0", message = "maxZoom must be between 1.0 and 5.0")
+    val maxZoom: Double = 3.0,
+    // Web 本地键：上限对齐前端滑条范围。
+    @field:Min(0, message = "dualPageGap must be between 0 and 100")
+    @field:Max(100, message = "dualPageGap must be between 0 and 100")
     val dualPageGap: Int = 8,
     val splitWidePages: Boolean = false,
-    @field:Min(0, message = "preloadCount must be non-negative")
+    // Web 本地键：上限防预取洪泛（与前端预加载 UI 的 20 封顶一致）。
+    @field:Min(0, message = "preloadCount must be between 0 and 20")
+    @field:Max(20, message = "preloadCount must be between 0 and 20")
     val preloadCount: Int = 2,
     // slide|fade|none
     @field:Size(max = 64, message = "pageTransition must be at most 64 characters")

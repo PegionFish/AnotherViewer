@@ -383,6 +383,27 @@ class DownloadServiceTest {
         verify(downloadRepository, never()).findAll()
     }
 
+    // ── F8: 画廊并发运行时生效 ──
+
+    @Test
+    fun `applyGalleryConcurrency resizes the worker pool at runtime`() {
+        // 构造期取 yml 默认 3（core==max 不变式）。
+        assertEquals(3, service.galleryConcurrency)
+
+        service.applyGalleryConcurrency(8)
+        assertEquals(8, service.galleryConcurrency)
+
+        // 与当前值相等时是 no-op。
+        service.applyGalleryConcurrency(8)
+        assertEquals(8, service.galleryConcurrency)
+
+        // 越界值钳制到 DTO 允许的 1..20；扩缩两个方向都不抛 core>max。
+        service.applyGalleryConcurrency(999)
+        assertEquals(20, service.galleryConcurrency)
+        service.applyGalleryConcurrency(0)
+        assertEquals(1, service.galleryConcurrency)
+    }
+
     /** 测试辅助：构造同 id 的独立副本（startDownload 会把 state 写进加载的行）。 */
     private fun DownloadInfoEntity.copyLike(): DownloadInfoEntity = DownloadInfoEntity().apply {
         id = this@copyLike.id

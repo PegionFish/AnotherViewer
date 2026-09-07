@@ -33,7 +33,7 @@ class SettingsControllerTest {
         mockMvc.perform(
             put("/api/v1/settings")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("""{"download":{"path":"/data","workerCount":7,"downloadDelay":100,"downloadTimeout":60,"maxConcurrentGalleries":3,"maxConcurrentImages":3}}""")
+                .content("""{"download":{"path":"/data","downloadDelay":100,"downloadTimeout":60,"maxConcurrentGalleries":3,"maxConcurrentImages":3}}""")
         )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$").value(true))
@@ -41,16 +41,16 @@ class SettingsControllerTest {
     }
 
     @Test
-    fun `update rejects workerCount above the UI stepper bound with 400 envelope`() {
+    fun `update rejects maxConcurrentImages above the UI stepper bound with 400 envelope`() {
         mockMvc.perform(
             put("/api/v1/settings")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("""{"download":{"path":"/data","workerCount":99999,"downloadDelay":0,"downloadTimeout":60,"maxConcurrentGalleries":3,"maxConcurrentImages":3}}""")
+                .content("""{"download":{"path":"/data","downloadDelay":0,"downloadTimeout":60,"maxConcurrentGalleries":3,"maxConcurrentImages":99}}""")
         )
             .andExpect(status().isBadRequest)
             .andExpect(jsonPath("$.error.status").value(400))
             .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
-            .andExpect(jsonPath("$.error.message").value("workerCount must be between 1 and 10"))
+            .andExpect(jsonPath("$.error.message").value("maxConcurrentImages must be between 1 and 20"))
             .andExpect(jsonPath("$.error.traceId").exists())
         verify(settingsService, never()).updateSettings(any())
     }
@@ -75,7 +75,7 @@ class SettingsControllerTest {
         mockMvc.perform(
             put("/api/v1/settings")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("""{"download":{"workerCount":7}}""")
+                .content("""{"download":{"downloadDelay":150}}""")
         )
             .andExpect(status().isOk)
             .andExpect(jsonPath("$").value(true))

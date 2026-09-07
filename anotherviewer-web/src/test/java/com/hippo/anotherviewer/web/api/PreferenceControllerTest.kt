@@ -124,8 +124,8 @@ class PreferenceControllerTest {
             .andExpect(jsonPath("$.reader.backgroundColor").value("black"))
             .andExpect(jsonPath("$.reader.tapZoneScheme").value("threeZone"))
             .andExpect(jsonPath("$.reader.keyboardPaging").value(true))
-            .andExpect(jsonPath("$.reader.zoomStep").value(1.5))
-            .andExpect(jsonPath("$.reader.maxZoom").value(5.0))
+            .andExpect(jsonPath("$.reader.zoomStep").value(0.25))
+            .andExpect(jsonPath("$.reader.maxZoom").value(3.0))
             .andExpect(jsonPath("$.reader.dualPageGap").value(8))
             .andExpect(jsonPath("$.reader.splitWidePages").value(false))
             .andExpect(jsonPath("$.reader.preloadCount").value(2))
@@ -142,7 +142,7 @@ class PreferenceControllerTest {
                     """
                     {
                       "general": {"showUploader": true, "defaultFavoriteSlot": 3, "favoriteSlotNames": "主用|备用", "recentSearchMax": 0},
-                      "reader": {"backgroundColor": "white", "tapZoneScheme": "edgeOnly", "zoomStep": 2.0, "pageTransition": "none"}
+                      "reader": {"backgroundColor": "white", "tapZoneScheme": "edgeOnly", "zoomStep": 0.5, "pageTransition": "none"}
                     }
                     """.trimIndent()
                 )
@@ -154,13 +154,13 @@ class PreferenceControllerTest {
             .andExpect(jsonPath("$.general.recentSearchMax").value(0))
             .andExpect(jsonPath("$.reader.backgroundColor").value("white"))
             .andExpect(jsonPath("$.reader.tapZoneScheme").value("edgeOnly"))
-            .andExpect(jsonPath("$.reader.zoomStep").value(2.0))
+            .andExpect(jsonPath("$.reader.zoomStep").value(0.5))
             .andExpect(jsonPath("$.reader.pageTransition").value("none"))
 
         mvc.perform(get("/api/v1/preferences").with(principal("alice")))
             .andExpect(status().isOk)
             .andExpect(jsonPath("$.general.defaultFavoriteSlot").value(3))
-            .andExpect(jsonPath("$.reader.zoomStep").value(2.0))
+            .andExpect(jsonPath("$.reader.zoomStep").value(0.5))
     }
 
     @Test
@@ -196,11 +196,11 @@ class PreferenceControllerTest {
             put("/api/v1/preferences")
                 .with(principal("alice"))
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("""{"reader":{"zoomStep":1.0}}""")
+                .content("""{"reader":{"zoomStep":1.5}}""")
         )
             .andExpect(status().isBadRequest)
             .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
-            .andExpect(jsonPath("$.error.message").value("zoomStep must be greater than 1"))
+            .andExpect(jsonPath("$.error.message").value("zoomStep must be between 0.05 and 1.0"))
 
         mvc.perform(
             put("/api/v1/preferences")
@@ -220,10 +220,31 @@ class PreferenceControllerTest {
             .andExpect(status().isBadRequest)
             .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
 
+        mvc.perform(
+            put("/api/v1/preferences")
+                .with(principal("alice"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"reader":{"brightness":101}}""")
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
+            .andExpect(jsonPath("$.error.message").value("brightness must be between 0 and 100"))
+
+        mvc.perform(
+            put("/api/v1/preferences")
+                .with(principal("alice"))
+                .contentType(MediaType.APPLICATION_JSON)
+                .content("""{"reader":{"preloadCount":21}}""")
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.error.code").value("VALIDATION_ERROR"))
+
         // 全部被拒，缺省仍是原值
         mvc.perform(get("/api/v1/preferences").with(principal("alice")))
             .andExpect(status().isOk)
-            .andExpect(jsonPath("$.reader.zoomStep").value(1.5))
+            .andExpect(jsonPath("$.reader.zoomStep").value(0.25))
+            .andExpect(jsonPath("$.reader.brightness").value(0))
+            .andExpect(jsonPath("$.reader.preloadCount").value(2))
             .andExpect(jsonPath("$.general.defaultFavoriteSlot").value(0))
             .andExpect(jsonPath("$.general.recentSearchMax").value(10))
     }
@@ -241,7 +262,7 @@ class PreferenceControllerTest {
             .andExpect(jsonPath("$.reader.pageTransition").value("fade"))
             // 未知键不打挂，也不影响其余新键缺省
             .andExpect(jsonPath("$.general.recentSearchMax").value(10))
-            .andExpect(jsonPath("$.reader.zoomStep").value(1.5))
+            .andExpect(jsonPath("$.reader.zoomStep").value(0.25))
     }
 
     private fun push(username: String, json: String, lastModified: Long = System.currentTimeMillis() + 60_000) {

@@ -3,6 +3,7 @@ package com.hippo.anotherviewer.web.config
 import com.hippo.anotherviewer.web.repository.AuthConfigRepository
 import com.hippo.anotherviewer.web.repository.SyncDeviceRepository
 import com.hippo.anotherviewer.web.repository.TokenRepository
+import com.hippo.anotherviewer.web.service.DownloadService
 import com.hippo.anotherviewer.web.service.EncryptionService
 import com.hippo.anotherviewer.web.service.ServerConfigService
 import com.hippo.anotherviewer.web.service.SettingsService
@@ -89,7 +90,7 @@ class AuthDefaultsTest {
     fun `SettingsService reports requireAuth=false with default require_auth=false`() {
         val (serverConfig, defaults) = configRecordingDefaults()
         `when`(serverConfig.get(anyString(), anyString())).thenReturn("")
-        val service = SettingsService(SiteCoreConfigProperties(), serverConfig)
+        val service = SettingsService(SiteCoreConfigProperties(), serverConfig, mock(DownloadService::class.java))
 
         val settings = service.getSettings()
 

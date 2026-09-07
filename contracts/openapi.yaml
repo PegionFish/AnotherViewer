@@ -3858,8 +3858,6 @@ components:
       properties:
         path:
           type: string
-        workerCount:
-          type: integer
         downloadDelay:
           type: integer
         downloadTimeout:

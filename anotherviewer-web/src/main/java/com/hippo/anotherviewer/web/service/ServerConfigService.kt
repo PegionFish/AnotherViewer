@@ -85,6 +85,13 @@ class ServerConfigService(
         const val KEY_SETUP_KEY = "security.setup_key"
         const val KEY_DOWNLOAD_PATH = "download.path"
         const val KEY_CACHE_PATH = "cache.path"
+        // 下载数值组（下载延迟/超时、画廊与图片并发、缓存容量）：settings PUT
+        // 落盘 + 启动回喂 SiteCoreConfigProperties，与 path 双键同一套管线。
+        const val KEY_DOWNLOAD_DELAY = "download.download_delay"
+        const val KEY_DOWNLOAD_TIMEOUT = "download.download_timeout"
+        const val KEY_MAX_CONCURRENT_GALLERIES = "download.max_concurrent_galleries"
+        const val KEY_MAX_CONCURRENT_IMAGES = "download.max_concurrent_images"
+        const val KEY_CACHE_SIZE_MB = "cache.size_mb"
         // App 推送下载开关（openapi.yaml 上传端点要求「upload disabled → 400」）。
         const val KEY_UPLOAD_ENABLED = "download.upload_enabled"
         const val ENV_REQUIRE_AUTH = "ANOTHERVIEWER_REQUIRE_AUTH"

@@ -8,13 +8,14 @@ import org.springframework.stereotype.Service
 class SettingsService(
     private val config: SiteCoreConfigProperties,
     private val serverConfig: ServerConfigService,
+    // 直接注入无环：DownloadService 不依赖 SettingsService。
+    private val downloadService: DownloadService,
 ) {
 
     fun getSettings(): SettingsResponse {
         return SettingsResponse(
             download = DownloadSettings(
                 path = config.download.path,
-                workerCount = config.download.workerCount,
                 downloadDelay = config.download.downloadDelay,
                 downloadTimeout = config.download.downloadTimeout,
                 maxConcurrentGalleries = config.download.maxConcurrentGalleries,
@@ -55,18 +56,34 @@ class SettingsService(
                 config.download.path = it
                 serverConfig.set(ServerConfigService.KEY_DOWNLOAD_PATH, it)
             }
-            dl.workerCount?.let { config.download.workerCount = it }
-            dl.downloadDelay?.let { config.download.downloadDelay = it }
-            dl.downloadTimeout?.let { config.download.downloadTimeout = it }
-            dl.maxConcurrentGalleries?.let { config.download.maxConcurrentGalleries = it }
-            dl.maxConcurrentImages?.let { config.download.maxConcurrentImages = it }
+            dl.downloadDelay?.let {
+                config.download.downloadDelay = it
+                serverConfig.set(ServerConfigService.KEY_DOWNLOAD_DELAY, it.toString())
+            }
+            dl.downloadTimeout?.let {
+                config.download.downloadTimeout = it
+                serverConfig.set(ServerConfigService.KEY_DOWNLOAD_TIMEOUT, it.toString())
+            }
+            dl.maxConcurrentGalleries?.let {
+                config.download.maxConcurrentGalleries = it
+                serverConfig.set(ServerConfigService.KEY_MAX_CONCURRENT_GALLERIES, it.toString())
+                // 落盘后即时对齐 worker pool 容量（重启后由启动回喂管线路径对齐）。
+                downloadService.applyGalleryConcurrency(it)
+            }
+            dl.maxConcurrentImages?.let {
+                config.download.maxConcurrentImages = it
+                serverConfig.set(ServerConfigService.KEY_MAX_CONCURRENT_IMAGES, it.toString())
+            }
         }
         request.cache?.let { cache ->
             cache.path?.takeIf { it.isNotBlank() }?.let {
                 config.download.cachePath = it
                 serverConfig.set(ServerConfigService.KEY_CACHE_PATH, it)
             }
-            cache.sizeMb?.let { config.download.cacheSizeMb = it }
+            cache.sizeMb?.let {
+                config.download.cacheSizeMb = it
+                serverConfig.set(ServerConfigService.KEY_CACHE_SIZE_MB, it.toString())
+            }
         }
         request.smb?.let { smb ->
             smb.enabled?.let { config.smb.enabled = it }

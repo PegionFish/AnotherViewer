@@ -16,10 +16,6 @@ data class SettingsResponse(
 
 data class DownloadSettings(
     val path: String,
-    // Bounds mirror the admin UI stepper (AdminDownload.vue clamps 1..10).
-    @field:Min(1, message = "workerCount must be between 1 and 10")
-    @field:Max(10, message = "workerCount must be between 1 and 10")
-    val workerCount: Int,
     @field:Min(0, message = "downloadDelay must be non-negative")
     val downloadDelay: Int,
     @field:Min(0, message = "downloadTimeout must be non-negative")
@@ -59,10 +55,6 @@ data class SettingsUpdateRequest(
 /** PUT /settings download section — nullable fields are applied only when present. */
 data class DownloadSettingsUpdate(
     val path: String? = null,
-    // Bounds mirror the admin UI stepper (AdminDownload.vue clamps 1..10).
-    @field:Min(1, message = "workerCount must be between 1 and 10")
-    @field:Max(10, message = "workerCount must be between 1 and 10")
-    val workerCount: Int? = null,
     @field:Min(0, message = "downloadDelay must be non-negative")
     val downloadDelay: Int? = null,
     @field:Min(0, message = "downloadTimeout must be non-negative")

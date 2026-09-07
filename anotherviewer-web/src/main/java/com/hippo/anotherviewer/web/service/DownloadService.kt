@@ -66,7 +66,8 @@ class DownloadService(
 
     /**
      * Bounded gallery worker pool — at most [maxConcurrentGalleries] galleries
-     * run concurrently; the rest wait in the queue.
+     * run concurrently; the rest wait in the queue. core==max 不变式，容量
+     * 可经 [applyGalleryConcurrency] 运行时调整。
      */
     private val workerPool: ThreadPoolExecutor = ThreadPoolExecutor(
         config.download.maxConcurrentGalleries,
@@ -74,6 +75,28 @@ class DownloadService(
         60, TimeUnit.SECONDS,
         LinkedBlockingQueue()
     )
+
+    /** 当前画廊并发（core==max 不变式的观测口，测试与启动回喂对齐用）。 */
+    internal val galleryConcurrency: Int get() = workerPool.corePoolSize
+
+    /**
+     * 运行时调整画廊并发（设置页 PUT 落盘后调用，无需重启即生效）。
+     * 入参钳制到 DownloadSettings 允许的 1..20；与当前值相等时跳过。
+     * ThreadPoolExecutor 要求 core<=max：扩容先 max 后 core，缩容先 core
+     * 后 max，否则抛 IllegalArgumentException。
+     */
+    fun applyGalleryConcurrency(n: Int) {
+        val target = n.coerceIn(MIN_GALLERY_CONCURRENCY, MAX_GALLERY_CONCURRENCY)
+        val current = workerPool.corePoolSize
+        if (target == current) return
+        if (target > current) {
+            workerPool.maximumPoolSize = target
+            workerPool.corePoolSize = target
+        } else {
+            workerPool.corePoolSize = target
+            workerPool.maximumPoolSize = target
+        }
+    }
 
     private val okHttpClient get() = sessionManager.okHttpClient
 
@@ -925,5 +948,9 @@ class DownloadService(
         const val MAX_FILTER_SLOTS = 20
         const val MAX_SLOT_NAME_LENGTH = 32
         const val MAX_SLOT_PATTERN_LENGTH = 256
+
+        // 画廊并发边界：与 DownloadSettings 的 maxConcurrentGalleries 校验一致。
+        private const val MIN_GALLERY_CONCURRENCY = 1
+        private const val MAX_GALLERY_CONCURRENCY = 20
     }
 }

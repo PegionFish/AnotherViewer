@@ -100,7 +100,7 @@ class UserPreferenceServiceTest {
         assertEquals(0, resp.general.defaultFavoriteSlot)
         assertEquals(10, resp.general.recentSearchMax)
         assertEquals("black", resp.reader.backgroundColor)
-        assertEquals(1.5, resp.reader.zoomStep)
+        assertEquals(0.25, resp.reader.zoomStep)
         assertEquals("slide", resp.reader.pageTransition)
         assertEquals(30, resp.reader.brightness)
     }
@@ -111,19 +111,19 @@ class UserPreferenceServiceTest {
             "alice",
             PreferenceUpdateRequest(
                 general = GeneralPreferences(defaultFavoriteSlot = -2, favoriteSlotNames = "a|b"),
-                reader = ReaderPreferences(zoomStep = 2.5, splitWidePages = true, pageTransition = "fade"),
+                reader = ReaderPreferences(zoomStep = 0.75, splitWidePages = true, pageTransition = "fade"),
             ),
             "webui",
         )
         assertEquals(-2, merged.general.defaultFavoriteSlot)
         assertEquals("a|b", merged.general.favoriteSlotNames)
-        assertEquals(2.5, merged.reader.zoomStep)
+        assertEquals(0.75, merged.reader.zoomStep)
         assertEquals(true, merged.reader.splitWidePages)
         assertEquals("fade", merged.reader.pageTransition)
 
         val reloaded = service.get("alice")
         assertEquals(-2, reloaded.general.defaultFavoriteSlot)
-        assertEquals(2.5, reloaded.reader.zoomStep)
+        assertEquals(0.75, reloaded.reader.zoomStep)
         assertEquals("fade", reloaded.reader.pageTransition)
     }
 
@@ -131,7 +131,7 @@ class UserPreferenceServiceTest {
     fun `section-level merge keeps untouched reader section with wave-1 keys`() {
         service.update(
             "alice",
-            PreferenceUpdateRequest(reader = ReaderPreferences(preloadCount = 6, maxZoom = 9.0)),
+            PreferenceUpdateRequest(reader = ReaderPreferences(preloadCount = 6, maxZoom = 4.5)),
             "webui",
         )
 
@@ -143,7 +143,7 @@ class UserPreferenceServiceTest {
         )
         assertEquals(true, merged.general.showUploader)
         assertEquals(6, merged.reader.preloadCount)
-        assertEquals(9.0, merged.reader.maxZoom)
+        assertEquals(4.5, merged.reader.maxZoom)
     }
 
     @Test

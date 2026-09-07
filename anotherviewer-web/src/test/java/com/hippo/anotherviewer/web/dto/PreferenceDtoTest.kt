@@ -12,8 +12,8 @@ import org.junit.jupiter.api.Test
  * Wave-1 B 组（1b）+ A 组（1c）新增偏好键的 DTO 契约测试:
  *
  *  - 默认值: 6 个 general 键 + 9 个 reader 键逐项核对
- *  - 校验: @field: 注解边界（zoomStep>1、maxZoom≥1、非负约束、
- *    defaultFavoriteSlot -2..9、favoriteSlotNames 长度）
+ *  - 校验: @field: 注解边界（zoomStep 0.05..1.0、maxZoom 1..5、亮度 0..100、
+ *    非负约束、defaultFavoriteSlot -2..9、favoriteSlotNames 长度）
  *  - 容错: 未知键忽略、缺省填充（与 UserPreferenceService 的 mapper
  *    配置一致 —— FAIL_ON_UNKNOWN_PROPERTIES=false，不 brick）
  */
@@ -45,8 +45,8 @@ class PreferenceDtoTest {
         assertEquals("black", reader.backgroundColor)
         assertEquals("threeZone", reader.tapZoneScheme)
         assertEquals(true, reader.keyboardPaging)
-        assertEquals(1.5, reader.zoomStep)
-        assertEquals(5.0, reader.maxZoom)
+        assertEquals(0.25, reader.zoomStep)
+        assertEquals(3.0, reader.maxZoom)
         assertEquals(8, reader.dualPageGap)
         assertEquals(false, reader.splitWidePages)
         assertEquals(2, reader.preloadCount)
@@ -77,7 +77,7 @@ class PreferenceDtoTest {
                     recentSearchMax = 0,
                 ),
                 reader = ReaderPreferences(
-                    zoomStep = 1.01,
+                    zoomStep = 1.0,
                     maxZoom = 1.0,
                     dualPageGap = 0,
                     preloadCount = 0,
@@ -88,9 +88,20 @@ class PreferenceDtoTest {
         assertTrue(
             violations(
                 general = GeneralPreferences(defaultFavoriteSlot = 9),
-                reader = ReaderPreferences(maxZoom = 100.0, dualPageGap = 64, preloadCount = 20),
+                reader = ReaderPreferences(maxZoom = 5.0, dualPageGap = 100, preloadCount = 20),
             ).isEmpty(),
         )
+    }
+
+    @Test
+    fun `app shared keys accept lower bounds and brightness range`() {
+        assertTrue(
+            violations(
+                general = GeneralPreferences(historyInfoSize = 1),
+                reader = ReaderPreferences(autoPlayIntervalSec = 1, brightness = 0),
+            ).isEmpty(),
+        )
+        assertTrue(violations(reader = ReaderPreferences(brightness = 100)).isEmpty())
     }
 
     // ---- 校验: 非法值拒绝 ----
@@ -118,16 +129,53 @@ class PreferenceDtoTest {
     }
 
     @Test
-    fun `zoomStep must be strictly greater than 1`() {
-        assertEquals(1, violations(reader = ReaderPreferences(zoomStep = 1.0)).size)
-        assertEquals(1, violations(reader = ReaderPreferences(zoomStep = 0.5)).size)
+    fun `zoomStep outside its bounds is rejected`() {
+        val tooSmall = violations(reader = ReaderPreferences(zoomStep = 0.04))
+        val tooLarge = violations(reader = ReaderPreferences(zoomStep = 1.01))
+        assertEquals(1, tooSmall.size)
+        assertEquals(1, tooLarge.size)
+        assertTrue(tooSmall[0].contains("zoomStep"))
+        assertTrue(tooLarge[0].contains("zoomStep"))
     }
 
     @Test
-    fun `maxZoom must be at least 1`() {
-        val v = violations(reader = ReaderPreferences(maxZoom = 0.9))
-        assertEquals(1, v.size)
-        assertTrue(v[0].contains("maxZoom"))
+    fun `maxZoom outside its bounds is rejected`() {
+        val tooSmall = violations(reader = ReaderPreferences(maxZoom = 0.9))
+        val tooLarge = violations(reader = ReaderPreferences(maxZoom = 5.1))
+        assertEquals(1, tooSmall.size)
+        assertEquals(1, tooLarge.size)
+        assertTrue(tooSmall[0].contains("maxZoom"))
+        assertTrue(tooLarge[0].contains("maxZoom"))
+    }
+
+    @Test
+    fun `app shared numeric keys reject values below the lower bound`() {
+        val history = violations(general = GeneralPreferences(historyInfoSize = 0))
+        val interval = violations(reader = ReaderPreferences(autoPlayIntervalSec = 0))
+        assertEquals(1, history.size)
+        assertTrue(history[0].contains("historyInfoSize"))
+        assertEquals(1, interval.size)
+        assertTrue(interval[0].contains("autoPlayIntervalSec"))
+    }
+
+    @Test
+    fun `brightness outside 0 to 100 is rejected`() {
+        val negative = violations(reader = ReaderPreferences(brightness = -1))
+        val over = violations(reader = ReaderPreferences(brightness = 101))
+        assertEquals(1, negative.size)
+        assertEquals(1, over.size)
+        assertTrue(negative[0].contains("brightness"))
+        assertTrue(over[0].contains("brightness"))
+    }
+
+    @Test
+    fun `reader local keys above their upper bounds are rejected`() {
+        val gap = violations(reader = ReaderPreferences(dualPageGap = 101))
+        val preload = violations(reader = ReaderPreferences(preloadCount = 21))
+        assertEquals(1, gap.size)
+        assertTrue(gap[0].contains("dualPageGap"))
+        assertEquals(1, preload.size)
+        assertTrue(preload[0].contains("preloadCount"))
     }
 
     @Test
@@ -154,7 +202,7 @@ class PreferenceDtoTest {
         assertEquals("fade", resp.reader.pageTransition)
         // 未知键不影响其余缺省填充
         assertEquals(10, resp.general.recentSearchMax)
-        assertEquals(1.5, resp.reader.zoomStep)
+        assertEquals(0.25, resp.reader.zoomStep)
     }
 
     @Test
@@ -189,8 +237,8 @@ class PreferenceDtoTest {
                 backgroundColor = "white",
                 tapZoneScheme = "edgeOnly",
                 keyboardPaging = false,
-                zoomStep = 2.0,
-                maxZoom = 8.0,
+                zoomStep = 0.5,
+                maxZoom = 4.0,
                 dualPageGap = 0,
                 splitWidePages = true,
                 preloadCount = 5,
