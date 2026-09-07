@@ -34,7 +34,7 @@ png = (b'\x89PNG\r\n\x1a\n'
        + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
 open(sys.argv[1], 'wb').write(png)
 EOF
-SUBMIT=$(curl -fsS -m 120 "${auth[@]}" -F "file @$TMP/in.png" "$BASE/api/v1/inference/rembg/remove_bg")
+SUBMIT=$(curl -fsS -m 120 "${auth[@]}" -F "file=@$TMP/in.png" "$BASE/api/v1/inference/rembg/remove_bg")
 TID=$(echo "$SUBMIT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["task_id"])')
 [ -n "$TID" ] || fail "no task_id in: $SUBMIT"
 echo "    task_id=$TID"
