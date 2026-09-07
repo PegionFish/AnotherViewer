@@ -47,8 +47,6 @@ PROBES = [
     ("GET", "/api/v1/gallery/feed?mode=toplist",       "排行榜"),
     ("GET", "/api/v1/gallery/feed?mode=subscription",  "订阅 feed"),
     ("GET", "/api/v1/gallery/feed?mode=popular",       "热门 feed"),
-    ("GET", "/api/v1/gallery/history?page=0",          "历史列表（gallery 视图）"),
-    ("GET", "/api/v1/gallery/favorites",               "收藏列表"),
     ("GET", "/api/v1/gallery/quick-search",            "快速搜索预设"),
     ("GET", "/api/v1/gallery/{gid}?token={token}",     "画廊详情"),
     ("GET", "/api/v1/history/list?page=0",             "历史列表（history 视图）"),
@@ -60,7 +58,7 @@ PROBES = [
     ("GET", "/api/v1/download/maintenance/preview",    "维护预览（当初的事故端点）"),
     ("GET", "/api/v1/archive/list/{gid}",              "归档列表"),
     ("GET", "/api/v1/torrent/list/{gid}",              "种子列表"),
-    ("GET", "/api/v1/jobs/active",                     "活跃任务"),
+    ("GET", "/api/v1/jobs/active?type=CACHE_CLEAR",    "活跃任务（需 type 参数）"),
     ("GET", "/api/v1/jobs/{jobid}",                    "任务详情"),
     ("GET", "/api/v1/process/tasks",                   "处理任务列表"),
     ("GET", "/api/v1/process/history",                 "处理历史"),
@@ -159,16 +157,20 @@ def main():
         sys.exit(2)
     print(f"打码开关：{'开启' if mask_on else '关闭（--force）'}\n")
 
-    # 1. 引导：取样本 gid / token / dlid / jobid / taskid（脱敏响应仍含这些 ID）
+    # 1. 引导：取样本 gid / token / dlid / jobid / taskid（脱敏响应仍含这些 ID）。
+    #    gid/token 从 /history/list 取（/gallery/history 无 GET 路由）；
+    #    历史为空时再试 /favorite/list。
     gid = token_value = dlid = jobid = taskid = None
-    status, _, raw = http_json(base, "/api/v1/gallery/history?page=0", args.token, args.timeout)
-    try:
-        data = json.loads(raw)
-        rows = data.get("history") or data.get("data") or []
-        if rows:
-            gid, token_value = rows[0].get("gid"), rows[0].get("token")
-    except Exception:  # noqa: BLE001
-        pass
+    for boot_path in ("/api/v1/history/list?page=0", "/api/v1/favorite/list"):
+        status, _, raw = http_json(base, boot_path, args.token, args.timeout)
+        try:
+            data = json.loads(raw)
+            rows = data.get("history") or data.get("data") or []
+            if rows:
+                gid, token_value = rows[0].get("gid"), rows[0].get("token")
+                break
+        except Exception:  # noqa: BLE001
+            continue
     status, _, raw = http_json(base, "/api/v1/download/list", args.token, args.timeout)
     try:
         rows = json.loads(raw)
