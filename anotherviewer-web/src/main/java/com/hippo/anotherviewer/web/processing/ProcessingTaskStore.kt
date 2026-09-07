@@ -44,6 +44,12 @@ data class ProcessingTaskRecord(
     val startedAt: Long = 0,
     val finishedAt: Long = 0,
     val updatedAt: Long = 0,
+
+    /**
+     * 本任务内已成功完成的 0-based 页集合（D8 页级去重的数据载体；upsert 时以
+     * 逗号分隔 CSV 随 processing_task.done_pages 落库，升序写出便于阅读）。
+     */
+    val donePages: Set<Int> = emptySet(),
 )
 
 /** 分页历史页（GET /process/history 的服务层形状）。 */
