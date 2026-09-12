@@ -30,6 +30,7 @@ import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.pm.ActivityInfo;
 import android.content.res.Resources;
+import android.graphics.Rect;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Build;
@@ -39,11 +40,13 @@ import android.os.Looper;
 import android.os.StrictMode;
 import android.text.TextUtils;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
 import android.view.LayoutInflater;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
@@ -92,6 +95,8 @@ import com.hippo.anotherviewer.spider.SpiderDen;
 import com.hippo.anotherviewer.spider.SpiderInfo;
 import com.hippo.anotherviewer.webui.WebUiConfig;
 import com.hippo.anotherviewer.webui.WebUiSettings;
+import com.hippo.anotherviewer.widget.DuoSimOverlay;
+import com.hippo.anotherviewer.widget.DuoSimProfiles;
 import com.hippo.anotherviewer.widget.GalleryGuideView;
 import com.hippo.anotherviewer.widget.GalleryHeader;
 import com.hippo.anotherviewer.widget.ReversibleSeekBar;
@@ -159,6 +164,11 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
     private GLRootView mGLRootView;
     @Nullable
     private GalleryView mGalleryView;
+
+    @Nullable
+    private DuoSimOverlay mDuoSimOverlay;
+    @Nullable
+    private View.OnLayoutChangeListener mDuoSimLayoutListener;
     @Nullable
     private GalleryProvider2 mGalleryProvider;
     @Nullable
@@ -195,6 +205,11 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
     private WindowInfoTrackerCallbackAdapter mWindowInfoTracker;
     private final Consumer<WindowLayoutInfo> mWindowLayoutInfoConsumer = info -> {
         if (mGalleryView == null) {
+            return;
+        }
+        if (Settings.getDuoSimEnabled()) {
+            // the simulated hinge replaces any real fold geometry
+            applyDuoSim();
             return;
         }
         int splitX = -1;
@@ -443,7 +458,9 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         boolean landscape = resources.getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
         int layoutMode = readingDirection;
         int spreadMode = GalleryView.SPREAD_RIGHT_TO_LEFT;
-        if (landscape && Settings.getReadingDualPage()
+        // Duo simulation models the physical device: one page per panel,
+        // which is the dual-page layout; force it in landscape when on.
+        if (landscape && (Settings.getReadingDualPage() || Settings.getDuoSimEnabled())
                 && (readingDirection == GalleryView.LAYOUT_LEFT_TO_RIGHT
                     || readingDirection == GalleryView.LAYOUT_RIGHT_TO_LEFT)) {
             layoutMode = GalleryView.LAYOUT_DUAL_PAGE;
@@ -454,6 +471,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         mGalleryView = new GalleryView.Builder(this, mGalleryAdapter).setListener(this).setLayoutMode(layoutMode).setSpreadMode(spreadMode).setCoverEnabled(Settings.getReadingFirstPageCover()).setScaleMode(Settings.getPageScaling()).setStartPosition(Settings.getStartPosition()).setStartPage(startPage).setBackgroundColor(AttrResources.getAttrColor(this, android.R.attr.colorBackground)).setEdgeColor(AttrResources.getAttrColor(this, R.attr.colorEdgeEffect) & 0xffffff | 0x33000000).setPagerInterval(Settings.getShowPageInterval() ? resources.getDimensionPixelOffset(R.dimen.gallery_pager_interval) : 0).setScrollInterval(Settings.getShowPageInterval() ? resources.getDimensionPixelOffset(R.dimen.gallery_scroll_interval) : 0).setPageMinHeight(resources.getDimensionPixelOffset(R.dimen.gallery_page_min_height)).setPageInfoInterval(resources.getDimensionPixelOffset(R.dimen.gallery_page_info_interval)).setProgressColor(ResourcesUtils.getAttrColor(this, androidx.appcompat.R.attr.colorPrimary)).setProgressSize(resources.getDimensionPixelOffset(R.dimen.gallery_progress_size)).setPageTextColor(AttrResources.getAttrColor(this, android.R.attr.textColorSecondary)).setPageTextSize(resources.getDimensionPixelOffset(R.dimen.gallery_page_text_size)).setPageTextTypeface(Typeface.DEFAULT).setErrorTextColor(resources.getColor(R.color.red_500, null)).setErrorTextSize(resources.getDimensionPixelOffset(R.dimen.gallery_error_text_size)).setDefaultErrorString(resources.getString(R.string.error_unknown)).setEmptyString(resources.getString(R.string.error_empty)).build();
         mGLRootView.setContentPane(mGalleryView);
         mGLRootView.setOnGenericMotionListener(this::onGenericMotion);
+        applyDuoSim();
         mWindowInfoTracker = new WindowInfoTrackerCallbackAdapter(WindowInfoTracker.getOrCreate(this));
         mWindowInfoTracker.addWindowLayoutInfoListener(this,
                 ContextCompat.getMainExecutor(this), mWindowLayoutInfoConsumer);
@@ -563,6 +581,68 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         }
     }
 
+    /**
+     * Surface Duo reading simulation: constrain the GL reader viewport to a
+     * virtual Duo layout (two panels with a hinge gap between them in
+     * landscape, a single panel in portrait), paint the letterbox and the
+     * hinge gap black, and feed the seam position to the dual-page layout.
+     * Pure view-level rendering trick; no system display settings change.
+     */
+    private void applyDuoSim() {
+        ViewGroup main = findViewById(R.id.main);
+        if (main == null || mGLRootView == null) {
+            return; // GL fallback layout
+        }
+        if (mDuoSimLayoutListener == null) {
+            mDuoSimLayoutListener = (v, l, t, r, b, ol, ot, orr, ob) -> applyDuoSim();
+            main.addOnLayoutChangeListener(mDuoSimLayoutListener);
+        }
+        if (!Settings.getDuoSimEnabled()) {
+            if (mDuoSimOverlay != null) {
+                main.removeView(mDuoSimOverlay);
+                mDuoSimOverlay = null;
+            }
+            setGLViewportSize(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            return;
+        }
+        // one page per panel only applies to the dual-page layout; with any
+        // other layout fall back to a single panel so nothing sits under the hinge
+        boolean dualPage = mGalleryView != null
+                && mGalleryView.getLayoutMode() == GalleryView.LAYOUT_DUAL_PAGE;
+        DuoSimProfiles.Layout layout = DuoSimProfiles.fitLayout(
+                main.getWidth(), main.getHeight(), Settings.getDuoSimProfile(),
+                Math.round(Settings.getDuoSimHingeDp()
+                        * getResources().getDisplayMetrics().density),
+                dualPage);
+        if (layout.content.isEmpty()) {
+            return; // not laid out yet; re-applied by the layout listener
+        }
+        setGLViewportSize(layout.content.width(), layout.content.height());
+        if (mDuoSimOverlay == null) {
+            mDuoSimOverlay = new DuoSimOverlay(this);
+            // right above the GL view, below header/seek bar
+            main.addView(mDuoSimOverlay, 1, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        mDuoSimOverlay.configure(layout.content, layout.hinge);
+        if (mGalleryView != null) {
+            // seam sits at the middle of the hinge gap, in viewport coordinates
+            mGalleryView.setSplitX(layout.verticalHinge ? layout.content.width() / 2 : -1);
+        }
+    }
+
+    private void setGLViewportSize(int w, int h) {
+        ViewGroup.LayoutParams lp = mGLRootView.getLayoutParams();
+        if (lp.width != w || lp.height != h) {
+            lp.width = w;
+            lp.height = h;
+            if (lp instanceof FrameLayout.LayoutParams) {
+                ((FrameLayout.LayoutParams) lp).gravity = Gravity.CENTER;
+            }
+            mGLRootView.setLayoutParams(lp);
+        }
+    }
+
     private void showGlFallbackView() {
         setContentView(R.layout.activity_gallery_fallback);
         View close = ViewUtils.$$(this, R.id.gl_fallback_close);
@@ -583,6 +663,8 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         }
         mGLRootView = null;
         mGalleryView = null;
+        mDuoSimOverlay = null;
+        mDuoSimLayoutListener = null;
         if (mGalleryAdapter != null) {
             mGalleryAdapter.clearUploader();
             mGalleryAdapter = null;
