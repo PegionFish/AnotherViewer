@@ -73,7 +73,9 @@ import com.hippo.anotherviewer.client.SiteUrl;
 import com.hippo.anotherviewer.client.SiteUrlOpener;
 import com.hippo.anotherviewer.client.SiteUtils;
 import com.hippo.anotherviewer.client.data.ListUrlBuilder;
+import com.hippo.anotherviewer.client.data.GalleryInfo;
 import com.hippo.anotherviewer.ui.main.UserImageChange;
+import com.hippo.anotherviewer.ui.pane.TwoPaneController;
 import com.hippo.anotherviewer.ui.scene.AnalyticsScene;
 import com.hippo.anotherviewer.ui.scene.BaseScene;
 import com.hippo.anotherviewer.ui.scene.sign.CookieSignInScene;
@@ -158,6 +160,13 @@ public final class MainActivity extends StageActivity
     private LimitsCountView limitsCountView;
     @Nullable
     UserImageChange userImageChange;
+
+    /**
+     * 双屏（竖向分隔铰链）双栏控制器：仅作为生命周期与入口的薄钩子，
+     * 两栏切换逻辑全部收在 {@link TwoPaneController} 内。
+     */
+    @Nullable
+    private TwoPaneController mTwoPaneController;
 
     private int mNavCheckedItem = 0;
 
@@ -413,6 +422,9 @@ public final class MainActivity extends StageActivity
         }
         setContentView(R.layout.activity_main);
 
+        // 双屏双栏：检测逻辑在 TwoPaneController/FoldSplitDetector，这里只建钩子
+        mTwoPaneController = new TwoPaneController(this);
+
         mDrawerLayout = (SiteDrawerLayout) ViewUtils.$$(this, R.id.draw_view);
         mDrawerLayout.setDrawerListener(this);
         mNavView = (NavigationView) ViewUtils.$$(this, R.id.nav_view);
@@ -472,6 +484,28 @@ public final class MainActivity extends StageActivity
     @Override
     protected void onStart() {
         super.onStart();
+
+        if (mTwoPaneController != null) {
+            mTwoPaneController.start();
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+
+        if (mTwoPaneController != null) {
+            mTwoPaneController.stop();
+        }
+    }
+
+    /**
+     * 双栏入口：列表场景点击画廊时优先询问右栏。仅在检测到
+     * 竖向分隔铰链（双栏模式生效）时返回 true，单屏恒为 false，
+     * 调用方随后走原有单栏 startScene 流程。
+     */
+    public boolean showGalleryDetailPane(@Nullable GalleryInfo galleryInfo) {
+        return mTwoPaneController != null && mTwoPaneController.showGalleryDetail(galleryInfo);
     }
 
     private void initUserImage() {
@@ -643,6 +677,11 @@ public final class MainActivity extends StageActivity
     @Override
     protected void onDestroy() {
         super.onDestroy();
+
+        if (mTwoPaneController != null) {
+            mTwoPaneController.destroy();
+            mTwoPaneController = null;
+        }
 
         mDrawerLayout = null;
         mNavView = null;

@@ -1264,6 +1264,13 @@ public final class GalleryListScene extends BaseScene
             alertDialog.dismiss();
         }
 
+        // 双屏双栏：出现竖向分隔铰链时，详情改送右栏面板，不进左栏场景栈。
+        // 单屏（无铰链）恒返回 false，走原有流程。
+        MainActivity activity = getActivity2();
+        if (activity != null && activity.showGalleryDetailPane(gi)) {
+            return true;
+        }
+
         Bundle args = new Bundle();
         args.putString(GalleryDetailScene.KEY_ACTION, GalleryDetailScene.ACTION_GALLERY_INFO);
         args.putParcelable(GalleryDetailScene.KEY_GALLERY_INFO, gi);

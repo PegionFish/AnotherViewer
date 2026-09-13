@@ -102,4 +102,30 @@
             android:maxWidth="@dimen/drawer_max_width" />
 
     </com.hippo.anotherviewer.widget.SiteDrawerLayout>
+
+    <!--
+      双屏（竖向分隔铰链）双栏模式的右栏：承载轻量详情面板
+      GalleryDetailPaneFragment。默认 gone 且宽度 0，单屏路径零改动；
+      出现铰链时由 TwoPaneController 设为可见并把宽度设为铰链右侧剩余宽度。
+    -->
+    <FrameLayout
+        android:id="@+id/detail_pane"
+        android:layout_width="0dp"
+        android:layout_height="match_parent"
+        android:layout_gravity="right"
+        android:background="?android:attr/windowBackground"
+        android:clickable="true"
+        android:focusable="true"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/detail_pane_hint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="center"
+            android:gravity="center_horizontal"
+            android:padding="@dimen/keyline_margin"
+            android:text="@string/detail_pane_hint"
+            android:textAppearance="@style/TextAppearance.AppCompat.Medium" />
+    </FrameLayout>
 </com.hippo.widget.SafeCoordinatorLayout>
