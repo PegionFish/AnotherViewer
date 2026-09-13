@@ -80,6 +80,10 @@
         </intent>
     </queries>
 
+    <!-- H-5（W5）双屏/折叠屏跨屏（span）适配：不显式声明 android:resizeableActivity。
+         targetSdk ≥ 24 时该属性默认为 true，Surface Duo 展开（1892×2688，纵横比 ~1.42）、
+         一般折叠屏与多窗口均可正常跨屏；显式写 true 属冗余，写 false 会禁止 span，故保持缺省。
+         span 时窗口纵横比变化由各 activity 已声明的 screenSize configChanges 承接，无需重启。 -->
     <application
         android:name=".SiteApplication"
         android:allowBackup="true"
@@ -104,9 +108,14 @@
             android:name="org.apache.http.legacy"
             android:required="false" />
 
+        <!-- H-5（W5）双屏/折叠屏跨屏适配：max_aspect 2.1 → 2.4。该 meta-data 只对不可
+             resize 的应用生效：本应用 resizeableActivity（缺省 true）下系统会忽略此值，
+             保留它仅作为 Android 7.x（API 24/25，minSdk 23 覆盖范围内）老设备兜底。
+             上调到 2.4 与平台 API 26+ 默认上限对齐，兼容更高纵横比（21:9 ≈ 2.33）的
+             折叠屏；Surface Duo 展开 ~1.42、单屏 ~1.4 均远低于上限，不受影响。 -->
         <meta-data
             android:name="android.max_aspect"
-            android:value="2.1" />
+            android:value="2.4" />
 
         <activity
             android:name=".ui.splash.SplashActivity"
