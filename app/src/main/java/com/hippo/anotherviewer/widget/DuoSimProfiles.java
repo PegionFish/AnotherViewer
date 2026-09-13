@@ -78,6 +78,47 @@ public final class DuoSimProfiles {
         }
     }
 
+    /** On-screen physical size of a fitted {@link Layout}, in inches. */
+    public static final class Physical {
+        public final double panelWidthIn;
+        public final double panelHeightIn;
+        public final double contentWidthIn;
+        public final double contentHeightIn;
+
+        Physical(double panelWidthIn, double panelHeightIn,
+                double contentWidthIn, double contentHeightIn) {
+            this.panelWidthIn = panelWidthIn;
+            this.panelHeightIn = panelHeightIn;
+            this.contentWidthIn = contentWidthIn;
+            this.contentHeightIn = contentHeightIn;
+        }
+
+        /** Diagonal of the whole simulated area (the "unfolded" size). */
+        public double contentDiagonalIn() {
+            return Math.hypot(contentWidthIn, contentHeightIn);
+        }
+    }
+
+    /**
+     * Physical size of a fitted layout, using the host panel's reported DPI.
+     * The panel size derives from the layout itself: two panels minus the gap
+     * in the dual form, the whole content rect in the single form.
+     */
+    public static Physical measure(Layout l, double xdpi, double ydpi) {
+        if (xdpi <= 0 || ydpi <= 0 || l.content.isEmpty()) {
+            return new Physical(0, 0, 0, 0);
+        }
+        double contentWIn = l.content.width() / xdpi;
+        double contentHIn = l.content.height() / ydpi;
+        double panelWIn;
+        if (l.hinge.isEmpty()) {
+            panelWIn = contentWIn;
+        } else {
+            panelWIn = (l.content.width() - l.hinge.width()) / 2.0 / xdpi;
+        }
+        return new Physical(panelWIn, contentHIn, contentWIn, contentHIn);
+    }
+
     /**
      * @param dual true for the book posture: two portrait panels side by
      *             side with a hinge gap between them, one page each;

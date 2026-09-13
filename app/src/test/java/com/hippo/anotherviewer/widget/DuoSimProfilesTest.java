@@ -102,4 +102,23 @@ public class DuoSimProfilesTest {
         l = DuoSimProfiles.fitLayout(100, 100, DuoSimProfiles.DUO, 24, true);
         assertFalse(l.content.isEmpty());
     }
+
+    @Test
+    public void testMeasurePhysicalSize() {
+        // 8.8" tablet panel: 1904x3040 @ 409.84 x 406.4 dpi (Legion Y700-class)
+        DuoSimProfiles.Layout l = DuoSimProfiles.fitLayout(3040, 1904, DuoSimProfiles.DUO2, 56, true);
+        DuoSimProfiles.Physical p = DuoSimProfiles.measure(l, 409.84406, 406.4);
+        // height-bound scale = 1904/1892 = 1.00634; panel width = 1344*s = 1353 px
+        assertEquals(1353.0 / 409.84406, p.panelWidthIn, 0.01);
+        assertEquals(1904.0 / 406.4, p.panelHeightIn, 0.01);
+        assertEquals((2.0 * 1353 + 56) / 409.84406, p.contentWidthIn, 0.01);
+        // unfolded diagonal of the simulated Duo 2 on this panel ~ 8.2"
+        assertEquals(Math.hypot(p.contentWidthIn, p.contentHeightIn), p.contentDiagonalIn(), 1e-9);
+        assertTrue(p.contentDiagonalIn() > 8.1 && p.contentDiagonalIn() < 8.3);
+        // single-panel portrait measure: panel == content
+        DuoSimProfiles.Layout s = DuoSimProfiles.fitLayout(1904, 3040, DuoSimProfiles.DUO2, 56, false);
+        DuoSimProfiles.Physical ps = DuoSimProfiles.measure(s, 409.84406, 406.4);
+        assertEquals(ps.contentWidthIn, ps.panelWidthIn, 1e-9);
+        assertTrue(ps.contentDiagonalIn() > 8.0 && ps.contentDiagonalIn() < 8.2);
+    }
 }

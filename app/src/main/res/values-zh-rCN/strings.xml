@@ -562,6 +562,8 @@
     <string name="settings_read_duo_sim_profile_duo">Surface Duo（5.6 英寸单屏）</string>
     <string name="settings_read_duo_sim_profile_duo2">Surface Duo 2（5.8 英寸单屏）</string>
     <string name="settings_read_duo_sim_hinge">铰链空隙宽度</string>
+    <string name="duo_sim_summary_dual">展开态 ≈ %1$.1f 吋（真机 %2$.1f 吋，%3$d%%）· 单面板 ≈ %4$.1f 吋</string>
+    <string name="duo_sim_summary_single">单面板 ≈ %1$.1f 吋（竖屏满幅）</string>
     <string name="settings_read_first_page_cover">第一页作为封面</string>
     <string name="settings_read_page_scaling">页面缩放</string>
     <string name="settings_read_page_scaling_actual_size">原始尺寸</string>

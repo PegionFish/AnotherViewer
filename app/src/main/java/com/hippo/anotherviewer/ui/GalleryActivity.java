@@ -39,6 +39,7 @@ import android.os.Handler;
 import android.os.Looper;
 import android.os.StrictMode;
 import android.text.TextUtils;
+import android.util.DisplayMetrics;
 import android.util.Log;
 import android.view.Gravity;
 import android.view.InputDevice;
@@ -51,6 +52,7 @@ import android.view.Window;
 import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.webkit.MimeTypeMap;
+import android.widget.AdapterView;
 import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.ImageView;
@@ -1365,6 +1367,9 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         private final SwitchCompat mReverseVolumePage;
         private final SwitchCompat mReadingFullscreen;
         private final SwitchCompat mDuoSim;
+        private final Spinner mDuoSimProfile;
+        private final View mDuoSimProfileRow;
+        private final TextView mDuoSimSummary;
         private final SwitchCompat mCustomScreenLightness;
         private final SeekBar mScreenLightness;
 
@@ -1385,6 +1390,9 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             mReverseVolumePage = mView.findViewById(R.id.reverse_volume_page);
             mReadingFullscreen = mView.findViewById(R.id.reading_fullscreen);
             mDuoSim = mView.findViewById(R.id.duo_sim);
+            mDuoSimProfile = mView.findViewById(R.id.duo_sim_profile);
+            mDuoSimProfileRow = mView.findViewById(R.id.duo_sim_profile_row);
+            mDuoSimSummary = mView.findViewById(R.id.duo_sim_summary);
             mCustomScreenLightness = mView.findViewById(R.id.custom_screen_lightness);
             mScreenLightness = mView.findViewById(R.id.screen_lightness);
 
@@ -1402,6 +1410,19 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             mReverseVolumePage.setChecked(Settings.getReverseVolumePage());
             mReadingFullscreen.setChecked(Settings.getReadingFullscreen());
             mDuoSim.setChecked(Settings.getDuoSimEnabled());
+            mDuoSimProfile.setSelection(Settings.getDuoSimProfile());
+            mDuoSim.setOnCheckedChangeListener((buttonView, isChecked) -> updateDuoSimVisiblity());
+            mDuoSimProfile.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+                @Override
+                public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                    updateDuoSimSummary();
+                }
+
+                @Override
+                public void onNothingSelected(AdapterView<?> parent) {
+                }
+            });
+            updateDuoSimVisiblity();
             mCustomScreenLightness.setChecked(Settings.getCustomScreenLightness());
             mScreenLightness.setProgress(Settings.getScreenLightness());
             mScreenLightness.setEnabled(Settings.getCustomScreenLightness());
@@ -1418,8 +1439,57 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             mCustomScreenLightness.setOnCheckedChangeListener((buttonView, isChecked) -> mScreenLightness.setEnabled(isChecked));
         }
 
-        private void onVolumePageChange(CompoundButton compoundButton, boolean b) {
-            if (compoundButton.isChecked()) {
+        private void updateDuoSimVisiblity() {
+            int visibility = mDuoSim.isChecked() ? View.VISIBLE : View.GONE;
+            mDuoSimProfileRow.setVisibility(visibility);
+            mDuoSimSummary.setVisibility(visibility);
+            updateDuoSimSummary();
+        }
+
+        /**
+         * Shows the on-screen physical size the simulation will produce on this
+         * host panel, so the evaluated configuration is readable at a glance.
+         * Predicts the post-OK state from the current dialog choices (same rule
+         * as applyDuoSim: dual-page form in landscape with a horizontal reading
+         * direction, single panel otherwise).
+         */
+        private void updateDuoSimSummary() {
+            if (mDuoSimSummary == null || mDuoSimProfileRow == null || !mDuoSim.isChecked()) {
+                return;
+            }
+            ViewGroup main = (ViewGroup) GalleryActivity.this.findViewById(R.id.main);
+            if (main == null || main.getWidth() <= 0 || main.getHeight() <= 0) {
+                return;
+            }
+            int profile = mDuoSimProfile.getSelectedItemPosition();
+            int direction = GalleryView.sanitizeLayoutMode(mReadingDirection.getSelectedItemPosition());
+            boolean dual = main.getWidth() > main.getHeight()
+                    && (direction == GalleryView.LAYOUT_LEFT_TO_RIGHT
+                        || direction == GalleryView.LAYOUT_RIGHT_TO_LEFT);
+            DisplayMetrics metrics = getResources().getDisplayMetrics();
+            DuoSimProfiles.Layout layout = DuoSimProfiles.fitLayout(main.getWidth(), main.getHeight(),
+                    profile,
+                    Math.round(Settings.getDuoSimHingeDp() * metrics.density),
+                    dual);
+            DuoSimProfiles.Physical p = DuoSimProfiles.measure(layout, metrics.xdpi, metrics.ydpi);
+            if (p.contentDiagonalIn() <= 0) {
+                mDuoSimSummary.setText("");
+                return;
+            }
+            Resources res = getResources();
+            if (!layout.hinge.isEmpty()) {
+                double real = profile == DuoSimProfiles.DUO2 ? 8.3 : 8.1;
+                int percent = (int) Math.round(p.contentDiagonalIn() / real * 100);
+                double panelDiag = Math.hypot(p.panelWidthIn, p.panelHeightIn);
+                mDuoSimSummary.setText(res.getString(R.string.duo_sim_summary_dual,
+                        p.contentDiagonalIn(), real, percent, panelDiag));
+            } else {
+                mDuoSimSummary.setText(res.getString(R.string.duo_sim_summary_single,
+                        p.contentDiagonalIn()));
+            }
+        }
+
+        private void onVolumePageChange(CompoundButton compoundButton, boolean b) {            if (compoundButton.isChecked()) {
                 mReverseVolumePage.setVisibility(View.VISIBLE);
             } else {
                 mReverseVolumePage.setVisibility(View.GONE);
@@ -1469,6 +1539,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             Settings.putVolumePage(volumePage);
             Settings.putReadingFullscreen(readingFullscreen);
             Settings.putDuoSimEnabled(duoSim);
+            Settings.putDuoSimProfile(mDuoSimProfile.getSelectedItemPosition());
             Settings.putCustomScreenLightness(customScreenLightness);
             Settings.putScreenLightness(screenLightness);
             Settings.putReverseVolumePage(reverseVolumePage);

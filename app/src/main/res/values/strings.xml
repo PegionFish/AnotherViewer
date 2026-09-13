@@ -651,6 +651,8 @@
     <string name="settings_read_duo_sim_profile_duo">Surface Duo (5.6\" panel)</string>
     <string name="settings_read_duo_sim_profile_duo2">Surface Duo 2 (5.8\" panel)</string>
     <string name="settings_read_duo_sim_hinge">Hinge gap width</string>
+    <string name="duo_sim_summary_dual">Unfolded ≈ %1$.1f in (real %2$.1f in, %3$d%%) · panel ≈ %4$.1f in</string>
+    <string name="duo_sim_summary_single">Single panel ≈ %1$.1f in (portrait, full screen)</string>
     <string name="settings_read_first_page_cover">First page as cover</string>
     <string name="settings_read_page_scaling">Page scaling</string>
     <string name="settings_read_page_scaling_actual_size">Actual size</string>
