@@ -99,6 +99,7 @@ import com.hippo.anotherviewer.webui.WebUiConfig;
 import com.hippo.anotherviewer.webui.WebUiSettings;
 import com.hippo.anotherviewer.widget.DuoSimOverlay;
 import com.hippo.anotherviewer.widget.DuoSimProfiles;
+import com.hippo.anotherviewer.widget.FoldPolicy;
 import com.hippo.anotherviewer.widget.GalleryGuideView;
 import com.hippo.anotherviewer.widget.GalleryHeader;
 import com.hippo.anotherviewer.widget.ReversibleSeekBar;
@@ -218,10 +219,24 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         for (DisplayFeature feature : info.getDisplayFeatures()) {
             if (feature instanceof FoldingFeature) {
                 FoldingFeature fold = (FoldingFeature) feature;
-                // Only a vertical fold (crease/hinge) defines a side-by-side seam.
-                if (fold.getOrientation() == FoldingFeature.Orientation.VERTICAL) {
-                    splitX = fold.getBounds().centerX();
-                }
+                // FoldPolicy decides whether the fold actually separates two
+                // display panels (FULL occlusion hinge or HALF_OPENED angle);
+                // a FLAT glass crease is one continuous screen and keeps the
+                // pages flowing across it. Intentional behaviour change: the
+                // old logic split on any VERTICAL fold, ignoring state and
+                // occlusion.
+                splitX = FoldPolicy.readerSplitX(fold.getBounds(),
+                        fold.getOrientation() == FoldingFeature.Orientation.VERTICAL
+                                ? FoldPolicy.ORIENTATION_VERTICAL
+                                : FoldPolicy.ORIENTATION_HORIZONTAL,
+                        fold.getState() == FoldingFeature.State.HALF_OPENED
+                                ? FoldPolicy.STATE_HALF_OPENED
+                                : FoldPolicy.STATE_FLAT,
+                        fold.getOcclusionType() == FoldingFeature.OcclusionType.FULL
+                                ? FoldPolicy.OCCLUSION_FULL
+                                : FoldPolicy.OCCLUSION_NONE,
+                        // fold bounds are in window coordinates
+                        getWindow().getDecorView().getWidth());
                 break;
             }
         }
