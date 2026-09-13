@@ -349,11 +349,14 @@ public class WebUiTier2ProxyInterceptorTest {
     }
 
     // ------------------------------------------------------------------
-    // Referer / Origin header semantics (site values wrapped the same way)
+    // Referer / Origin headers are dropped, never forwarded: the server-side
+    // proxy rebuilds both from its own site config (SiteProxyController), and
+    // a forwarded Origin makes the POST a cross-origin request to the server's
+    // CORS filter, which answers 403 before the proxy even runs.
     // ------------------------------------------------------------------
 
     @Test
-    public void testSiteRefererAndOriginAreRewrittenToProxyForm() throws Exception {
+    public void testSiteRefererAndOriginAreDropped() throws Exception {
         settings.saveConfig(SERVER);
         settings.setClientTier(2);
 
@@ -363,23 +366,12 @@ public class WebUiTier2ProxyInterceptorTest {
                 .header("Origin", "https://upld.e-hentai.org")
                 .build());
 
-        // Structural (encoding-agnostic) assertions: the rewritten headers are
-        // proxy URLs whose url param round-trips to the original site value.
-        okhttp3.HttpUrl referer = okhttp3.HttpUrl.parse(proceeded.header("Referer"));
-        assertEquals("http", referer.scheme());
-        assertEquals("192.168.1.10", referer.host());
-        assertEquals(8080, referer.port());
-        assertEquals("/api/v1/site/proxy", referer.encodedPath());
-        assertEquals("https://e-hentai.org/?f_search=alpha", referer.queryParameter("url"));
-
-        okhttp3.HttpUrl origin = okhttp3.HttpUrl.parse(proceeded.header("Origin"));
-        assertEquals("192.168.1.10", origin.host());
-        assertEquals("/api/v1/site/proxy", origin.encodedPath());
-        assertEquals("https://upld.e-hentai.org/", origin.queryParameter("url"));
+        assertNull(proceeded.header("Referer"));
+        assertNull(proceeded.header("Origin"));
     }
 
     @Test
-    public void testExternalRefererAndOriginStayUntouched() throws Exception {
+    public void testExternalRefererAndOriginAreDroppedToo() throws Exception {
         settings.saveConfig(SERVER);
         settings.setClientTier(2);
 
@@ -389,8 +381,8 @@ public class WebUiTier2ProxyInterceptorTest {
                 .header("Origin", "https://example.com")
                 .build());
 
-        assertEquals("https://example.com/start", proceeded.header("Referer"));
-        assertEquals("https://example.com", proceeded.header("Origin"));
+        assertNull(proceeded.header("Referer"));
+        assertNull(proceeded.header("Origin"));
     }
 
     @Test

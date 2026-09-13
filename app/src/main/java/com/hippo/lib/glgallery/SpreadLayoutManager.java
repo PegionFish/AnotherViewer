@@ -453,9 +453,20 @@ class SpreadLayoutManager extends GalleryView.LayoutManager {
         int seamSpec = GLView.MeasureSpec.makeMeasureSpec(seam, GLView.MeasureSpec.EXACTLY);
         int rightSpec = GLView.MeasureSpec.makeMeasureSpec(rightHalf, GLView.MeasureSpec.EXACTLY);
         if (p1 == null) {
-            // Single page (cover or trailing): center a half-width slot.
-            int slotLeft = left + (width - seam) / 2;
-            layoutPage(p0, seamSpec, heightSpec, slotLeft, 0, slotLeft + seam, height);
+            // Single page (cover or trailing). With a physical hinge (splitX),
+            // keep it inside one panel — the panel where the first page of a
+            // spread would land — so it never straddles the seam. Without a
+            // hinge, center a half-width slot as before.
+            if (mSplitX > 0 && mSplitX < width) {
+                if (readingLeftToRight) {
+                    layoutPage(p0, seamSpec, heightSpec, left, 0, left + seam, height);
+                } else {
+                    layoutPage(p0, rightSpec, heightSpec, left + seam, 0, left + width, height);
+                }
+            } else {
+                int slotLeft = left + (width - seam) / 2;
+                layoutPage(p0, seamSpec, heightSpec, slotLeft, 0, slotLeft + seam, height);
+            }
         } else if (readingLeftToRight) {
             layoutPage(p0, seamSpec, heightSpec, left, 0, left + seam, height);
             layoutPage(p1, rightSpec, heightSpec, left + seam, 0, left + width, height);
