@@ -42,9 +42,11 @@ import okhttp3.Response;
  * {@code {paired}/api/v1/site/proxy?url=<encoded original URL>}, which the
  * server fetches with its shared site session and passes back verbatim.
  * The paired request carries {@code Authorization: Bearer <pairing token>}
- * so auth-on servers accept it. Referer/Origin headers pointing at site
- * hosts are rewritten the same way, so from the app's point of view every
- * site resource comes from the server.
+ * so auth-on servers accept it. Site Referer/Origin headers are dropped
+ * rather than forwarded: the server-side proxy rebuilds both from its own
+ * site config, and a forwarded Origin would make the POST a cross-origin
+ * request to the server's CORS filter (instant 403 before the proxy runs).
+ * From the app's point of view every site resource comes from the server.
  *
  * <p>Everything else passes through untouched: Tier-0/1 traffic (Tier-1
  * behavior is unchanged by contract), non-site hosts — including the paired
@@ -132,16 +134,11 @@ public final class WebUiTier2ProxyInterceptor implements Interceptor {
         HttpUrl proxied = proxyUrl(base, request.url());
         Request.Builder builder = request.newBuilder().url(proxied);
         attachBearer(builder, config.getToken());
-        String referer = request.header("Referer");
-        HttpUrl refererUrl = referer != null ? HttpUrl.parse(referer) : null;
-        if (refererUrl != null && isGallerySiteHost(refererUrl.host())) {
-            builder.header("Referer", proxyUrl(base, refererUrl).toString());
-        }
-        String origin = request.header("Origin");
-        HttpUrl originUrl = origin != null ? HttpUrl.parse(origin) : null;
-        if (originUrl != null && isGallerySiteHost(originUrl.host())) {
-            builder.header("Origin", proxyUrl(base, originUrl).toString());
-        }
+        // Drop site Referer/Origin instead of rewriting them: the server-side
+        // proxy rebuilds both from its own site config (SiteProxyController),
+        // and a forwarded Origin makes the POST a cross-origin request in the
+        // server's CORS filter, which answers 403 before the proxy runs.
+        builder.removeHeader("Referer").removeHeader("Origin");
         try {
             Response response = chain.proceed(builder.build());
             if (response.code() == HTTP_BAD_GATEWAY) {
