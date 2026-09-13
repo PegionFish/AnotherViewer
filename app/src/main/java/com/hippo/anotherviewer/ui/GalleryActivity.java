@@ -603,6 +603,9 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
                 mDuoSimOverlay = null;
             }
             setGLViewportSize(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
+            if (mGalleryView != null) {
+                mGalleryView.setSplitX(-1);
+            }
             return;
         }
         // one page per panel only applies to the dual-page layout; with any
@@ -1361,6 +1364,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         private final SwitchCompat mVolumePage;
         private final SwitchCompat mReverseVolumePage;
         private final SwitchCompat mReadingFullscreen;
+        private final SwitchCompat mDuoSim;
         private final SwitchCompat mCustomScreenLightness;
         private final SeekBar mScreenLightness;
 
@@ -1380,6 +1384,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             mVolumePage = mView.findViewById(R.id.volume_page);
             mReverseVolumePage = mView.findViewById(R.id.reverse_volume_page);
             mReadingFullscreen = mView.findViewById(R.id.reading_fullscreen);
+            mDuoSim = mView.findViewById(R.id.duo_sim);
             mCustomScreenLightness = mView.findViewById(R.id.custom_screen_lightness);
             mScreenLightness = mView.findViewById(R.id.screen_lightness);
 
@@ -1396,6 +1401,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             mVolumePage.setChecked(Settings.getVolumePage());
             mReverseVolumePage.setChecked(Settings.getReverseVolumePage());
             mReadingFullscreen.setChecked(Settings.getReadingFullscreen());
+            mDuoSim.setChecked(Settings.getDuoSimEnabled());
             mCustomScreenLightness.setChecked(Settings.getCustomScreenLightness());
             mScreenLightness.setProgress(Settings.getScreenLightness());
             mScreenLightness.setEnabled(Settings.getCustomScreenLightness());
@@ -1434,6 +1440,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             int layoutMode = GalleryView.sanitizeLayoutMode(mReadingDirection.getSelectedItemPosition());
             int scaleMode = GalleryView.sanitizeScaleMode(mScaleMode.getSelectedItemPosition());
             int startPosition = GalleryView.sanitizeStartPosition(mStartPosition.getSelectedItemPosition());
+            boolean duoSim = mDuoSim.isChecked();
             boolean keepScreenOn = mKeepScreenOn.isChecked();
             boolean showClock = mShowClock.isChecked();
             boolean showProgress = mShowProgress.isChecked();
@@ -1461,6 +1468,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             Settings.putShowPageInterval(showPageInterval);
             Settings.putVolumePage(volumePage);
             Settings.putReadingFullscreen(readingFullscreen);
+            Settings.putDuoSimEnabled(duoSim);
             Settings.putCustomScreenLightness(customScreenLightness);
             Settings.putScreenLightness(screenLightness);
             Settings.putReverseVolumePage(reverseVolumePage);
@@ -1471,8 +1479,7 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             }
 
             int orientation;
-            switch (screenRotation) {
-                default:
+            switch (screenRotation) {                default:
                 case 0:
                     orientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
                     break;
@@ -1487,6 +1494,19 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
                     break;
             }
             setRequestedOrientation(orientation);
+
+            // Duo simulation models the physical device: one page per panel,
+            // which is the dual-page layout; force it in landscape when on.
+            boolean landscape = getResources().getConfiguration().orientation
+                    == Configuration.ORIENTATION_LANDSCAPE;
+            if (duoSim && landscape
+                    && (layoutMode == GalleryView.LAYOUT_LEFT_TO_RIGHT
+                        || layoutMode == GalleryView.LAYOUT_RIGHT_TO_LEFT)) {
+                mGalleryView.setSpreadMode(layoutMode == GalleryView.LAYOUT_LEFT_TO_RIGHT
+                        ? GalleryView.SPREAD_LEFT_TO_RIGHT
+                        : GalleryView.SPREAD_RIGHT_TO_LEFT);
+                layoutMode = GalleryView.LAYOUT_DUAL_PAGE;
+            }
             mGalleryView.setLayoutMode(layoutMode);
             mGalleryView.setScaleMode(scaleMode);
             mGalleryView.setStartPosition(startPosition);
@@ -1511,6 +1531,8 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
             // Update slider
             mLayoutMode = layoutMode;
             updateSlider();
+            // re-fit the Duo simulation viewport (no-op when disabled)
+            applyDuoSim();
 
             if (oldReadingFullscreen != readingFullscreen) {
                 recreate();
