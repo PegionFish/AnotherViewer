@@ -21,6 +21,9 @@ import android.text.TextUtils;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import com.alibaba.fastjson.JSON;
+import com.alibaba.fastjson.JSONArray;
+import com.alibaba.fastjson.JSONObject;
 import com.hippo.anotherviewer.Settings;
 import com.hippo.anotherviewer.SiteApplication;
 import com.hippo.anotherviewer.client.PrivacyMask;
@@ -34,6 +37,7 @@ import com.hippo.anotherviewer.dao.DownloadLabel;
 import com.hippo.anotherviewer.dao.Filter;
 import com.hippo.anotherviewer.dao.HistoryInfo;
 import com.hippo.anotherviewer.dao.LocalFavoriteInfo;
+import com.hippo.anotherviewer.dao.PageHashStore;
 import com.hippo.anotherviewer.dao.QuickSearch;
 
 import java.io.IOException;
@@ -45,6 +49,7 @@ import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 
@@ -731,6 +736,14 @@ public final class WebUiSyncEngine {
         mStore.savePushLedger(serverKey, SUFFIX_LEDGER_DOWNLOADS, ledgerDownloads);
         mStore.savePushLedger(serverKey, SUFFIX_LEDGER_EH_SESSION, ledgerEhSession);
 
+        // Wave 3 A5: the cycle (push → pull → apply → save) is fully committed
+        // — now push per-page hashes as peer evidence for the download file
+        // integrity feature. Strictly best-effort: pushIntegrityEvidence
+        // swallows every failure, so it can never fail a sync that already
+        // succeeded; whatever was not delivered stays in the ledger for the
+        // next cycle (see PageHashStore's push ledger).
+        pushIntegrityEvidence(config);
+
         result.serverTimestamp = pull.serverTimestamp;
         return result;
     }
@@ -744,6 +757,107 @@ public final class WebUiSyncEngine {
     private Map<String, Long> loadLedgerOrEmpty(String serverKey, String suffix) {
         Map<String, Long> ledger = mStore.loadPushLedger(serverKey, suffix);
         return ledger != null ? ledger : new LinkedHashMap<>();
+    }
+
+    // --- Integrity evidence push (Wave 3 A5; runs once, at the very end of
+    // --- a successful sync cycle; failures are silent and retried next cycle).
+
+    /** Backfill cap: at most this many queued (存量) galleries are pushed per cycle. */
+    private static final int INTEGRITY_BACKFILL_BATCH_SIZE = 50;
+
+    /**
+     * Network seam for the integrity evidence push — production wires
+     * {@link WebUiUploadClient#postIntegrityHashes}, tests substitute a fake
+     * so the end-of-cycle hook runs without HTTP (same pattern as
+     * {@link PolicySource} / {@link DownloadRefreshSink}).
+     */
+    public interface IntegrityEvidencePusher {
+        @NonNull
+        WebUiUploadClient.IntegrityPushResult push(@NonNull WebUiConfig config, long gid,
+                @NonNull String json);
+    }
+
+    private static final IntegrityEvidencePusher DEFAULT_INTEGRITY_PUSHER =
+            (config, gid, json) -> WebUiUploadClient.postIntegrityHashes(config, gid, json);
+
+    private static volatile IntegrityEvidencePusher sIntegrityPusher = DEFAULT_INTEGRITY_PUSHER;
+
+    /** {@code null} restores the production pusher (WebUiUploadClient). */
+    public static void setIntegrityEvidencePusher(@Nullable IntegrityEvidencePusher pusher) {
+        sIntegrityPusher = pusher != null ? pusher : DEFAULT_INTEGRITY_PUSHER;
+    }
+
+    /**
+     * Pushes per-page hashes as peer evidence to the WebUI server. Two
+     * sources feed one deduplicated target set per cycle:
+     * <ul>
+     *   <li><b>存量分块回填</b> — the first cycle ever enqueues every gallery
+     *   that already has baselines (PageHashStore's one-shot queue); from
+     *   then on at most {@link #INTEGRITY_BACKFILL_BATCH_SIZE} queued gids
+     *   per cycle, drained as pushes settle;</li>
+     *   <li><b>增量</b> — every gid whose baselines changed this cycle
+     *   (upsert → PageHashStore dirty set), pushed in full, no cap.</li>
+     * </ul>
+     * A gid is dropped from both books only when the push settled: accepted,
+     * or permanently rejected (400/404 — the identical payload can never be
+     * accepted). A retryable failure keeps everything for the next cycle. A
+     * gallery whose baselines vanished (deleted between marking and pushing)
+     * is skipped and its stale bookkeeping dropped. Every exception is
+     * swallowed: the sync already succeeded, this is pure best-effort
+     * evidence collection.
+     */
+    private void pushIntegrityEvidence(WebUiConfig config) {
+        IntegrityEvidencePusher pusher = sIntegrityPusher;
+        try {
+            Set<Long> targets = new LinkedHashSet<>();
+            targets.addAll(PageHashStore.takeBackfillBatch(INTEGRITY_BACKFILL_BATCH_SIZE));
+            targets.addAll(PageHashStore.loadDirtyGids());
+            for (long gid : targets) {
+                List<PageHashStore.PageFileHash> rows = PageHashStore.queryByGallery(gid);
+                if (rows.isEmpty()) {
+                    // 空基线画廊：无可上送，丢弃两条账本里的过期记录，避免空转。
+                    PageHashStore.clearDirtyGids(Collections.singleton(gid));
+                    PageHashStore.dropBackfill(Collections.singleton(gid));
+                    continue;
+                }
+                WebUiUploadClient.IntegrityPushResult outcome =
+                        pusher.push(config, gid, buildIntegrityHashPayload(rows));
+                if (outcome != WebUiUploadClient.IntegrityPushResult.RETRYABLE_FAILURE) {
+                    PageHashStore.clearDirtyGids(Collections.singleton(gid));
+                    PageHashStore.dropBackfill(Collections.singleton(gid));
+                }
+            }
+        } catch (Exception e) {
+            // Best-effort by contract: the cycle is already committed; a
+            // missing/unwired PageHashStore, a dead network or a broken
+            // pusher must never fail the sync that just succeeded.
+        }
+    }
+
+    /**
+     * Converts one gallery's baselines to the contract JSON array of
+     * {@code POST /api/v1/integrity/hashes/{gid}}: page goes from the local
+     * 0-based scale to the wire's 1-based one, the extension loses any
+     * leading dot, the digest is lowercase, and {@code algo} carries the
+     * contract's {@code SHA-256} spelling (the stored value is
+     * {@code sha256}, a different string the server would reject).
+     */
+    static String buildIntegrityHashPayload(List<PageHashStore.PageFileHash> rows) {
+        JSONArray array = new JSONArray();
+        for (PageHashStore.PageFileHash row : rows) {
+            JSONObject entry = new JSONObject();
+            entry.put("page", row.page + 1);
+            entry.put("ext", stripLeadingDot(row.ext));
+            entry.put("size", row.size);
+            entry.put("hash", row.hash == null ? "" : row.hash.toLowerCase(Locale.US));
+            entry.put("algo", "SHA-256");
+            array.add(entry);
+        }
+        return JSON.toJSONString(array);
+    }
+
+    private static String stripLeadingDot(@Nullable String ext) {
+        return ext != null && ext.startsWith(".") ? ext.substring(1) : ext;
     }
 
     // --- B9 incremental push selection ---

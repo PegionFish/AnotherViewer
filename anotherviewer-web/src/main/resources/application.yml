@@ -82,3 +82,11 @@ anotherviewer:
     login-max-failures: 5
     login-lockout-ms: 60000
     login-rate-limit-enabled: true
+  integrity:
+    # 完整性巡检（StorageIntegrityService）cron：默认每月 1 日 03:00（低峰摊平全库）。
+    scrub-cron: "0 0 3 1 * ?"
+
+storage:
+  # 存储池形态强制（存储自适配 P4；auto|ssd|hdd|zfs，默认 auto）：探测不可用/结果
+  # 不符时可手动指定形态；auto 即按下载目录自然探测。非法值按 auto 处理并 warn。
+  profile-override: auto

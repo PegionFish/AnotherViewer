@@ -179,6 +179,65 @@ class ImageCacheService(
     // ── whole-cache management (backward-compatible) ───────────
 
     /**
+     * 文件完整性 Wave 3（S7）：修复覆写后清掉**单页**的各层缓存，让阅读/下载
+     * 路径立即看到 healed 后的池文件而非旧的损坏副本：
+     *
+     * - page-keyed 内存条目（`"{gid}:{apiPage}"`）；
+     * - page-keyed 磁盘文件 `{cachePath}/{gid}/{apiPage}.*`；
+     * - enhanced 派生文件 `{cachePath}/enhanced/{gid}/{apiPage}.*`；
+     * - sourceUrls 对应的 URL-keyed 条目（内存 + `{cachePath}/_url/{sha256}`，
+     *   下载管线 `cacheImage(url, bytes)` 留下的旧字节）。
+     *
+     * 边删边修正磁盘计数（与 clearGalleryCache 同款）。调用方通常在覆写后紧接
+     * `cacheImage(newUrl, freshBytes)` 重灌 URL 条目。
+     *
+     * @param apiPage 阅读端点口径的 0-based 页号（pageKey 同口径）。
+     * @return true if any data was removed.
+     */
+    fun evictPage(galleryId: Long, apiPage: Int, sourceUrls: List<String> = emptyList()): Boolean {
+        var removed = false
+
+        val key = pageKey(galleryId, apiPage)
+        if (memoryCache.getIfPresent(key) != null) {
+            memoryCache.invalidate(key)
+            removed = true
+        }
+
+        findPageFile(galleryId, apiPage)?.let { file ->
+            diskSizeBytes.addAndGet(-file.length())
+            diskEntryCount.decrementAndGet()
+            removed = file.delete() || removed
+        }
+
+        getEnhancedImage(galleryId, apiPage)?.let { file ->
+            removed = file.delete() || removed
+        }
+
+        sourceUrls.forEach { url ->
+            removed = evictUrlEntry(urlKey(url)) || removed
+        }
+
+        return removed
+    }
+
+    /** URL-keyed 单条清除（内存 + `_url/` 磁盘文件），边删边计数。 */
+    private fun evictUrlEntry(key: String): Boolean {
+        var removed = false
+        if (memoryCache.getIfPresent(key) != null) {
+            memoryCache.invalidate(key)
+            removed = true
+        }
+        val disk = urlDiskPath(key)
+        if (disk.isFile) {
+            diskSizeBytes.addAndGet(-disk.length())
+            diskEntryCount.decrementAndGet()
+            removed = disk.delete() || removed
+        }
+        return removed
+    }
+
+
+    /**
      * 清空内存 + 磁盘两级缓存，边删边计数。
      *
      * @param handle 异步 Job 进度句柄（可选）：先 collectFiles 得 total，

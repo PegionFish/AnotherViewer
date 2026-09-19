@@ -102,14 +102,14 @@ describe('SettingsLayout (A5-1 合并 + A5-3 层级导航)', () => {
     return router
   }
 
-  it('renders the grouped two-pane sidebar with 14 links in 2 groups', async () => {
+  it('renders the grouped two-pane sidebar with 16 links in 2 groups', async () => {
     await mountAt('/settings/general')
     expect(wrapper.find('[data-testid="settings-sidebar"]').exists()).toBe(true)
     expect(wrapper.findAll('.settings-layout__group-label').map((g) => g.text())).toEqual([
       '偏好',
       '服务器',
     ])
-    expect(wrapper.findAll('.settings-layout__link')).toHaveLength(14)
+    expect(wrapper.findAll('.settings-layout__link')).toHaveLength(16)
   })
 
   it('marks the link matching the current route as active (server group)', async () => {
@@ -132,7 +132,7 @@ describe('SettingsLayout (A5-1 合并 + A5-3 层级导航)', () => {
       await mountAt('/settings')
       const index = wrapper.find('[data-testid="settings-index"]')
       expect(index.exists()).toBe(true)
-      expect(wrapper.findAll('[data-testid="settings-index-row"]')).toHaveLength(14)
+      expect(wrapper.findAll('[data-testid="settings-index-row"]')).toHaveLength(16)
       expect(wrapper.findAll('.settings-index__group-label').map((g) => g.text())).toEqual([
         '偏好',
         '服务器',

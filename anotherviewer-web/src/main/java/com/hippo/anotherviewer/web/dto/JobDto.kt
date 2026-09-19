@@ -9,8 +9,12 @@ import com.hippo.anotherviewer.web.service.Job
  * [JobSubmitResponse] 是所有异步提交端点的 202 响应体。
  */
 enum class JobType {
-    IMPORT, EXPORT, RESTORE, CACHE_CLEAR
+    IMPORT, EXPORT, RESTORE, CACHE_CLEAR, REVERIFY
 }
+// REVERIFY：文件完整性 W0 契约（contracts/openapi.yaml JobType 枚举）已声明、
+// Wave 3 落地的整本复验任务——POST /api/v1/integrity/reverify/{gid} 提交
+// （S6），worker 调 DownloadService.reverifyGallery（S7），终态 result 为
+// ReverifyStats。
 
 enum class JobState {
     PENDING, RUNNING, COMPLETED, FAILED

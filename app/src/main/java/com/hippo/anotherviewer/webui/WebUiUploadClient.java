@@ -143,6 +143,52 @@ public final class WebUiUploadClient {
         }
     }
 
+    /**
+     * Outcome of one integrity evidence push, decidable by the caller without
+     * inspecting status codes: accepted (done for now), retryable failure
+     * (transient — leave the ledger entry and try again next sync cycle) or
+     * permanent failure (the server deterministically rejected this payload —
+     * retrying the identical body can never succeed, stop retrying).
+     */
+    public enum IntegrityPushResult {
+        ACCEPTED, RETRYABLE_FAILURE, PERMANENT_FAILURE
+    }
+
+    /**
+     * POST /api/v1/integrity/hashes/{gid} — pushes one gallery's per-page
+     * hashes as peer evidence (download file-integrity Wave 3 A5; contract
+     * {@code pushIntegrityHashes}). {@code jsonBody} is the pre-serialized
+     * contract array ({@code [{"page":1-based,"ext","size","hash","algo"},...]}),
+     * built by the sync engine from the {@code page_file_hash} baselines.
+     *
+     * <p>Never throws and never interrupts the sync cycle — a failure is
+     * silent by contract (the engine keeps the ledger entry and retries on a
+     * later cycle): HTTP 200 → {@link IntegrityPushResult#ACCEPTED};
+     * 400 (malformed hash/page/algo/oversized batch) and 404 (server has no
+     * download row for the gid) → {@link IntegrityPushResult#PERMANENT_FAILURE};
+     * every other status (401/403/429/5xx), {@link IOException} or a network
+     * error → {@link IntegrityPushResult#RETRYABLE_FAILURE}.
+     */
+    @NonNull
+    public static IntegrityPushResult postIntegrityHashes(@NonNull WebUiConfig config, long gid,
+            @NonNull String jsonBody) {
+        Request.Builder builder = new Request.Builder()
+                .url(config.baseUrl() + "/api/v1/integrity/hashes/" + gid)
+                .post(RequestBody.create(jsonBody, JSON_MEDIA));
+        addAuth(builder, config.getToken());
+        try (Response response = client().newCall(builder.build()).execute()) {
+            if (response.isSuccessful()) {
+                return IntegrityPushResult.ACCEPTED;
+            }
+            int code = response.code();
+            return code == 400 || code == 404
+                    ? IntegrityPushResult.PERMANENT_FAILURE
+                    : IntegrityPushResult.RETRYABLE_FAILURE;
+        } catch (IOException e) {
+            return IntegrityPushResult.RETRYABLE_FAILURE;
+        }
+    }
+
     private static void addAuth(Request.Builder builder, String token) {
         if (token != null && !token.isEmpty()) {
             builder.header("Authorization", "Bearer " + token);

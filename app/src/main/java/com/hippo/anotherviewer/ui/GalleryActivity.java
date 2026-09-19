@@ -1173,7 +1173,8 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
                 lp.screenBrightness = Math.max((lightness - 100) / 100.0f, 0.01f);
             } else {
                 mMaskView.setColor(MathUtils.lerp(0xde, 0x00, lightness / 100.0f) << 24);
-                lp.screenBrightness = 0.01f;
+                // Pure mask dimming: leave the system backlight alone.
+                lp.screenBrightness = WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE;
             }
         } else {
             mMaskView.setColor(0);

@@ -15,6 +15,11 @@ import com.hippo.anotherviewer.web.service.InMemoryJobStore
 import com.hippo.anotherviewer.web.service.JobService
 import com.hippo.anotherviewer.web.service.PrefetchService
 import com.hippo.anotherviewer.web.service.SiteSessionManager
+import com.hippo.anotherviewer.web.service.storage.DefaultSystemFiles
+import com.hippo.anotherviewer.web.service.storage.PoolReadGate
+import com.hippo.anotherviewer.web.service.storage.PoolReadPermit
+import com.hippo.anotherviewer.web.service.storage.StorageProfileService
+import com.hippo.anotherviewer.web.service.storage.StorageTuning
 import com.hippo.anotherviewer.web.util.ThumbnailScaler
 import org.springframework.context.ApplicationEventPublisher
 import okhttp3.Interceptor
@@ -25,13 +30,17 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
+import org.junit.jupiter.api.io.TempDir
 import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.ArgumentMatchers.anyLong
+import org.mockito.ArgumentMatchers.anyString
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
+import org.mockito.Mockito.timeout
 import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.springframework.test.web.servlet.MockMvc
@@ -47,6 +56,8 @@ import java.awt.image.BufferedImage
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
+import java.nio.file.Path
+import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.atomic.AtomicReference
 import javax.imageio.ImageIO
 
@@ -104,6 +115,7 @@ class ImageProxyControllerTest {
     }
 
     private lateinit var imageCacheService: ImageCacheService
+    private lateinit var galleryLookupService: GalleryLookupService
     private lateinit var sessionManager: SiteSessionManager
     private lateinit var mockMvc: MockMvc
     private lateinit var site: FakeSite
@@ -118,26 +130,74 @@ class ImageProxyControllerTest {
     private fun probeFalseService(): EhAvailabilityService =
         EhAvailabilityService(mock(com.hippo.anotherviewer.web.service.WebProxyManager::class.java), "https://e-hentai.org", 5000, probe = { false })
 
-    @BeforeEach
-    fun setUp() {
-        imageCacheService = mock(ImageCacheService::class.java)
-        val galleryLookupService = mock(GalleryLookupService::class.java)
-        sessionManager = mock(SiteSessionManager::class.java)
+    /**
+     * P10 required 注入：测试显式提供全部依赖。W3-P 起可替身池读闸门与
+     * StorageTuning——默认「SSD 形态」直通闸门（不设闸、无预读副作用外溢，
+     * 预读开关按未探测的保守 UNKNOWN 打开但默认 mock 的 DownloadDirIndex
+     * 查不到池文件，不会真正触发）。
+     */
+    private fun buildMvc(
+        gate: PoolReadGate = PoolReadGate({ Int.MAX_VALUE }, PoolReadGate.DEFAULT_FORCE_GRANT_TIMEOUT_MS),
+        tuning: StorageTuning = StorageTuning(StorageProfileService(DefaultSystemFiles())),
+        dirIndex: DownloadDirIndex = mock(DownloadDirIndex::class.java),
+        downloadService: DownloadService = mock(DownloadService::class.java),
+    ): MockMvc {
         val prefetchService = mock(PrefetchService::class.java)
-        availability = probeFalseService().apply { recordSuccess() }
-        // P10 required 注入：测试显式提供真实 config 与轻量 JobService 替身。
-        mockMvc = MockMvcBuilders.standaloneSetup(
+        return MockMvcBuilders.standaloneSetup(
             ImageProxyController(
                 imageCacheService, galleryLookupService, sessionManager, prefetchService,
-                mock(DownloadService::class.java),
+                downloadService,
                 config,
                 JobService(InMemoryJobStore(), ApplicationEventPublisher {}),
                 availability,
-                mock(DownloadDirIndex::class.java),
+                dirIndex,
+                tuning,
+                gate,
             )
         )
             .setControllerAdvice(GlobalExceptionHandler())
             .build()
+    }
+
+    @BeforeEach
+    fun setUp() {
+        imageCacheService = mock(ImageCacheService::class.java)
+        galleryLookupService = mock(GalleryLookupService::class.java)
+        sessionManager = mock(SiteSessionManager::class.java)
+        availability = probeFalseService().apply { recordSuccess() }
+        mockMvc = buildMvc()
+    }
+
+    /** W3-P: 记录 acquire (directory, page) 键的真实闸门（默认不限流）。 */
+    private class RecordingGate(limit: Int) : PoolReadGate({ limit }, DEFAULT_FORCE_GRANT_TIMEOUT_MS) {
+        val acquired = CopyOnWriteArrayList<Pair<String, Int>>()
+
+        override fun acquire(directory: String, page: Int): PoolReadPermit {
+            acquired.add(directory to page)
+            return super.acquire(directory, page)
+        }
+    }
+
+    /** W3-P: 建一个 App-pushed 池目录 `{root}/{gid}/0001.jpg / 0002.jpg`（文件 1-based）。 */
+    private fun poolDirWithTwoPages(@TempDir root: Path, gid: Long): java.io.File {
+        val dir = java.io.File(root.toFile(), gid.toString()).apply { mkdirs() }
+        java.io.File(dir, "0001.jpg").writeBytes(byteArrayOf(1, 2, 3, 4))
+        java.io.File(dir, "0002.jpg").writeBytes(byteArrayOf(9, 9, 9))
+        return dir
+    }
+
+    private fun ssdTuning(): StorageTuning {
+        val service = StorageProfileService(DefaultSystemFiles(), profileOverride = "ssd")
+        service.detect("/nonexistent-pool-path")
+        return StorageTuning(service)
+    }
+
+    private fun waitUntil(timeoutMs: Long = 5_000L, condition: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!condition()) {
+            if (System.currentTimeMillis() > deadline) throw AssertionError("condition not met within ${timeoutMs}ms")
+            Thread.sleep(10)
+        }
     }
 
     // ------------------------------------------------------------------
@@ -515,5 +575,144 @@ class ImageProxyControllerTest {
             .andExpect(jsonPath("$.error.code").value("NOT_FOUND"))
 
         org.junit.jupiter.api.Assertions.assertEquals(0, site.callCount, "w 不得绕过白名单")
+    }
+
+    // ------------------------------------------------------------------
+    // W3-P: 存储池读闸门 + 池页翻页预读 N+1
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `pushed pool page serve passes the pool gate and prefetches the next pool page`(@TempDir root: Path) {
+        val gid = 555L
+        poolDirWithTwoPages(root, gid)
+        config.download.path = root.toString()
+        val gate = RecordingGate(Int.MAX_VALUE)
+        mockMvc = buildMvc(gate = gate, dirIndex = DownloadDirIndex(config))
+
+        mockMvc.perform(get("/api/v1/image/555/0"))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(byteArrayOf(1, 2, 3, 4)))
+
+        assertTrue(
+            gate.acquired.contains("555" to 0),
+            "pushed serve must acquire the pool gate with (gid, page), got ${gate.acquired}"
+        )
+
+        // 翻页预读 N+1：后台读下一页池文件 → serve 同款 cacheImageByKey 预热，且同样过闸。
+        waitUntil { gate.acquired.contains("555" to 1) }
+        verify(imageCacheService, timeout(2_000)).cacheImageByKey(
+            eq(gid), eq(1),
+            argThatK<ByteArray> { it.contentEquals(byteArrayOf(9, 9, 9)) },
+            eq("jpg"),
+        )
+    }
+
+    @Test
+    fun `pool page prefetch stays off on the ssd profile`(@TempDir root: Path) {
+        poolDirWithTwoPages(root, 556L)
+        config.download.path = root.toString()
+        val gate = RecordingGate(Int.MAX_VALUE)
+        val tuning = ssdTuning()
+        org.junit.jupiter.api.Assertions.assertFalse(tuning.pageTurnPrefetchEnabled, "SSD 必须关闭翻页预读")
+        mockMvc = buildMvc(gate = gate, tuning = tuning, dirIndex = DownloadDirIndex(config))
+
+        mockMvc.perform(get("/api/v1/image/556/0"))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(byteArrayOf(1, 2, 3, 4)))
+
+        assertTrue(gate.acquired.contains("556" to 0), "serve itself still passes the gate")
+        Thread.sleep(150) // 给任何错误的预读提交留出现形时间
+        assertTrue(
+            gate.acquired.none { it.first == "556" && it.second == 1 },
+            "SSD profile must not prefetch the next pool page"
+        )
+        verify(imageCacheService, never()).cacheImageByKey(anyLong(), anyInt(), any(), anyString())
+    }
+
+    @Test
+    fun `upstream page fetch holds a pool gate ticket for the gallery and page`() {
+        val gate = RecordingGate(Int.MAX_VALUE)
+        mockMvc = buildMvc(gate = gate)
+        `when`(galleryLookupService.findToken(42L)).thenReturn("tok")
+        `when`(galleryLookupService.fetchImageUrl(42L, "tok", 4)).thenReturn("https://s.exhentai.org/fullimg.jpg")
+        site = FakeSite { canned(it, 200, "image/jpeg", "PAGEBYTES") }
+        setUpClient(site)
+
+        mockMvc.perform(get("/api/v1/image/42/3"))
+            .andExpect(status().isOk)
+            .andExpect(content().string("PAGEBYTES"))
+
+        assertTrue(
+            gate.acquired.contains("42" to 3),
+            "upstream fetch serve must pass the gate with (gid, page), got ${gate.acquired}"
+        )
+        verify(imageCacheService).cacheImageByKey(
+            eq(42L), eq(3),
+            argThatK<ByteArray> { it.contentEquals("PAGEBYTES".toByteArray()) },
+            eq("jpg"),
+        )
+    }
+
+    @Test
+    fun `proxy fetch-on-miss passes the pool gate while scaled cache hits stay ungated`() {
+        val gate = RecordingGate(Int.MAX_VALUE)
+        val url = "https://e-hentai.org/t/3001/cover.jpg"
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(null)
+        site = FakeSite { canned(it, 200, "image/jpeg", "PNGBYTES") }
+        setUpClient(site)
+        mockMvc = buildMvc(gate = gate)
+
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url))
+            .andExpect(status().isOk)
+
+        assertTrue(
+            gate.acquired.any { it.first == url && it.second == 0 },
+            "fetch-on-miss must pass the gate (url-keyed, page 0), got ${gate.acquired}"
+        )
+
+        // 缩放缓存命中路径不碰任何存储——不过闸。
+        val hitGate = RecordingGate(Int.MAX_VALUE)
+        `when`(imageCacheService.getCachedImage(ThumbnailScaler.thumbnailCacheKey(url, 80)))
+            .thenReturn(solidImageBytes("jpeg", 80, 60))
+        mockMvc = buildMvc(gate = hitGate)
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "80"))
+            .andExpect(status().isOk)
+        assertTrue(hitGate.acquired.isEmpty(), "scaled cache hit must not touch the gate, got ${hitGate.acquired}")
+    }
+
+    @Test
+    fun `pool gate with limit 3 caps concurrent proxy upstream fetches below the legacy semaphore`() {
+        mockMvc = buildMvc(gate = PoolReadGate({ 3 }, PoolReadGate.DEFAULT_FORCE_GRANT_TIMEOUT_MS))
+        `when`(imageCacheService.getCachedImage(anyString())).thenReturn(null)
+        val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
+        val maxObserved = java.util.concurrent.atomic.AtomicInteger(0)
+        site = FakeSite { req ->
+            val now = inFlight.incrementAndGet()
+            maxObserved.updateAndGet { prev -> maxOf(prev, now) }
+            Thread.sleep(120)
+            inFlight.decrementAndGet()
+            canned(req, 200, "image/jpeg", "X")
+        }
+        setUpClient(site)
+
+        val threads = (1..9).map { i ->
+            Thread {
+                try {
+                    mockMvc.perform(
+                        get("/api/v1/image/proxy").param("url", "https://e-hentai.org/t/400$i/thumb$i.jpg")
+                    ).andExpect(status().isOk)
+                } catch (e: Exception) {
+                    throw RuntimeException(e)
+                }
+            }
+        }
+        threads.forEach { it.start() }
+        threads.forEach { it.join(20_000) }
+
+        org.junit.jupiter.api.Assertions.assertEquals(9, site.callCount)
+        assertTrue(
+            maxObserved.get() in 1..3,
+            "real gate limit 3 must cap upstream concurrency (legacy semaphore allows 6), observed ${maxObserved.get()}"
+        )
     }
 }

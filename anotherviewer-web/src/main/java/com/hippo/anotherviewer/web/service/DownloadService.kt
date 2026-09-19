@@ -6,11 +6,14 @@ import com.hippo.anotherviewer.web.config.SiteCoreConfigProperties
 import com.hippo.anotherviewer.web.dto.*
 import com.hippo.anotherviewer.web.entity.DownloadInfoEntity
 import com.hippo.anotherviewer.web.entity.DownloadLabelEntity
-import com.hippo.anotherviewer.web.entity.PageFileHashEntity
 import com.hippo.anotherviewer.web.repository.DownloadInfoRepository
 import com.hippo.anotherviewer.web.repository.DownloadInfoRepository.TitleProjection
 import com.hippo.anotherviewer.web.repository.DownloadLabelRepository
 import com.hippo.anotherviewer.web.repository.PageFileHashRepository
+import com.hippo.anotherviewer.web.service.integrity.PageHashWriter
+import com.hippo.anotherviewer.web.service.integrity.RepairLogService
+import com.hippo.anotherviewer.web.service.integrity.RepairResult
+import com.hippo.anotherviewer.web.service.integrity.ReverifyStats
 import com.hippo.anotherviewer.web.service.integrity.VGate
 import com.hippo.anotherviewer.web.service.integrity.VGateResult
 import com.fasterxml.jackson.core.type.TypeReference
@@ -22,7 +25,6 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Service
 import java.io.File
-import java.security.MessageDigest
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -65,6 +67,9 @@ class DownloadService(
     // （origin=downloader）。默认 null 仅为既有直构测试（DownloadControllerTest）
     // 的源兼容保留——那些用例不触达下载写入路径；Spring 装配按类型注入真实仓库。
     private val pageFileHashRepository: PageFileHashRepository? = null,
+    // 文件完整性 Wave 3（S7）：修复日志（遥测，只追加）。默认 null 仅为既有直构
+    // 测试的源兼容保留；Spring 装配按类型注入。
+    private val repairLogService: RepairLogService? = null,
 ) : DisposableBean {
     private val logger = LoggerFactory.getLogger(DownloadService::class.java)
 
@@ -801,16 +806,23 @@ class DownloadService(
      *   返回 false——调用方按该页下载失败处理（不计 done，终态走既有 FAILED
      *   语义，下次运行按断点续传重试该页）。
      * - 通过：写文件后对落盘字节计算 SHA-256 → [PageFileHashRepository] upsert
-     *   （origin=downloader）。下载字节本已全量驻内存（[downloadImage] 返回
-     *   ByteArray），单遍 `MessageDigest.digest(bytes)` 与流式聚合等价，无额外
-     *   常驻。覆盖已有基线（重下/重传同一页）= 刷新 hash/size/ext，并把
-     *   verdict/last_verified_at 复位为未巡检（内容已变，旧巡检结论作废）。
-     *   哈希落库失败不影响该页成功（基线 best-effort，可由巡检/TOFU 回填）。
+     *   （origin=[writeOrigin]，下载钩子恒为 downloader、修复覆写传 heal）。
+     *   下载字节本已全量驻内存（[downloadImage] 返回 ByteArray），单遍
+     *   `MessageDigest.digest(bytes)` 与流式聚合等价，无额外常驻。覆盖已有基线
+     *   （重下/重传/修复同一页）= 刷新 hash/size/ext，并把 verdict/last_verified_at
+     *   复位为未巡检（内容已变，旧巡检结论作废）。哈希落库失败不影响该页成功
+     *   （基线 best-effort，可由巡检/TOFU 回填）。
      *
      * @param page 1-based（下载循环/文件名口径）；基线行按 0-based 口径落库（page-1）。
      * @return true = 已落盘并建基线；false = V 门拒收（未落盘）。
      */
-    internal fun writePageWithBaseline(gid: Long, page: Int, file: File, bytes: ByteArray): Boolean {
+    internal fun writePageWithBaseline(
+        gid: Long,
+        page: Int,
+        file: File,
+        bytes: ByteArray,
+        writeOrigin: String = ORIGIN_DOWNLOADER,
+    ): Boolean {
         val gate = VGate.check(bytes)
         if (gate is VGateResult.Reject) {
             logger.warn(
@@ -820,14 +832,15 @@ class DownloadService(
             return false
         }
         file.writeBytes(bytes)
-        upsertPageHash(gid, page - 1, file, bytes, ORIGIN_DOWNLOADER)
+        upsertPageHash(gid, page - 1, file, bytes, writeOrigin)
         return true
     }
 
     /**
-     * SHA-256 基线 upsert（Wave 1 契约：先 [PageFileHashRepository.findByGidAndPage]
-     * 取旧行改字段再 save——复合主键覆盖语义，且不误伤巡检字段）。任何异常只记日志
-     * 不上抛：基线是 best-effort 附属产物，不得让已落盘的页被记为失败。
+     * SHA-256 基线 upsert（Wave 1 契约）：字段改写与「先取旧行再 save」的覆盖
+     * 语义统一在 integrity 包共享实现 [PageHashWriter.upsert]（Wave 3 / S7 上取，
+     * downloader 钩子与 heal 覆写共用同一条刷新路径）。任何异常只记日志不上抛：
+     * 基线是 best-effort 附属产物，不得让已落盘的页被记为失败。
      */
     private fun upsertPageHash(gid: Long, page0: Int, file: File, bytes: ByteArray, writeOrigin: String) {
         val hashRepository = pageFileHashRepository
@@ -836,29 +849,226 @@ class DownloadService(
             logger.warn("PageFileHashRepository not wired; skipping baseline for gid={} page={}", gid, page0)
             return
         }
-        try {
-            val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
-                .joinToString("") { "%02x".format(it) }
-            val now = System.currentTimeMillis()
-            val row = hashRepository.findByGidAndPage(gid, page0) ?: PageFileHashEntity().also {
-                it.gid = gid
-                it.page = page0
-            }
-            row.ext = file.extension.lowercase().ifEmpty { "jpg" }
-            row.size = bytes.size.toLong()
-            row.hash = sha256
-            row.algo = "sha256"
-            row.origin = writeOrigin
-            row.createdAt = now
-            row.lastVerifiedAt = null
-            row.verdict = null
-            hashRepository.save(row)
-        } catch (e: Exception) {
-            logger.warn(
-                "Failed to persist page hash baseline for gid={} page={}: {}",
-                gid, page0, e.message
-            )
+        PageHashWriter.upsert(hashRepository, gid, page0, file, bytes, writeOrigin)
+    }
+
+    // ── 文件完整性 Wave 3（S7）：单页强制重取与整本复验 ────────────────────
+
+    /**
+     * 单页强制重取（修复）：绕过「池内有文件就先 serve 池文件、下载器跳过已
+     * 存在文件」的现状，从 EH 源重新拉取该页并覆写。
+     *
+     * 流程：解析该页源 URL（1-based [page]）→ **绕过 URL 缓存**直连源拉取 →
+     * V 门 → 覆写池文件（保留既有文件名）→ 哈希基线刷新（origin=heal，
+     * verdict/last_verified_at 复位）→ 清该页各层缓存（imageCache page-keyed
+     * 内存/磁盘 + enhanced 派生 + downloadDirIndex）→ 重灌 URL 缓存为新鲜字节 →
+     * 记修复日志（source=refresh）。
+     *
+     * 归因（仅 healed）：覆写字节哈希 == 旧基线 → local_corrupt（本地劣化）；
+     * 不同 → source_changed（源已变）；无旧基线 → null（无法归因，处置相同）。
+     * 失败（源不可得 / V 门拒收）→ status=failed，本地文件与基线不动。
+     *
+     * @param page API 口径 1-based 页号。
+     */
+    fun forceRefetchPage(gid: Long, page: Int): RepairResult =
+        forceRefetchPageInternal(gid, page, RepairLogService.SOURCE_REFRESH)
+
+    /**
+     * 整本复验：逐页「读盘哈希 vs 基线」，只修坏页（按需深度校验，不拉源验证
+     * 好页——「源变更」探测是 forceRefetchPage 归因的副产品）。
+     *
+     * 逐页范围 = 磁盘页文件 ∪ 基线行 ∪（行 total 已知时）1..total。判定：
+     * - 文件缺失 / 读不出 → 坏 → 修复；
+     * - 基线非空且读盘哈希 == 基线 → 好（跳过，零网络）；
+     * - 基线非空且哈希不符 → 坏 → 修复；
+     * - 无基线（含 BackfillService 落的 struct_bad 空哈希行）→ 只做 V 门结构
+     *   判定（零网络）：过 → 好跳过（基线补建归 BackfillService）；拒 → 坏 → 修复。
+     *
+     * 每页修复走 [forceRefetchPage] 同款管线，日志 source=reverify。
+     * [isCancelled] 每页检查；中断时返回已检查页的部分统计（interrupted=true）。
+     * 建议画廊空闲时调用（进行中的下载任务会与本修复争抢源请求）。
+     */
+    fun reverifyGallery(gid: Long, isCancelled: () -> Boolean = { false }): ReverifyStats {
+        val dir = downloadDirIndex.dirFor(gid)
+        val baselines = pageFileHashRepository?.findByGid(gid).orEmpty().associateBy { it.page }
+        val row = downloadRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }
+
+        val pages = sortedSetOf<Int>()
+        dir?.listFiles()?.forEach { f ->
+            val pageNo = POOL_PAGE_NAME.matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull()
+            if (pageNo != null && pageNo >= 1) pages += pageNo
         }
+        pages += baselines.keys.map { it + 1 }.filter { it >= 1 }
+        row?.total?.takeIf { it > 0 }?.let { pages += 1..it }
+
+        var ok = 0
+        var bad = 0
+        var refreshed = 0
+        for (page in pages) {
+            if (isCancelled()) {
+                logger.info(
+                    "Reverify interrupted for gid={}: ok={} bad={} refreshed={}", gid, ok, bad, refreshed
+                )
+                return ReverifyStats(ok + bad, ok, bad, refreshed, interrupted = true)
+            }
+            val bytes = dir?.let { findPoolFile(it, page) }
+                ?.takeIf { it.isFile }
+                ?.let { f -> runCatching { f.readBytes() }.getOrNull() }
+            val oldHash = baselines[page - 1]?.hash?.takeIf { it.isNotBlank() }
+            val isGood = when {
+                // 文件缺失 / 读不出 → 坏。
+                bytes == null -> false
+                // 无基线：只做 V 门结构判定（零网络）。
+                oldHash == null -> VGate.check(bytes) is VGateResult.Accept
+                // 哈希 vs 基线。
+                else -> oldHash == PageHashWriter.sha256Hex(bytes)
+            }
+            if (isGood) {
+                ok++
+                continue
+            }
+            bad++
+            if (forceRefetchPageInternal(gid, page, RepairLogService.SOURCE_REVERIFY).status ==
+                RepairResult.STATUS_HEALED
+            ) {
+                refreshed++
+            }
+        }
+        logger.info("Reverify done for gid={}: total={} ok={} bad={} refreshed={}", gid, ok + bad, ok, bad, refreshed)
+        return ReverifyStats(ok + bad, ok, bad, refreshed, interrupted = false)
+    }
+
+    /** [forceRefetchPage] 的实现体；[source] 区分修复日志的来源（refresh|reverify）。 */
+    private fun forceRefetchPageInternal(gid: Long, page: Int, source: String): RepairResult {
+        if (page < 1) {
+            return repairFailed(gid, page, null, source, "page must be >= 1 (API page is 1-based)")
+        }
+        val row = downloadRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }
+        val token = row?.token ?: galleryLookup.findToken(gid)
+        if (token.isNullOrBlank()) {
+            return repairFailed(gid, page, null, source, "no source token: gallery unknown to this server")
+        }
+        val oldHash = pageFileHashRepository
+            ?.findByGidAndPage(gid, page - 1)?.hash?.takeIf { it.isNotBlank() }
+
+        val imageUrl = resolvePageUrl(gid, token, page) ?: run {
+            return repairFailed(gid, page, oldHash, source, "source URL unavailable (upstream error or EH blocked)")
+        }
+        val fetched = fetchImageFromSource(imageUrl)
+        val bytes = fetched.bytes ?: run {
+            return repairFailed(gid, page, oldHash, source, "source fetch failed: ${fetched.detail}")
+        }
+        // 失败消息带上 V 门拒因（writePageWithBaseline 内部的重检恒一致）。
+        val gate = VGate.check(bytes)
+        if (gate is VGateResult.Reject) {
+            return repairFailed(gid, page, oldHash, source, "V gate rejected refetched page (${gate.reason.name})")
+        }
+        if (!writePageWithBaseline(gid, page, poolFile(gid, row, page), bytes, ORIGIN_HEAL)) {
+            return repairFailed(gid, page, oldHash, source, "V gate rejected refetched page")
+        }
+
+        val newHash = PageHashWriter.sha256Hex(bytes)
+        val attribution = when {
+            oldHash == null -> null
+            oldHash == newHash -> RepairResult.ATTR_LOCAL_CORRUPT
+            else -> RepairResult.ATTR_SOURCE_CHANGED
+        }
+
+        // 清该页各层缓存（page-keyed 内存/磁盘 + enhanced 派生 + URL-keyed 旧字节），
+        // 重灌 URL 条目为新鲜字节（与下载管线 cacheImage 行为一致），索引失效强制重扫。
+        imageCacheService.evictPage(gid, page - 1, listOf(imageUrl))
+        imageCacheService.cacheImage(imageUrl, bytes)
+        downloadDirIndex.invalidate(gid)
+        repairLogService?.record(gid, page - 1, attribution, oldHash, newHash, source)
+        logger.info(
+            "Repair healed gid={} page={} attribution={} oldHash={} newHash={} source={}",
+            gid, page, attribution ?: "-", oldHash ?: "-", newHash, source
+        )
+        return RepairResult(RepairResult.STATUS_HEALED, attribution)
+    }
+
+    /** 失败路径：本地文件与基线不动，记失败日志行（attribution/new_hash 均空）。 */
+    private fun repairFailed(
+        gid: Long,
+        page: Int,
+        oldHash: String?,
+        source: String,
+        message: String,
+    ): RepairResult {
+        logger.warn("Repair failed gid={} page={} source={} oldHash={}: {}", gid, page, source, oldHash ?: "-", message)
+        repairLogService?.record(gid, page - 1, null, oldHash, null, source)
+        return RepairResult(RepairResult.STATUS_FAILED, null, message)
+    }
+
+    /**
+     * 该页的池文件：目录经 [DownloadDirIndex]（缺目录时按下载行解析并创建）；
+     * 既有文件保留真实文件名（4/8 位与扩展名都可能是 legacy 形态），缺席时按
+     * 下载器写入口径新建 `%08d.jpg`。
+     */
+    private fun poolFile(gid: Long, row: DownloadInfoEntity?, page: Int): File {
+        val dir = downloadDirIndex.dirFor(gid)
+            ?: DownloadDirs.resolve(config.download.path, gid, row?.downloadDir, row?.title).apply { mkdirs() }
+        return findPoolFile(dir, page) ?: File(dir, "%08d.jpg".format(page))
+    }
+
+    /** 目录内页号 == [page] 的既有页文件（4/8 位数字命名，扩展不限）。 */
+    private fun findPoolFile(dir: File, page: Int): File? =
+        dir.listFiles()
+            ?.firstOrNull { f ->
+                f.isFile && POOL_PAGE_NAME.matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull() == page
+            }
+
+    /**
+     * 解析修复用源页 URL（[page] 1-based）：与 [fetchImageUrl] 同款 3 次退避重试
+     * （Gallery Site 509 / 上游异常）。失败返回 null。
+     */
+    private fun resolvePageUrl(gid: Long, token: String, page: Int): String? {
+        for (attempt in 0 until 3) {
+            if (attempt > 0 && !sleepQuietly(config.download.downloadDelay.toLong())) return null
+            try {
+                return galleryLookup.fetchImageUrl(gid, token, page)
+            } catch (e: Exception) {
+                logger.warn(
+                    "Failed to resolve image URL for repair gid={} page={} (attempt {}): {}",
+                    gid, page, attempt + 1, e.message
+                )
+            }
+        }
+        return null
+    }
+
+    /**
+     * 修复拉取的字节结果：[bytes] 非 null = HTTP 成功；null 时 [detail] 说明原因
+     * （HTTP 状态码或网络错误）。**绕过 URL 缓存**——修复必须拿源的新鲜字节，
+     * 缓存里的可能正是待修复的损坏副本。
+     */
+    private class SourceFetch(val bytes: ByteArray?, val detail: String)
+
+    /** 与 [downloadImage] 同款链路（共享会话 client、Referer、per-request 超时、509 退避），仅去缓存探针。 */
+    private fun fetchImageFromSource(url: String): SourceFetch {
+        // 与 ImageProxyController.siteReferer 同形：带尾斜杠的 origin 形态被
+        // EH 图片宿主严格 Referer 校验接受，裸形态会 403。
+        val referer = SiteUrl.getReferer() + "/"
+        for (attempt in 0 until 3) {
+            if (attempt > 0 && !sleepQuietly(config.download.downloadDelay.toLong())) {
+                return SourceFetch(null, "interrupted during backoff")
+            }
+            try {
+                val request = SiteRequestBuilder(url, referer).build()
+                val call = okHttpClient.newCall(request)
+                call.timeout().timeout(config.download.downloadTimeout, TimeUnit.MILLISECONDS)
+                call.execute().use { response ->
+                    if (response.code == 509) continue
+                    if (response.isSuccessful) {
+                        return SourceFetch(response.body?.bytes(), "ok")
+                    }
+                    return SourceFetch(null, "HTTP ${response.code}")
+                }
+            } catch (e: Exception) {
+                return SourceFetch(null, e.message ?: e.javaClass.simpleName)
+            }
+        }
+        return SourceFetch(null, "rate limited (509) after retries")
     }
 
     /**
@@ -1025,6 +1235,12 @@ class DownloadService(
 
         /** 页文件基线 origin：服务端自己下载（文件完整性 Wave 2 S3）。 */
         private const val ORIGIN_DOWNLOADER = "downloader"
+
+        /** 页文件基线 origin：修复覆写（文件完整性 Wave 3 S7）。 */
+        private const val ORIGIN_HEAL = "heal"
+
+        /** 池页文件名：`{4,}位数字.{扩展}`，与 DownloadDirIndex/BackfillService 索引口径一致。 */
+        private val POOL_PAGE_NAME = Regex("^(\\d{4,})\\.(jpg|jpeg|png|gif|webp)$", RegexOption.IGNORE_CASE)
 
         /** 筛选槽位持久化键（serverConfig KV，随备份自动导出）。 */
         const val KEY_FILTER_SLOTS = "download.filterSlots"

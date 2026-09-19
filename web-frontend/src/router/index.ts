@@ -72,6 +72,9 @@ export const routes: RouteRecordRaw[] = [
         { path: 'server/processing', name: 'SettingsServerProcessing', component: () => import('@/views/admin/AdminProcessing.vue') },
         { path: 'server/advanced', name: 'SettingsServerAdvanced', component: () => import('@/views/admin/AdminAdvanced.vue') },
         { path: 'server/about', name: 'SettingsServerAbout', component: () => import('@/views/admin/AdminAbout.vue') },
+        // 文件完整性 Wave 3（F1 完整性面板 / P23 存储面板——后者文件由并行代理落地）。
+        { path: 'server/integrity', name: 'SettingsServerIntegrity', component: () => import('@/views/admin/AdminIntegrity.vue') },
+        { path: 'server/storage', name: 'SettingsServerStorage', component: () => import('@/views/admin/AdminStorage.vue') },
       ],
     },
     // A5-1: 旧 /admin 深链兜底（含 HomeView 的 /admin/eh EH 会话跳转）。
@@ -86,6 +89,9 @@ export const routes: RouteRecordRaw[] = [
     { path: '/admin/processing', redirect: '/settings/server/processing' },
     { path: '/admin/advanced', redirect: '/settings/server/advanced' },
     { path: '/admin/about', redirect: '/settings/server/about' },
+    // 文件完整性 Wave 3：/admin/integrity、/admin/storage 深链兜底。
+    { path: '/admin/integrity', redirect: '/settings/server/integrity' },
+    { path: '/admin/storage', redirect: '/settings/server/storage' },
     {
       path: '/smb-backup',
       name: 'SmbBackup',

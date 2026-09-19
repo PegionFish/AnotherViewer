@@ -23,8 +23,11 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /**
  * Data access for the {@code page_file_hash} side table (SiteDB schema v10,
@@ -58,6 +61,22 @@ public final class PageHashStore {
 
     public static final String TABLE = "page_file_hash";
 
+    /**
+     * Tiny key/value side table for the peer-evidence push ledger (Wave 3 A5):
+     * the dirty-gid set and the one-shot backfill queue, persisted so the
+     * push survives process death. Created idempotently by {@link #init} —
+     * deliberately outside greenDAO and outside the DBOpenHelper upgrade
+     * cascade, exactly like {@link #TABLE} itself.
+     */
+    public static final String LEDGER_TABLE = "integrity_ledger";
+
+    /** Ledger key: compact gid set whose baselines changed since the last accepted push. */
+    private static final String KEY_DIRTY_GIDS = "integrity.dirty.gids";
+    /** Ledger key: compact gid queue of the one-shot baseline backfill (drains ≤50/cycle). */
+    private static final String KEY_BACKFILL_QUEUE = "integrity.backfill.queue";
+    /** Ledger key: "1" once the backfill queue was built (the "全集已排队" marker). */
+    private static final String KEY_BACKFILL_STARTED = "integrity.backfill.started";
+
     /** Baseline written by the downloader (page write hook). */
     public static final String ORIGIN_DOWNLOADER = "downloader";
     /** Baseline written while streaming a page during reading (read-sync). */
@@ -88,9 +107,13 @@ public final class PageHashStore {
     /**
      * Wires the store to the database SiteDB opened. Last call wins; every
      * other method throws {@link IllegalStateException} until this is called.
+     * Also creates the {@link #LEDGER_TABLE} key/value side table if missing
+     * ({@code IF NOT EXISTS}: re-inits and re-imports are harmless).
      */
     public static void init(@NonNull SQLiteDatabase db) {
         sDb = db;
+        db.execSQL("CREATE TABLE IF NOT EXISTS \"" + LEDGER_TABLE + "\" (" +
+                "\"key\" TEXT PRIMARY KEY, \"value\" TEXT NOT NULL DEFAULT '');");
     }
 
     private static SQLiteDatabase db() {
@@ -150,6 +173,10 @@ public final class PageHashStore {
                         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)",
                 new Object[]{gid, page, ext, size, normalizeHash(hash), ALGO, origin,
                         System.currentTimeMillis()});
+        // Wave 3 A5: the gallery's peer evidence is now stale on the server —
+        // mark the gid so the next sync cycle re-pushes the whole gallery
+        // (same monitor, re-entrant).
+        markDirty(gid);
     }
 
     /** The page's baseline row, or {@code null} when never recorded. */
@@ -206,6 +233,163 @@ public final class PageHashStore {
     /** Drops every baseline of one gallery; returns the removed row count. */
     public static synchronized int deleteByGallery(long gid) {
         return db().delete(TABLE, "gid = ?", new String[]{String.valueOf(gid)});
+    }
+
+    // --- Peer-evidence push ledger (Wave 3 A5) ---
+    // The WebUI sync engine pushes per-page hashes to the server as peer
+    // evidence at the end of every successful sync cycle. Two bookkeeping
+    // structures, both persisted in LEDGER_TABLE as compact comma-separated
+    // gid sets so a push survives process death:
+    //
+    // - dirty set (integrity.dirty.gids): gids whose baselines changed since
+    //   their last accepted push (markDirty from upsert); a gid is removed
+    //   when the server accepts its evidence (or deterministically rejects it).
+    // - one-shot backfill queue (integrity.backfill.queue): on the first run
+    //   ever ("已上送全集" marker integrity.backfill.started absent) every gid
+    //   that already has baselines is enqueued, so pre-existing downloads are
+    //   backfilled in chunks; the engine drains at most 50 gids per cycle,
+    //   dropping entries only after the push settled.
+
+    /**
+     * Marks a gallery's peer evidence as stale on the server. Called by
+     * {@link #upsert}; gids ≤ 0 (corrupt rows, like everywhere else in the
+     * sync) are ignored. Adding an already-present gid is a no-op.
+     */
+    public static synchronized void markDirty(long gid) {
+        if (gid <= 0L) {
+            return;
+        }
+        Set<Long> dirty = parseGidSet(kvGet(KEY_DIRTY_GIDS));
+        if (dirty.add(gid)) {
+            kvPut(KEY_DIRTY_GIDS, joinGids(dirty));
+        }
+    }
+
+    /** Snapshot of the dirty-gid set; empty when everything was pushed. */
+    @NonNull
+    public static synchronized Set<Long> loadDirtyGids() {
+        return parseGidSet(kvGet(KEY_DIRTY_GIDS));
+    }
+
+    /**
+     * Removes gids from the dirty set — after the server accepted their
+     * evidence, or after a deterministic rejection (retrying identical
+     * payloads can never succeed). Unknown gids are ignored.
+     */
+    public static synchronized void clearDirtyGids(@NonNull Collection<Long> gids) {
+        if (gids.isEmpty()) {
+            return;
+        }
+        Set<Long> dirty = parseGidSet(kvGet(KEY_DIRTY_GIDS));
+        if (dirty.removeAll(gids)) {
+            kvPut(KEY_DIRTY_GIDS, joinGids(dirty));
+        }
+    }
+
+    /**
+     * Pops the next backfill batch of at most {@code limit} gids (ascending).
+     * On the first call ever it builds the queue from every gid that has
+     * baselines right now; later baseline writes reach the server through the
+     * dirty set instead. Queue entries stay until {@link #dropBackfill}
+     * removes them — a cycle that pushes nothing leaves the queue untouched,
+     * so a killed process never loses backfill work. An empty database simply
+     * marks the backfill started with an empty queue.
+     */
+    @NonNull
+    public static synchronized List<Long> takeBackfillBatch(int limit) {
+        if (limit <= 0) {
+            return new ArrayList<>();
+        }
+        if (!"1".equals(kvGet(KEY_BACKFILL_STARTED))) {
+            // Queue first, marker second: a crash in between re-enqueues the
+            // same gids next run (harmless — pushes are server-side upserts) —
+            // the reverse order would silently lose the whole backfill.
+            kvPut(KEY_BACKFILL_QUEUE, joinGids(queryBaselineGids()));
+            kvPut(KEY_BACKFILL_STARTED, "1");
+        }
+        List<Long> queue = new ArrayList<>(parseGidSet(kvGet(KEY_BACKFILL_QUEUE)));
+        return queue.size() <= limit ? queue : new ArrayList<>(queue.subList(0, limit));
+    }
+
+    /**
+     * Removes gids from the backfill queue — after their push settled
+     * (accepted, or deterministically rejected). Failed-but-retryable gids
+     * stay at the head and are re-taken next cycle.
+     */
+    public static synchronized void dropBackfill(@NonNull Collection<Long> gids) {
+        if (gids.isEmpty()) {
+            return;
+        }
+        Set<Long> queue = parseGidSet(kvGet(KEY_BACKFILL_QUEUE));
+        if (queue.removeAll(gids)) {
+            kvPut(KEY_BACKFILL_QUEUE, joinGids(queue));
+        }
+    }
+
+    /** Every gid that has at least one baseline row, ascending. */
+    @NonNull
+    private static List<Long> queryBaselineGids() {
+        List<Long> gids = new ArrayList<>();
+        Cursor cursor = db().rawQuery(
+                "SELECT DISTINCT gid FROM " + TABLE + " ORDER BY gid ASC", null);
+        try {
+            while (cursor.moveToNext()) {
+                long gid = cursor.getLong(0);
+                if (gid > 0L) {
+                    gids.add(gid);
+                }
+            }
+        } finally {
+            cursor.close();
+        }
+        return gids;
+    }
+
+    private static void kvPut(@NonNull String key, @NonNull String value) {
+        db().execSQL("INSERT OR REPLACE INTO \"" + LEDGER_TABLE + "\" (key, value) " +
+                "VALUES (?, ?)", new Object[]{key, value});
+    }
+
+    @Nullable
+    private static String kvGet(@NonNull String key) {
+        Cursor cursor = db().rawQuery(
+                "SELECT value FROM \"" + LEDGER_TABLE + "\" WHERE key = ?",
+                new String[]{key});
+        try {
+            return cursor.moveToFirst() ? cursor.getString(0) : null;
+        } finally {
+            cursor.close();
+        }
+    }
+
+    /** Comma-separated decimal gids → insertion-ordered set; junk tokens are skipped. */
+    private static Set<Long> parseGidSet(@Nullable String value) {
+        Set<Long> result = new LinkedHashSet<>();
+        if (value == null || value.isEmpty()) {
+            return result;
+        }
+        for (String token : value.split(",")) {
+            try {
+                long gid = Long.parseLong(token.trim());
+                if (gid > 0L) {
+                    result.add(gid);
+                }
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return result;
+    }
+
+    @NonNull
+    private static String joinGids(Collection<Long> gids) {
+        StringBuilder builder = new StringBuilder();
+        for (Long gid : gids) {
+            if (builder.length() > 0) {
+                builder.append(',');
+            }
+            builder.append(gid);
+        }
+        return builder.toString();
     }
 
     private static PageFileHash fromCursor(Cursor cursor) {

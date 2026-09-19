@@ -198,6 +198,7 @@ public class SiteApplication extends RecordingApplication {
             return policy;
         });
         new com.hippo.anotherviewer.webui.WebUiAutoSyncScheduler(this).start();
+        new com.hippo.anotherviewer.webui.IntegrityCheckScheduler(this).start();
 //        Image1.initialize(this);
         Image.initialize(this);
         if (!"robolectric".equals(Build.FINGERPRINT)) {

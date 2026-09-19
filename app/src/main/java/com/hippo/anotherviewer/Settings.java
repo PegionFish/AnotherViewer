@@ -874,6 +874,18 @@ public class Settings {
         putBoolean(KEY_SYNC_DOWNLOAD_WHILE_READING, value);
     }
 
+    // Download file-integrity background scan (plan 2026-09-19, A4): off by default.
+    public static final String KEY_INTEGRITY_CHECK_ENABLED = "integrity_check_enabled";
+    private static final boolean DEFAULT_INTEGRITY_CHECK_ENABLED = false;
+
+    public static boolean getIntegrityCheckEnabled() {
+        return getBoolean(KEY_INTEGRITY_CHECK_ENABLED, DEFAULT_INTEGRITY_CHECK_ENABLED);
+    }
+
+    public static void putIntegrityCheckEnabled(boolean value) {
+        putBoolean(KEY_INTEGRITY_CHECK_ENABLED, value);
+    }
+
     private static final String KEY_RECENT_DOWNLOAD_LABEL = "recent_download_label";
     private static final String DEFAULT_RECENT_DOWNLOAD_LABEL = null;
 

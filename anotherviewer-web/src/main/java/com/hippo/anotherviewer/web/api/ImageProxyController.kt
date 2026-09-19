@@ -19,6 +19,8 @@ import com.hippo.anotherviewer.web.service.SiteSessionManager
 import com.hippo.anotherviewer.web.service.GalleryLookupService
 import com.hippo.anotherviewer.web.service.ImageCacheService
 import com.hippo.anotherviewer.web.service.PrefetchService
+import com.hippo.anotherviewer.web.service.storage.PoolReadGate
+import com.hippo.anotherviewer.web.service.storage.StorageTuning
 import com.hippo.network.StatusCodeException
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -30,9 +32,14 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody
 import java.io.File
+import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.RejectedExecutionException
+import java.util.concurrent.RejectedExecutionHandler
 import java.util.concurrent.Semaphore
+import java.util.concurrent.ThreadPoolExecutor
+import java.util.concurrent.TimeUnit
 
 /**
  * Image delivery endpoints.
@@ -47,6 +54,12 @@ import java.util.concurrent.Semaphore
  *   a `w`-derived key and any invalid/unscaleable case falls back to the
  *   original bytes (never 4xx). See [ThumbnailScaler] for the contract.
  * - `GET /api/v1/image/cache/status`, `POST /api/v1/image/cache/clear`.
+ *
+ * W3-P 存储形态自适应（设计定稿 §二）：所有页 serve（阅读端点含上游拉取、
+ * /proxy 的 fetch-on-miss）全程持「存储池读闸门」票（[PoolReadGate]，SSD 直通、
+ * HDD 3 / ZFS 8|16 且同目录页序放行）；缓存命中 / `w=` 缩放命中 / 在途合并路径
+ * 只碰 SSD 侧缓存层，不过闸。成功 serve 池页后按 `pageTurnPrefetchEnabled`
+ * （SSD 关、HDD/ZFS 开）后台预热同画廊下一页池文件进页缓存（不递归 N+2）。
  */
 @RestController
 @RequestMapping("/api/v1/image")
@@ -62,6 +75,10 @@ class ImageProxyController(
     private val jobService: JobService,
     private val availability: EhAvailabilityService,
     private val downloadDirIndex: DownloadDirIndex,
+    // W3-P：存储形态自适应参数（翻页预读开关）与存储池读并发闸门——
+    // 上限/开关跟随 StorageTuning.current() 快照，profile 重探后由 gate 惰性重建。
+    private val storageTuning: StorageTuning,
+    private val poolReadGate: PoolReadGate,
 ) {
     private val logger = LoggerFactory.getLogger(ImageProxyController::class.java)
 
@@ -72,6 +89,10 @@ class ImageProxyController(
         private const val MAX_CONCURRENT_PROXY_FETCHES = 6
         /** P4: 缩略图 per-request curl --max-time（秒）；上游挂着时快速失败，不占满默认 60s。 */
         private const val PROXY_FETCH_TIMEOUT_SEC = 10
+        /** W3-P: /proxy 无页语义（URL 键），过池读闸门时统一按 0 号页——只借闸门的并发上限。 */
+        private const val PROXY_GATE_PAGE = 0
+        /** W3-P: 池页预读后台队列容量；满时丢弃最旧任务（预读是尽力而为的热身）。 */
+        private const val POOL_PREFETCH_QUEUE_CAPACITY = 32
         private val IMAGE_MIME_BY_EXT = mapOf(
             "jpg" to MediaType.IMAGE_JPEG_VALUE,
             "jpeg" to MediaType.IMAGE_JPEG_VALUE,
@@ -102,6 +123,22 @@ class ImageProxyController(
      */
     private val proxyFetchers = ConcurrentHashMap<String, CompletableFuture<ResponseEntity<*>>>()
     private val proxyFetchSemaphore = Semaphore(MAX_CONCURRENT_PROXY_FETCHES)
+
+    // ── W3-P: 存储池读闸门 + 池页翻页预读 ────────────────────────
+
+    /**
+     * 池页预读专用单线程池：daemon、有界队列（[POOL_PREFETCH_QUEUE_CAPACITY]），
+     * 满时丢弃最旧任务（[DiscardOldestPrefetchPolicy]）——预读永远不与用户请求
+     * 抢响应线程，也绝不无限积压。
+     */
+    private val poolPrefetchExecutor = ThreadPoolExecutor(
+        1, 1, 0L, TimeUnit.MILLISECONDS,
+        ArrayBlockingQueue(POOL_PREFETCH_QUEUE_CAPACITY),
+        { runnable -> Thread(runnable, "pool-page-prefetch").apply { isDaemon = true } },
+    ).apply { rejectedExecutionHandler = DiscardOldestPrefetchPolicy() }
+
+    /** 预读在途去重（「gid:page」键）：同页在途绝不重复提交；任务结束/被丢弃时归还键。 */
+    private val poolPrefetchInFlight: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     // ── legacy endpoints (kept intact) ───────────────────────────
 
@@ -170,7 +207,12 @@ class ImageProxyController(
         // P3: 全局并发上限——acquire 阻塞在请求线程上（排队成 6 并发批次），
         // 成功注册的 future 独占本次 fetch；竞态败者释放多占的额度改等胜者。
         proxyFetchSemaphore.acquire()
-        val future = CompletableFuture.supplyAsync { fetchProxyImage(target, url) }
+        val future = CompletableFuture.supplyAsync {
+            // W3-P: fetch-on-miss 过同一存储池读闸门（缓存命中/缩放命中/在途合并
+            // 不占票）。/proxy 只碰网络与 SSD 缓存层、不读池文件——持票是设计定稿
+            // 「页服务读闸门」的全局并发保护（SSD 配置下为零开销直通）。
+            poolReadGate.acquire(url, PROXY_GATE_PAGE).use { fetchProxyImage(target, url) }
+        }
         val raced = proxyFetchers.putIfAbsent(url, future)
         if (raced != null) {
             proxyFetchSemaphore.release()
@@ -330,7 +372,16 @@ class ImageProxyController(
             // 需求 1（2026-08-30）：阅读命中存储池文件 → 若磁盘校验通过即置
             // 「已完成」——导入时所有行视为未下载完成，阅读匹配后升级。
             downloadService.completeIfVerified(galleryId)
-            return serveFile(pushedFile, range)
+            // W3-P 存储池读闸门：池文件「读全过程」持票（HDD/ZFS 限并发 + 同目录
+            // 页序放行；gate 内 5s 排队超时强制放行，响应线程绝不无限等待）。
+            // 上面的缓存/enhanced 命中路径只碰 SSD 侧缓存层，不过闸。
+            val response = poolReadGate.acquire(poolGateDirectory(galleryId), page).use { serveFile(pushedFile, range) }
+            if (response.statusCode.is2xxSuccessful) {
+                // 翻页预读 N+1：成功 serve 池页后，后台把同画廊下一页池文件
+                // 预热进缓存（SSD 关、HDD/ZFS 开；fire-and-forget）。
+                schedulePoolPagePrefetch(galleryId, page)
+            }
+            return response
         }
 
         // EH DOWN 熔断：cache miss + pushed miss 后、进入 fetch 前秒回
@@ -364,7 +415,8 @@ class ImageProxyController(
         }
         val future = CompletableFuture.supplyAsync {
             try {
-                fetchAndServe(galleryId, page, range)
+                // W3-P: 页 serve（含上游拉取）全过程持票，过存储池读闸门。
+                poolReadGate.acquire(poolGateDirectory(galleryId), page).use { fetchAndServe(galleryId, page, range) }
             } finally {
                 fetcher.release()
             }
@@ -407,6 +459,87 @@ class ImageProxyController(
         if (dir == null) return null
         val file = File(dir, ref.fileName)
         return if (file.isFile && file.length() > 0) file else null
+    }
+
+    // ── W3-P: 池页翻页预读 N+1 ───────────────────────────────────
+
+    /** 池读闸门的目录键：同一画廊恒同键（磁盘目录名为 {gid} 或 {gid}-{title}）。 */
+    private fun poolGateDirectory(galleryId: Long): String = galleryId.toString()
+
+    /**
+     * 翻页预读 N+1（设计定稿 §二）：成功 serve 池页后，若 pageTurnPrefetchEnabled
+     * （SSD 关、HDD/ZFS 开）且下一页池文件已存在，提交后台任务把该页读出并走与
+     * serve 相同的缓存填充路径（[ImageCacheService.cacheImageByKey]）预热进缓存。
+     *
+     * 约束：只预热本地池文件（绝不发起上游请求）；绝不递归预读 N+2（预读体不回
+     * 调本方法）；同页在途去重（[poolPrefetchInFlight]）；已入页缓存则跳过（幂等）；
+     * 任何失败静默（debug 日志），绝不影响响应线程。预读本身也是池读，同样过
+     * 池读闸门（受 HDD/ZFS 并发上限与页序约束）。
+     */
+    private fun schedulePoolPagePrefetch(galleryId: Long, servedPage: Int) {
+        if (!storageTuning.pageTurnPrefetchEnabled) return
+        val next = servedPage + 1
+        if (imageCacheService.findCachedPageFile(galleryId, next) != null) return
+        val ref = downloadDirIndex.findPage(galleryId, next) ?: return
+        val dir = downloadDirIndex.dirFor(galleryId) ?: return
+        val file = File(dir, ref.fileName)
+        if (!file.isFile || file.length() <= 0) return
+
+        val key = "$galleryId:$next"
+        if (!poolPrefetchInFlight.add(key)) return
+        try {
+            poolPrefetchExecutor.execute(
+                KeyedPrefetchTask(key, poolPrefetchInFlight) {
+                    runPoolPagePrefetch(galleryId, next, file, ref.ext)
+                }
+            )
+        } catch (e: RejectedExecutionException) {
+            poolPrefetchInFlight.remove(key)
+        }
+    }
+
+    /** 预读任务体：双检缓存 → 过池读闸门读池文件 → 走 serve 同款缓存填充路径。失败静默。 */
+    private fun runPoolPagePrefetch(galleryId: Long, next: Int, file: File, ext: String) {
+        try {
+            // 提交→执行之间可能已被其它请求/预读填充：双检后再读。
+            if (imageCacheService.findCachedPageFile(galleryId, next) != null) return
+            val bytes = poolReadGate.acquire(poolGateDirectory(galleryId), next).use { file.readBytes() }
+            imageCacheService.cacheImageByKey(galleryId, next, bytes, ext)
+        } catch (e: Exception) {
+            logger.debug("Pool page prefetch failed for gid={} page={}", galleryId, next, e)
+        }
+    }
+
+    /** 带「gid:page」去重键的预读任务：结束（含异常）时归还键，供后续翻页重试。 */
+    private class KeyedPrefetchTask(
+        val key: String,
+        internal val inFlight: MutableSet<String>,
+        private val body: () -> Unit,
+    ) : Runnable {
+        override fun run() {
+            try {
+                body()
+            } finally {
+                inFlight.remove(key)
+            }
+        }
+    }
+
+    /**
+     * 队列满时丢弃最旧的在途预读任务（「有界队列丢弃旧任务」），并归还被丢弃
+     * 任务的去重键——否则该页会被永久视为在途而无法再次预热。极小概率的二次
+     * 拒绝（并发生产者抢位）直接放弃新任务并归还其键，与 Discard 同语义。
+     */
+    private class DiscardOldestPrefetchPolicy : RejectedExecutionHandler {
+        override fun rejectedExecution(r: Runnable, executor: ThreadPoolExecutor) {
+            if (executor.isShutdown) return
+            (executor.queue.poll() as? KeyedPrefetchTask)?.let { dropped -> dropped.inFlight.remove(dropped.key) }
+            try {
+                executor.execute(r)
+            } catch (e: RejectedExecutionException) {
+                (r as? KeyedPrefetchTask)?.let { dropped -> dropped.inFlight.remove(dropped.key) }
+            }
+        }
     }
 
     private fun fetchAndServe(galleryId: Long, page: Int, range: String?): ResponseEntity<*> {

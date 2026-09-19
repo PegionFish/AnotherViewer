@@ -197,6 +197,16 @@
                 <AppIcon name="go-to-dark" size="20px" />
               </button>
             </PrefRow>
+            <!-- U1（文件完整性 Wave 3）：单画廊页数回填在完整性面板（两步 dry-run → 应用）。 -->
+            <PrefRow
+              icon="check-all-dark"
+              title="回填下载页数"
+              summary="按磁盘页数校正下载记录并完成化遗留行 · 完整性面板"
+            >
+              <button type="button" class="pref-action-btn" aria-label="前往页数回填" @click="goIntegrityBackfill">
+                <AppIcon name="go-to-dark" size="20px" />
+              </button>
+            </PrefRow>
           </PrefCard>
         </section>
       </div>
@@ -280,6 +290,7 @@
 
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch, type Ref } from 'vue'
+import { useRouter } from 'vue-router'
 import type { Settings } from '@/api/settings'
 import { settingsApi } from '@/api/settings'
 import {
@@ -482,6 +493,15 @@ function savePath(): void {
   server.value.download.path = pathDraft.value.trim()
   pathDialogOpen.value = false
   scheduleServerSave()
+}
+
+/* ---------------------- 完整性面板入口（U1, Wave 3） ----------------------- */
+
+const router = useRouter()
+
+/** 单画廊页数回填的完整两步流程（dry-run → 确认应用）在完整性面板。 */
+function goIntegrityBackfill(): void {
+  void router.push('/settings/server/integrity')
 }
 
 /* -------------------------------- actions --------------------------------- */
