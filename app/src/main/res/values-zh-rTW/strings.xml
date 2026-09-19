@@ -808,6 +808,9 @@
     <string name="settings_privacy">隱私</string>
     <string name="settings_privacy_secure">不允許螢幕擷取</string>
     <string name="settings_privacy_secure_summary">啟用後，將無法對本程式進行螢幕擷取，同時，將不會在系統任務切換器中顯示該程式的預覽內容\n\n重新啟動本程式以套用此變更</string>
+    <string name="settings_privacy_mask">內容打碼模式</string>
+    <string name="settings_privacy_mask_summary">標題以內容序號 #gid 顯示，圖片以佔位符取代——便於截圖協作</string>
+    <string name="privacy_mask_reader_placeholder">內容已打碼</string>
     <string name="download_service">下載服務</string>
     <string name="favorite_name">收藏圖庫</string>
     <string name="no_blicklist">這裡是黑名單</string>

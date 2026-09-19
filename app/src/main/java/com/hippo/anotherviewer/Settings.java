@@ -796,7 +796,16 @@ public class Settings {
         return getBoolean(KEY_SEC_SECURITY, VALUE_SEC_SECURITY);
     }
     public static void putEnabledSecurity(boolean value) {
-        putBoolean(KEY_READING_FULLSCREEN, value);
+        putBoolean(KEY_SEC_SECURITY, value);
+    }
+
+    public static final String KEY_PRIVACY_MASK = "privacy_mask";
+
+    public static boolean getPrivacyMaskEnabled() {
+        return getBoolean(KEY_PRIVACY_MASK, false);
+    }
+    public static void putPrivacyMaskEnabled(boolean value) {
+        putBoolean(KEY_PRIVACY_MASK, value);
     }
 
     /********************

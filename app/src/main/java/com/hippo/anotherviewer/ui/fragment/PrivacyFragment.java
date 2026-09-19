@@ -9,6 +9,9 @@ import androidx.preference.Preference;
 import com.hippo.anotherviewer.Analytics;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.Settings;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
+
+import org.greenrobot.eventbus.EventBus;
 
 /**
  * Created by Mo10 on 2018/2/10.
@@ -24,6 +27,9 @@ public class PrivacyFragment extends BasePreferenceFragmentCompat
         Preference enableAnalytics = findPreference(Settings.KEY_ENABLE_ANALYTICS);
 
         enableAnalytics.setOnPreferenceChangeListener(this);
+
+        Preference privacyMask = findPreference(Settings.KEY_PRIVACY_MASK);
+        privacyMask.setOnPreferenceChangeListener(this);
     }
 
     @Override
@@ -42,6 +48,10 @@ public class PrivacyFragment extends BasePreferenceFragmentCompat
             if (newValue instanceof Boolean && (Boolean) newValue) {
                 Analytics.start(getActivity());
             }
+            return true;
+        }
+        if (Settings.KEY_PRIVACY_MASK.equals(key)) {
+            EventBus.getDefault().post(new PrivacyMaskChanged());
             return true;
         }
         return true;

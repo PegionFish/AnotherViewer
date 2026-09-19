@@ -838,6 +838,9 @@
     <string name="settings_privacy">隐私</string>
     <string name="settings_privacy_secure">不允许屏幕抓取</string>
     <string name="settings_privacy_secure_summary">启用后，将不能截取该应用的屏幕截图，同时，将不会在系统任务切换器中显示该应用的内容预览\n\n重新启动应用以生效此更改</string>
+    <string name="settings_privacy_mask">内容打码模式</string>
+    <string name="settings_privacy_mask_summary">标题以内容序列号 #gid 显示，图片替换为占位符——便于截图协作</string>
+    <string name="privacy_mask_reader_placeholder">内容已打码</string>
     <!-- Preference framework strings. -->
     <string name="download_service">下载服务</string>
     <string name="favorite_name">收藏画廊</string>
