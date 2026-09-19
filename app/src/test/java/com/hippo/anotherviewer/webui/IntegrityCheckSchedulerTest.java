@@ -111,6 +111,26 @@ public class IntegrityCheckSchedulerTest {
         }
     }
 
+    /**
+     * Plays a queued {@code byte[]} per {@code open()} call ({@code null}
+     * entry = throw IOException) — injects the hash-input sequence behind the
+     * re-read confirmation: first read sees a torn mid-download snapshot, the
+     * confirmation re-read sees whatever the download left on disk.
+     */
+    private static final class SequencedOpener implements IntegrityCheckScheduler.PageOpener {
+        final List<byte[]> script = new ArrayList<>();
+        int calls = 0;
+
+        @Nullable
+        @Override
+        public InputStream open(int page) throws IOException {
+            if (script.isEmpty()) return null;
+            byte[] bytes = script.get(Math.min(calls++, script.size() - 1));
+            if (bytes == null) throw new IOException("storage stalled");
+            return new ByteArrayInputStream(bytes);
+        }
+    }
+
     private static final IntegrityCheckScheduler.KeepGoing GO =
             () -> true;
 
@@ -249,6 +269,64 @@ public class IntegrityCheckSchedulerTest {
         assertEquals(0, report.checked);
         assertEquals(0, report.bad);
         assertTrue("no verdict write for unreadable pages", store.ops.isEmpty());
+    }
+
+    // ==================== scanGallery: re-read before condemning ====================
+
+    @Test
+    public void scan_firstMismatchThenMatchingRereadIsVerifiedNotBad() {
+        SequencedOpener opener = new SequencedOpener();
+        byte[] torn = bytes("half-written-snap");   // torn read mid-download
+        byte[] intact = bytes("fully-written-page"); // the finished file on disk
+        opener.script.add(torn);   // first hash: diverges from the baseline
+        opener.script.add(intact); // confirmation re-read: download completed
+        FakeStore store = new FakeStore();
+
+        IntegrityCheckScheduler.GalleryReport report = IntegrityCheckScheduler.scanGallery(
+                21L, Arrays.asList(baseline(0, sha256Hex(intact))),
+                opener, store, 0, NOW, GO);
+
+        assertEquals(1, report.checked);
+        assertEquals("a confirming re-read must not strand a false bad", 0, report.bad);
+        assertEquals("the re-read passed, so the page is stamped ok",
+                "ok:21:0@" + NOW, store.ops.get(0));
+    }
+
+    @Test
+    public void scan_secondConsecutiveMismatchStillMarksBad() {
+        SequencedOpener opener = new SequencedOpener();
+        byte[] good = bytes("genuine-page");
+        opener.script.add(bytes("corrupted-once"));
+        opener.script.add(bytes("corrupted-twice")); // re-read still diverges
+        FakeStore store = new FakeStore();
+
+        IntegrityCheckScheduler.GalleryReport report = IntegrityCheckScheduler.scanGallery(
+                22L, Arrays.asList(baseline(0, sha256Hex(good))),
+                opener, store, 0, NOW, GO);
+
+        assertEquals(1, report.checked);
+        assertEquals("genuine corruption is still condemned on the re-read",
+                1, report.bad);
+        assertEquals(PageHashStore.VERDICT_STRUCT_BAD + ":22:0", store.ops.get(0));
+    }
+
+    @Test
+    public void scan_failedRereadLeavesBaselineUntouchedNotBad() {
+        SequencedOpener opener = new SequencedOpener();
+        opener.script.add(bytes("torn-mid-download"));
+        opener.script.add(null); // re-read hits a transient storage failure
+        FakeStore store = new FakeStore();
+
+        IntegrityCheckScheduler.GalleryReport report = IntegrityCheckScheduler.scanGallery(
+                23L, Arrays.asList(baseline(0, sha256Hex(bytes("intact")))),
+                opener, store, 0, NOW, GO);
+
+        assertEquals(1, report.checked);
+        assertEquals("an unconfirmable re-read must not be recorded as bit rot",
+                0, report.bad);
+        assertEquals(1, report.errors);
+        assertTrue("no verdict write when the re-read cannot be hashed",
+                store.ops.isEmpty());
     }
 
     @Test

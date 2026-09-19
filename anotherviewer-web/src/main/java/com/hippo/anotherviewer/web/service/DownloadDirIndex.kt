@@ -60,15 +60,17 @@ class DownloadDirIndex(
 ) {
     private val logger = LoggerFactory.getLogger(DownloadDirIndex::class.java)
 
-    /** Extension priority; must mirror ImageProxyController.PUSHED_EXTENSIONS. */
-    internal val extOrder = listOf("jpg", "jpeg", "png", "gif", "webp")
+    /**
+     * Extension priority; must mirror ImageProxyController.PUSHED_EXTENSIONS.
+     */
+    internal val extOrder: List<String> get() = EXT_ORDER
 
     private class DirEntry(
         val gid: Long,
         /** Cached directory handle: hit-path self-validation avoids findDir (a root listFiles). */
         val dir: File,
         val dirMtime: Long,
-        /** 1-based page → located page ref (best extension priority wins). */
+        /** 1-based page → located page ref (selection via [selectPageFile]). */
         val pageFiles: Map<Int, PageRef>,
     ) {
         val pageCount: Int get() = pageFiles.size
@@ -195,25 +197,38 @@ class DownloadDirIndex(
         index.remove(gid)
     }
 
-    /** Index snapshot of one gid directory; null when the dir is absent. */
     private fun scanDir(gid: Long, dir: File): DirEntry? {
         if (!dir.isDirectory) {
             index.remove(gid)
             return null
         }
         val mtime = dir.lastModified()
-        // Keep the highest-priority extension per page number (first found wins).
-        val pages = HashMap<Int, MutablePage>()
+        // Group same-page candidates first, then pick the deterministic winner
+        // (P2-5): duplicates (4- and 8-digit twins of one page) are warned and
+        // resolved by selectPageFile instead of "first found wins".
+        val candidates = HashMap<Int, MutableList<File>>()
         dir.listFiles()?.forEach { file ->
+            if (!file.isFile) return@forEach
             val match = FILE_NAME_PATTERN.matchEntire(file.name) ?: return@forEach
             val pageNo = match.groupValues[1].toIntOrNull() ?: return@forEach
             val ext = match.groupValues[2].lowercase()
-            val priority = extOrder.indexOf(ext)
-            if (priority < 0) return@forEach
-            val existing = pages[pageNo]
-            if (existing == null || priority < existing.priority) {
-                pages[pageNo] = MutablePage(ext, file.length(), priority, file.name)
+            if (extOrder.indexOf(ext) < 0) return@forEach
+            candidates.getOrPut(pageNo) { mutableListOf() }.add(file)
+        }
+        val pages = HashMap<Int, MutablePage>()
+        for ((pageNo, files) in candidates) {
+            if (files.size > 1) {
+                logger.warn(
+                    "DownloadDirIndex: duplicate page files for gid={} page={}: {} (using {})",
+                    gid, pageNo, files.map { it.name }, selectPageFile(files)?.name,                )
             }
+            val chosen = selectPageFile(files) ?: continue
+            pages[pageNo] = MutablePage(
+                chosen.extension.lowercase(),
+                chosen.length(),
+                extOrder.indexOf(chosen.extension.lowercase()),
+                chosen.name,
+            )
         }
         val entry = DirEntry(
             gid = gid,
@@ -269,8 +284,33 @@ class DownloadDirIndex(
 
     private data class MutablePage(val ext: String, val size: Long, val priority: Int, val fileName: String)
 
-    private companion object {
-        val FILE_NAME_PATTERN = Regex("^(\\d{4,})\\.(.+)$")
+    companion object {
+        /** Extension priority; must mirror ImageProxyController.PUSHED_EXTENSIONS. */
+        internal val EXT_ORDER = listOf("jpg", "jpeg", "png", "gif", "webp")
+
+        /**
+         * Shared deterministic selection among same-(gid,page) candidate files
+         * (P2-5, 4/8-digit duplicate page ambiguity): highest extension
+         * priority (EXT_ORDER, lower index wins — jpg over webp), then the
+         * LONGER digit prefix (downloader `%08d` naming wins over the legacy
+         * `%04d` twin), then plain file name for a total order. Backfill
+         * baselines, reverify comparison and repair overwrite all go through
+         * this rule — directly, or via [findPage] (whose index wins come from
+         * [scanDir] using the same rule) — so the three paths always pick the
+         * SAME physical file. Deliberately companion-level (pure rule, no
+         * instance state): the fallback paths call it even when the index
+         * itself is a test mock.
+         */
+        internal fun selectPageFile(candidates: List<File>): File? =
+            candidates.maxWithOrNull(
+                compareBy(
+                    { f: File -> -EXT_ORDER.indexOf(f.extension.lowercase()) },
+                    { f: File -> f.nameWithoutExtension.length },
+                    { f: File -> f.name },
+                )
+            )
+
+        private val FILE_NAME_PATTERN = Regex("^(\\d{4,})\\.(.+)$")
 
         /** Only above this tree size does the startup scan log a hint. */
         const val LARGE_TREE_THRESHOLD = 5000

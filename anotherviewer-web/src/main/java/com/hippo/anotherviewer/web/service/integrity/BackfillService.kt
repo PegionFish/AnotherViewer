@@ -13,6 +13,7 @@ import java.io.File
 import java.io.FileInputStream
 import java.security.DigestInputStream
 import java.security.MessageDigest
+import java.util.TreeMap
 
 /**
  * TOFU 回填（文件完整性 Wave 2 / S4）：对**既有**下载目录补建 SHA-256 基线。
@@ -343,17 +344,34 @@ class BackfillService(
             .orEmpty()
     }
 
-    /** 目录内页文件清单（页号升序、同页按文件名稳定排序）。 */
-    private fun listPageFiles(dir: File): List<DiskPage> =
-        dir.listFiles()
-            ?.mapNotNull { file ->
-                if (!file.isFile) return@mapNotNull null
-                val match = PAGE_FILE_PATTERN.matchEntire(file.name) ?: return@mapNotNull null
-                val pageNo = match.groupValues[1].toIntOrNull() ?: return@mapNotNull null
-                DiskPage(pageNo, file.name, match.groupValues[2].lowercase())
+    /**
+     * 目录内页文件清单（每页唯一、页号升序）。P2-5：同 (gid,page) 存在 4 位与
+     * 8 位两个文件时，只处理 [DownloadDirIndex.selectPageFile] 选中的那个——
+     * 与下载目录索引读取、复验比对、修复覆写三处恒一致，绝不给未选中的副本
+     * 建/跳过基线（否则基线可能描述的是修复管线不会覆写的那个文件）；同页多
+     * 文件一律日志告警。
+     */
+    private fun listPageFiles(dir: File): List<DiskPage> {
+        val listing = dir.listFiles()?.filter { it.isFile } ?: return emptyList()
+        val byPage = TreeMap<Int, MutableList<File>>()
+        for (file in listing) {
+            val match = PAGE_FILE_PATTERN.matchEntire(file.name) ?: continue
+            val pageNo = match.groupValues[1].toIntOrNull() ?: continue
+            byPage.getOrPut(pageNo) { mutableListOf() }.add(file)
+        }
+        val pages = mutableListOf<DiskPage>()
+        for ((pageNo, candidates) in byPage) {
+            val chosen = DownloadDirIndex.selectPageFile(candidates)
+            if (candidates.size > 1) {
+                logger.warn(
+                    "Backfill: duplicate page files for page {} in {}: {} (using {})",
+                    pageNo, dir.absolutePath, candidates.map { it.name }, chosen?.name,
+                )
             }
-            ?.sortedWith(compareBy({ it.page }, { it.fileName }))
-            .orEmpty()
+            if (chosen != null) pages.add(DiskPage(pageNo, chosen.name, chosen.extension.lowercase()))
+        }
+        return pages
+    }
 
     // ── 断点 KV（紧凑管道格式：v1|gid|page|fileName）─────────────────────────
 

@@ -69,7 +69,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * and per gallery reads the page files out of the existing SpiderDen download
  * directory (read-only, 8-digit and legacy 4-digit page names), hashes them
  * with SHA-256 and compares against the {@link PageHashStore} baseline:
- * equal marks {@code verdict=ok}, different marks {@code verdict=struct_bad}.
+ * equal marks {@code verdict=ok}; a mismatch is re-read and re-hashed once
+ * (the server's re-read confirmation) before {@code verdict=struct_bad} is
+ * stamped, so a concurrent download write cannot strand a false bad for the
+ * 6 h cooldown.
  * Nothing is ever repaired here — fixing a bad page is the user-driven
  * long-press refresh in the reader. The scan is deliberately slow-friendly:
  * one page file at a time with a small sleep between files, on a
@@ -244,7 +247,14 @@ public final class IntegrityCheckScheduler {
     /**
      * The pure compare loop for one gallery: for every baseline (page
      * ascending) read the page file through {@code opener}, hash it with
-     * SHA-256, and stamp the verdict into {@code store}. A page with no file
+     * SHA-256, and stamp the verdict into {@code store}. A first-hash mismatch
+     * is never condemned on its own — the page file is re-read once and
+     * re-hashed (the server side's "复读一次确认" semantics): still different
+     * marks {@code verdict=struct_bad}, a confirming re-read marks {@code ok},
+     * so a download writing the file mid-scan cannot leave a false bad stuck
+     * for the whole cooldown. A re-read that cannot be read (IOException /
+     * file vanished) leaves the baseline untouched and counts as
+     * {@code error}. A page with no file
      * on disk counts as {@code missing} and leaves the baseline untouched (a
      * sparse download is not corruption). A page whose bytes cannot be read
      * counts as {@code error} and also leaves the baseline untouched (a
@@ -298,6 +308,29 @@ public final class IntegrityCheckScheduler {
 
             checked++;
             if (actual.equalsIgnoreCase(baseline.hash())) {
+                store.markVerified(gid, baseline.page(), now);
+                continue;
+            }
+
+            // First read diverged. A download writing the page file while the
+            // scan reads it yields a torn snapshot — the server side re-reads
+            // once before condemning, and so does this loop: only a second
+            // consecutive mismatch stamps struct_bad, a confirming re-read
+            // stamps ok, and an unreadable re-read leaves the baseline
+            // untouched (a transient failure is not bit rot).
+            String reread;
+            try {
+                InputStream again = opener.open(baseline.page());
+                if (again == null) {
+                    errors++; // File vanished mid-scan: nothing to condemn.
+                    continue;
+                }
+                reread = sha256Hex(again);
+            } catch (IOException e) {
+                errors++;
+                continue;
+            }
+            if (reread.equalsIgnoreCase(baseline.hash())) {
                 store.markVerified(gid, baseline.page(), now);
             } else {
                 store.markBad(gid, baseline.page(), PageHashStore.VERDICT_STRUCT_BAD);

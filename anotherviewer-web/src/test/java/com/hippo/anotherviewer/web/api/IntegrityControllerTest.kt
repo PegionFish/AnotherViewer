@@ -621,6 +621,54 @@ class IntegrityControllerTest {
         awaitJobCompleted(jobId)
     }
 
+    /**
+     * P2-1 回归（并发压力钉）：活跃任务运行期间的每一轮并发 409 冲突提交，
+     * 都不得让随后（及同时）打向活跃任务的中断旗标丢失——修复后的提交路径
+     * 完全不触碰旗标槽（槽由 submit 的同步 prep 在护栏确认活跃之后占据）。
+     * 断言：无论冲突提交与中断如何交错，任务必须以 interrupted=true 收场
+     * （若旗标被孤儿化，任务会跑满 10s 兜底并返回 interrupted=false）。
+     */
+    @Test
+    fun `concurrent conflicting submits never orphan the active task interrupt flag`() {
+        repeat(20) { round ->
+            val gid = 6600L + round
+            seedDownload(gid)
+            stub.verifyBehavior = { _, cancel ->
+                val deadline = System.currentTimeMillis() + 10_000
+                while (!cancel() && System.currentTimeMillis() < deadline) Thread.sleep(5)
+                ReverifyStats(1, 0, 1, 0, interrupted = cancel())
+            }
+
+            val submit = postJson("/api/v1/integrity/reverify/$gid", null)
+                .andExpect(status().isAccepted)
+                .andReturn()
+            val jobId = ObjectMapper().readTree(submit.response.contentAsString).get("jobId").asText()
+
+            // 冲突提交（409）与中断同时开火。
+            val conflicts = (1..6).map {
+                Thread {
+                    runCatching {
+                        postJson("/api/v1/integrity/reverify/$gid", null)
+                            .andExpect(status().isConflict)
+                            .andExpect(jsonPath("$.error.code").value("CONFLICT"))
+                    }
+                }
+            }
+            conflicts.forEach { it.start() }
+            postJson("/api/v1/integrity/reverify/9999", """{"interrupt":true}""")
+                .andExpect(status().isAccepted)
+                .andExpect(jsonPath("$.jobId").value(jobId))
+            conflicts.forEach { it.join() }
+
+            val job = awaitJobCompleted(jobId)
+            assertEquals(
+                ReverifyStats(1, 0, 1, 0, interrupted = true),
+                job.result,
+                "round $round: 中断必须送达活跃任务（冲突提交不得孤儿化旗标）",
+            )
+        }
+    }
+
     @Test
     fun `reverify unknown gid returns 404 INTEGRITY_NOT_FOUND`() {
         seedDownload(gid = 6204)

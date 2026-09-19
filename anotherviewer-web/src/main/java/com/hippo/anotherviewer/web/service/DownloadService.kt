@@ -25,6 +25,11 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Service
 import java.io.File
+import java.io.OutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.util.UUID
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -800,13 +805,17 @@ class DownloadService(
     }
 
     /**
-     * S3 写入钩子：V 门校验 → 落盘（覆盖写）→ SHA-256 基线 upsert。
+     * S3 写入钩子：V 门校验 → 原子落盘（P1-1：temp + rename，见 [atomicWrite]）→
+     * SHA-256 基线 upsert。
      *
      * - V 门拒收（contracts/integrity-vgate.md §2/§3）：不落盘、不建/不刷基线，
      *   返回 false——调用方按该页下载失败处理（不计 done，终态走既有 FAILED
      *   语义，下次运行按断点续传重试该页）。
-     * - 通过：写文件后对落盘字节计算 SHA-256 → [PageFileHashRepository] upsert
-     *   （origin=[writeOrigin]，下载钩子恒为 downloader、修复覆写传 heal）。
+     * - 落盘：原子写保证目标文件要么是旧完整内容、要么是新完整内容——写中途
+     *   失败不留半截文件冒充已完成页（断点续传快路径 `file.exists() &&
+     *   length() > 0` 因此不会被残渣误判）。写失败返回 false，调用方按该页
+     *   失败处理。通过后对落盘字节计算 SHA-256 → [PageFileHashRepository]
+     *   upsert（origin=[writeOrigin]，下载钩子恒为 downloader、修复覆写传 heal）。
      *   下载字节本已全量驻内存（[downloadImage] 返回 ByteArray），单遍
      *   `MessageDigest.digest(bytes)` 与流式聚合等价，无额外常驻。覆盖已有基线
      *   （重下/重传/修复同一页）= 刷新 hash/size/ext，并把 verdict/last_verified_at
@@ -814,7 +823,7 @@ class DownloadService(
      *   （基线 best-effort，可由巡检/TOFU 回填）。
      *
      * @param page 1-based（下载循环/文件名口径）；基线行按 0-based 口径落库（page-1）。
-     * @return true = 已落盘并建基线；false = V 门拒收（未落盘）。
+     * @return true = 已落盘并建基线；false = V 门拒收或写失败（未落盘/目标未动）。
      */
     internal fun writePageWithBaseline(
         gid: Long,
@@ -831,9 +840,59 @@ class DownloadService(
             )
             return false
         }
-        file.writeBytes(bytes)
+        if (!atomicWrite(file, bytes)) {
+            logger.warn("Atomic page write failed for gid={} page={}: target={}", gid, page, file.absolutePath)
+            return false
+        }
         upsertPageHash(gid, page - 1, file, bytes, writeOrigin)
         return true
+    }
+
+    /**
+     * P1-1 原子写：先写同目录 temp 文件（隐藏前缀 + 随机后缀，绝不命中任何
+     * 页文件名模式 `^\d{4,}\..*`），成功后 `Files.move(ATOMIC_MOVE)` 原子换名——
+     * 半截内容只会出现在 temp 里，目标文件要么是旧完整内容、要么是新完整内容，
+     * 绝不出现半截文件冒充已完成页。
+     *
+     * 失败路径（写入异常 / 换名异常）一律删除 temp，目标文件保持原样：本路径
+     * 触碰目标的唯一方式是换名成功，因此修复覆写场景下旧的完整文件不受影响。
+     * ATOMIC_MOVE 不被文件系统支持时回退同目录普通 move（同目录 move 即
+     * rename，语义仍等价原子）。
+     *
+     * @return true = 目标已替换为本次内容；false = 失败（无 temp 残留、目标未动）。
+     */
+    internal fun atomicWrite(target: File, bytes: ByteArray): Boolean =
+        atomicWrite(target) { out -> out.write(bytes) }
+
+    /** [atomicWrite] 的注入缝：[writer] 负责把内容写进 temp 输出流（测试注入中途失败）。 */
+    internal fun atomicWrite(target: File, writer: (OutputStream) -> Unit): Boolean {
+        val dir = target.parentFile ?: return false
+        val temp = File(dir, ".${target.name}.${UUID.randomUUID()}.tmp")
+        try {
+            try {
+                temp.outputStream().use(writer)
+            } catch (e: Exception) {
+                logger.warn("Atomic write failed while writing {}: {}", temp.absolutePath, e.toString())
+                temp.delete()
+                return false
+            }
+            try {
+                Files.move(
+                    temp.toPath(), target.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE,
+                )
+            } catch (e: AtomicMoveNotSupportedException) {
+                Files.move(temp.toPath(), target.toPath(), StandardCopyOption.REPLACE_EXISTING)
+            }
+            return true
+        } catch (e: Exception) {
+            logger.warn(
+                "Atomic write failed while moving {} -> {}: {}",
+                temp.absolutePath, target.absolutePath, e.toString()
+            )
+            temp.delete()
+            return false
+        }
     }
 
     /**
@@ -867,6 +926,8 @@ class DownloadService(
      * 归因（仅 healed）：覆写字节哈希 == 旧基线 → local_corrupt（本地劣化）；
      * 不同 → source_changed（源已变）；无旧基线 → null（无法归因，处置相同）。
      * 失败（源不可得 / V 门拒收）→ status=failed，本地文件与基线不动。
+     * 并发护栏（P2-2）：该 gid 有活跃下载任务时直接 failed（提示画廊下载中），
+     * 绝不与下载管线并发覆写同一池文件。
      *
      * @param page API 口径 1-based 页号。
      */
@@ -877,21 +938,33 @@ class DownloadService(
      * 整本复验：逐页「读盘哈希 vs 基线」，只修坏页（按需深度校验，不拉源验证
      * 好页——「源变更」探测是 forceRefetchPage 归因的副产品）。
      *
-     * 逐页范围 = 磁盘页文件 ∪ 基线行 ∪（行 total 已知时）1..total。判定：
+     * 逐页范围 = **磁盘页文件 ∪ 基线行**（契约原义 "re-reads every page file on
+     * disk"；P1-2：不再把行 total 的 1..total 并进来——部分下载的画廊只检查
+     * 磁盘上实际存在的页，缺失的未下载页零拉源，不误报为坏页）。判定：
      * - 文件缺失 / 读不出 → 坏 → 修复；
      * - 基线非空且读盘哈希 == 基线 → 好（跳过，零网络）；
      * - 基线非空且哈希不符 → 坏 → 修复；
      * - 无基线（含 BackfillService 落的 struct_bad 空哈希行）→ 只做 V 门结构
      *   判定（零网络）：过 → 好跳过（基线补建归 BackfillService）；拒 → 坏 → 修复。
      *
+     * 并发护栏（P2-2）：开始时检查一次该 gid 是否有活跃下载任务，有则整本拒绝
+     * （零页检查，零网络）——修复覆写不得与下载管线并发写同一池文件。
+     *
      * 每页修复走 [forceRefetchPage] 同款管线，日志 source=reverify。
      * [isCancelled] 每页检查；中断时返回已检查页的部分统计（interrupted=true）。
-     * 建议画廊空闲时调用（进行中的下载任务会与本修复争抢源请求）。
+     * 建议画廊空闲时调用。
      */
     fun reverifyGallery(gid: Long, isCancelled: () -> Boolean = { false }): ReverifyStats {
+        // P2-2：整本开始时检查一次（逐页修复在 forceRefetchPageInternal 里还有
+        // 兜底拒绝，覆盖复验进行中才开始的下载任务）。
+        if (hasActiveDownloadTask(gid)) {
+            logger.warn(
+                "Reverify refused for gid={}: a download task is active for this gallery", gid
+            )
+            return ReverifyStats(0, 0, 0, 0, interrupted = false)
+        }
         val dir = downloadDirIndex.dirFor(gid)
         val baselines = pageFileHashRepository?.findByGid(gid).orEmpty().associateBy { it.page }
-        val row = downloadRepository.findAllByGid(gid).firstOrNull()?.takeUnless { it.deleted }
 
         val pages = sortedSetOf<Int>()
         dir?.listFiles()?.forEach { f ->
@@ -899,7 +972,6 @@ class DownloadService(
             if (pageNo != null && pageNo >= 1) pages += pageNo
         }
         pages += baselines.keys.map { it + 1 }.filter { it >= 1 }
-        row?.total?.takeIf { it > 0 }?.let { pages += 1..it }
 
         var ok = 0
         var bad = 0
@@ -911,7 +983,7 @@ class DownloadService(
                 )
                 return ReverifyStats(ok + bad, ok, bad, refreshed, interrupted = true)
             }
-            val bytes = dir?.let { findPoolFile(it, page) }
+            val bytes = dir?.let { findPoolFile(gid, it, page) }
                 ?.takeIf { it.isFile }
                 ?.let { f -> runCatching { f.readBytes() }.getOrNull() }
             val oldHash = baselines[page - 1]?.hash?.takeIf { it.isNotBlank() }
@@ -938,8 +1010,24 @@ class DownloadService(
         return ReverifyStats(ok + bad, ok, bad, refreshed, interrupted = false)
     }
 
+    /**
+     * P2-2 并发护栏：该 gid 是否存在活跃（运行中/排队中）下载任务。修复覆写
+     * （forceRefetchPage / reverifyGallery 的逐页 heal）会与下载管线对同一池
+     * 文件并发写——有活跃任务时拒绝修复动作（调用方拿到 failed，message 提示
+     * 画廊下载中，稍后重试），比等待/加锁简单且安全。
+     */
+    internal fun hasActiveDownloadTask(gid: Long): Boolean = tasks.values.any { it.gid == gid }
+
     /** [forceRefetchPage] 的实现体；[source] 区分修复日志的来源（refresh|reverify）。 */
     private fun forceRefetchPageInternal(gid: Long, page: Int, source: String): RepairResult {
+        // P2-2：修复动作开始前拒绝与活跃下载并发写（reverify 整本开始时另有
+        // 一次性检查，这里兜底覆盖「复验进行中才开始的下载任务」）。
+        if (hasActiveDownloadTask(gid)) {
+            return repairFailed(
+                gid, page, null, source,
+                "gallery download in progress: repair refused (retry after the download finishes)",
+            )
+        }
         if (page < 1) {
             return repairFailed(gid, page, null, source, "page must be >= 1 (API page is 1-based)")
         }
@@ -1002,21 +1090,36 @@ class DownloadService(
 
     /**
      * 该页的池文件：目录经 [DownloadDirIndex]（缺目录时按下载行解析并创建）；
-     * 既有文件保留真实文件名（4/8 位与扩展名都可能是 legacy 形态），缺席时按
+     * 文件选择统一走 [DownloadDirIndex.findPage]（P2-5：与阅读/索引路径同一份
+     * pageFiles 映射，同 (gid,page) 多文件时取索引的确定胜者）；缺席时按
      * 下载器写入口径新建 `%08d.jpg`。
      */
     private fun poolFile(gid: Long, row: DownloadInfoEntity?, page: Int): File {
         val dir = downloadDirIndex.dirFor(gid)
             ?: DownloadDirs.resolve(config.download.path, gid, row?.downloadDir, row?.title).apply { mkdirs() }
-        return findPoolFile(dir, page) ?: File(dir, "%08d.jpg".format(page))
+        return findPoolFile(gid, dir, page) ?: File(dir, "%08d.jpg".format(page))
     }
 
-    /** 目录内页号 == [page] 的既有页文件（4/8 位数字命名，扩展不限）。 */
-    private fun findPoolFile(dir: File, page: Int): File? =
-        dir.listFiles()
-            ?.firstOrNull { f ->
+    /**
+     * 定位目录内页号 == [page] 的页文件（[page] 1-based 文件名口径）。
+     *
+     * P2-5 唯一选择：优先 [DownloadDirIndex.findPage]（0-based 入参）的索引胜者
+     * ——基线回填、复验比对与修复覆写三处因此恒选中同一物理文件；索引返回的
+     * 文件已消失（扫描后被动过）或索引缺席（直构测试 mock / 目录刚建）时，
+     * 回落同一规则 [DownloadDirIndex.selectPageFile] 做确定性挑选，绝不依赖
+     * listFiles 的顺序碰运气。
+     */
+    private fun findPoolFile(gid: Long, dir: File, page: Int): File? {
+        downloadDirIndex.findPage(gid, page - 1)?.let { ref ->
+            return File(dir, ref.fileName).takeIf { it.isFile }
+        }
+        val candidates = dir.listFiles()
+            ?.filter { f ->
                 f.isFile && POOL_PAGE_NAME.matchEntire(f.name)?.groupValues?.get(1)?.toIntOrNull() == page
             }
+            .orEmpty()
+        return DownloadDirIndex.selectPageFile(candidates)
+    }
 
     /**
      * 解析修复用源页 URL（[page] 1-based）：与 [fetchImageUrl] 同款 3 次退避重试

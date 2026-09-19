@@ -353,6 +353,43 @@ describe('ImageReader T1c — 真全屏（Fullscreen API 接管 reader.fullscree
     expect(fs.current()).toBeNull()
   })
 
+  it('enters fullscreen when prefs arrive after mount (deep link, prefs late)', async () => {
+    // 深链直进阅读器：挂载时 prefs 尚未加载（null），onMounted 的请求被跳过。
+    wrapper = mountReader()
+    await flushPromises()
+    expect(fs.requestFullscreen).not.toHaveBeenCalled()
+    expect(exposed(wrapper).isFullscreen).toBe(false)
+
+    // prefs 后到（null → 加载完成，fullscreen=true）——watch 这一跳补进真全屏。
+    prefsWithReader({ fullscreen: true })
+    await flushPromises()
+    expect(fs.requestFullscreen).toHaveBeenCalledTimes(1)
+    expect(fs.current()).toBe(rootEl(wrapper))
+    expect(exposed(wrapper).isFullscreen).toBe(true)
+    expect(chromeHidden(wrapper)).toBe(true)
+  })
+
+  it('does not request fullscreen when late prefs load with the pref off', async () => {
+    wrapper = mountReader() // prefs 晚到且为关
+    await flushPromises()
+    prefsWithReader({ fullscreen: false })
+    await flushPromises()
+    expect(fs.requestFullscreen).not.toHaveBeenCalled()
+    expect(fs.exitFullscreen).not.toHaveBeenCalled()
+  })
+
+  it('enters fullscreen when the preference is switched on mid-reading', async () => {
+    prefsWithReader({ fullscreen: false })
+    wrapper = mountReader()
+    await flushPromises()
+    expect(fs.requestFullscreen).not.toHaveBeenCalled()
+
+    prefsWithReader({ fullscreen: true })
+    await flushPromises()
+    expect(fs.requestFullscreen).toHaveBeenCalledTimes(1)
+    expect(exposed(wrapper).isFullscreen).toBe(true)
+  })
+
   it('restores (exits) fullscreen on unmount — leaving the route reverts it', async () => {
     prefsWithReader({ fullscreen: true })
     wrapper = mountReader()

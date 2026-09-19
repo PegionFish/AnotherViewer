@@ -493,11 +493,16 @@ function exitReaderFullscreen(): void {
   }
 }
 
-// 关偏好（设置页 toggle reader.fullscreen）→ 立即退出真全屏，回到预隐藏语义。
+// 偏好驱动真全屏：关 → 立即退出，回到预隐藏语义；开 → 补一次进入。
+// 深链直进阅读器时挂载早于 prefs 加载，onMounted 的 enterFullscreen 被跳过
+// ——prefs 从 null→加载完成这一跳（undefined→true）同样落在 watch 里，在此
+// 补进真全屏（此时已不保证还在手势瞬态激活窗口内，被拒则静默回退预隐藏
+// chrome，与挂载路径同一守卫）。
 watch(
   () => preferencesStore.prefs?.reader.fullscreen,
   (enabled) => {
-    if (!enabled) exitReaderFullscreen()
+    if (enabled) void enterFullscreen()
+    else exitReaderFullscreen()
   },
 )
 

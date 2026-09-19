@@ -71,7 +71,11 @@ class IntegrityController(
 
     private val logger = LoggerFactory.getLogger(IntegrityController::class.java)
 
-    /** 活跃 REVERIFY 任务的协作中断旗标（任务按 type 单实例，单槽足够）。 */
+    /**
+     * 活跃 REVERIFY 任务的协作中断旗标（任务按 type 单实例，单槽足够）。
+     * 槽内只放「当前活跃任务」的旗标：提交路径不触碰（P2-1，409 拒绝不孤儿化
+     * 活跃旗标），由 submit 的同步 prep 占槽、worker 的 try/finally 清槽。
+     */
     private val reverifyCancel = AtomicReference<AtomicBoolean?>(null)
 
     /**
@@ -197,26 +201,32 @@ class IntegrityController(
             )
         }
         val cancel = AtomicBoolean(false)
-        // 先占中断旗标槽（worker 闭包引用同一实例）；提交被拒（同 type 已有活跃
-        // 任务）时恢复原任务的旗标——它还活着，不能被孤儿化。
-        val previous = reverifyCancel.getAndSet(cancel)
+        // P2-1：提交路径完全不碰中断旗标槽——旗标由 [JobService.submit] 的同步
+        // prep 在「本任务已被护栏确认活跃」之后才写入槽（此时 409 已不可能）。
+        // 旧实现先 getAndSet 占槽、409 拒绝路径再恢复：占用/恢复之间的窗口里，
+        // 打向活跃任务的中断会落在孤儿旗标上被吞掉（202 说已投递、任务照跑）。
         return try {
             lateinit var job: Job
-            job = jobService.submit(JobType.REVERIFY, {
-                // prep：存在性已查；重活全在 worker（与 ImportController 同模式，
-                // worker 自行写终态 result）。
-            }) { _ ->
+            job = jobService.submit(
+                JobType.REVERIFY,
+                {
+                    // 同步 prep（HTTP 请求线程，护栏占位成功之后）：占中断旗标槽。
+                    // 单实例语义下直接覆盖——槽里只应有当前活跃任务的旗标。
+                    reverifyCancel.set(cancel)
+                },
+            ) { _ ->
                 try {
                     job.result = reverifyOps.reverifyGallery(gid) { cancel.get() }
                 } finally {
+                    // try/finally 保证任务收场即清槽（若槽已被后续任务接管，
+                    // compareAndSet 落空，不误清新任务）。
                     reverifyCancel.compareAndSet(cancel, null)
                 }
             }
             logger.info("Integrity reverify job submitted: jobId={} gid={}", job.jobId, gid)
             ResponseEntity.accepted().body(JobSubmitResponse(job.jobId, job.state))
         } catch (e: IllegalStateException) {
-            // 双提交被拒：恢复活跃任务的旗标并只把冲突映射为 409。
-            reverifyCancel.compareAndSet(cancel, previous)
+            // 双提交被拒：旗标槽从未被触碰，活跃任务的中断旗标原样在位——无需恢复。
             logger.warn("Integrity reverify submit rejected: {}", e.message)
             errorEnvelope(HttpStatus.CONFLICT, "CONFLICT", e.message ?: "已有 REVERIFY 任务进行中")
         }

@@ -35,13 +35,10 @@ spring:
       ddl-auto: update
     open-in-view: false
   web:
-    resources:
-      cache:
-        # 静态资产默认 no-store（每请求全量回源）。Vite 构建产物文件名带内容
-        # hash，内容变更即换名，365d 强缓存安全。注意 index.html/sw.js 也被
-        # 一并缓存，发版后老用户需强刷或等缓存过期——如需发版即时生效，可
-        # 改用 ResourceHandlerCustomizer 仅对 /assets/** 施加长缓存。
-        period: 365d
+    # 静态资源缓存分级在 WebResourceCacheConfig（P1-3）：/assets/**、/icons/**
+    # 365d immutable 强缓存；index.html / sw.js / manifest.json no-cache（发版
+    # 即时生效）。这里刻意不再配全局 spring.web.resources.cache.period——全局
+    # 365d 会把入口 HTML 一并钉死，老用户需强刷才能看到新版。
   servlet:
     multipart:
       max-file-size: 50MB

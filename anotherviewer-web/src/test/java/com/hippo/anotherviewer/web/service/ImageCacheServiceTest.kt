@@ -134,6 +134,26 @@ class ImageCacheServiceTest {
     }
 
     @Test
+    fun `evictPage decrements disk counters for the enhanced derived file too (P2-3)`() {
+        service.cacheImageByKey(7L, 0, ByteArray(9), "jpg")
+        val enhanced = File(tempDir, "enhanced/7").apply { mkdirs() }.resolve("0.jpg")
+        enhanced.writeBytes(ByteArray(3))
+        // 处理管线直写 enhanced 文件不走计数器；模拟重启（init 全树播种）后
+        // enhanced 文件进入计数口径。
+        service = ImageCacheService(config).apply { init() }
+        assertEquals(12L, service.getCacheStats().diskCacheSizeBytes)
+        assertEquals(2L, service.getDiskEntryCount())
+
+        assertTrue(service.evictPage(7L, 0))
+
+        // 页文件与 enhanced 派生一并驱逐后，计数必须与实际磁盘状态一致。
+        assertEquals(0L, service.getCacheStats().diskCacheSizeBytes, "驱逐 enhanced 后字节计数漏减")
+        assertEquals(0L, service.getDiskEntryCount(), "驱逐 enhanced 后条目计数漏减")
+        assertFalse(enhanced.exists())
+        assertNull(service.getEnhancedImage(7L, 0))
+    }
+
+    @Test
     fun `clearGalleryCache returns false when nothing cached`() {
         assertFalse(service.clearGalleryCache(99999L))
     }

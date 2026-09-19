@@ -210,6 +210,11 @@ class ImageCacheService(
         }
 
         getEnhancedImage(galleryId, apiPage)?.let { file ->
+            // P2-3：enhanced 派生文件同样在磁盘计数口径内（init 全树播种、
+            // clearCache/evictDiskIfNeeded 全树清点），删除时必须同步递减，
+            // 否则驱逐后计数与实际磁盘状态脱节。
+            diskSizeBytes.addAndGet(-file.length())
+            diskEntryCount.decrementAndGet()
             removed = file.delete() || removed
         }
 

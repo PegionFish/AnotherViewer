@@ -97,6 +97,31 @@ class DownloadDirIndexTest {
     }
 
     @Test
+    fun `duplicate 4 and 8 digit files for one page pick the same deterministic winner (P2-5)`() {
+        // 同 (gid,page) 的 4 位 legacy 副本与 8 位下载器副本：选择必须唯一且确定，
+        // 绝不依赖 listFiles 顺序碰运气（P2-5 同名页歧义）。
+        pushFile(66L, "0001.jpg")
+        pushFile(66L, "00000001.jpg")
+        index.loadAll()
+
+        assertEquals(1, index.pageCount(66L), "同页两个文件在索引里只有一条")
+        val ref = index.findPage(66L, 0)
+        assertEquals("00000001.jpg", ref!!.fileName, "同优先级副本按位长更长（8 位）胜出")
+        assertEquals("jpg", ref.ext)
+
+        // selectPageFile 是共享规则（companion 纯函数）：同样的候选集必得出同一结论。
+        val dir = gidDir(66L)
+        assertEquals(
+            "00000001.jpg",
+            DownloadDirIndex.selectPageFile(dir.listFiles()!!.filter { it.isFile })!!.name,
+        )
+        assertEquals(
+            "00000001.jpg",
+            DownloadDirIndex.selectPageFile(listOf(File(dir, "0001.jpg"), File(dir, "00000001.jpg")))!!.name,
+        )
+    }
+
+    @Test
     fun `long page numbers (5+ digits) are indexed`() {
         pushFile(56L, "12345.jpg")
         index.loadAll()

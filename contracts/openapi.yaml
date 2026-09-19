@@ -3110,6 +3110,98 @@ paths:
               schema:
                 $ref: '#/components/schemas/ApiErrorEnvelope'
 
+  /api/v1/integrity/scrub:
+    post:
+      tags: [Integrity]
+      operationId: triggerIntegrityScrub
+      summary: Manually trigger a full-library integrity scrub (admin endpoint)
+      description: |
+        Enqueues one StorageIntegrityService scrub run on a background thread
+        and returns immediately. The run re-reads page files, verifies them
+        against the baseline (verdict ok/struct_bad), performs the zero-network
+        baseline-vs-peer cross audit and writes a scrub_run row that surfaces
+        in GET /api/v1/integrity/report. A scheduled monthly cron shares the
+        same single-flight guard: while a scrub (manual or scheduled) is
+        running, a second trigger is rejected with 409 CONFLICT.
+      responses:
+        '202':
+          description: Scrub accepted and started in the background
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrityScrubTriggerResponse'
+        '401':
+          description: Invalid or missing API token
+        '409':
+          description: 'A scrub is already running (code=CONFLICT)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+
+  /api/v1/integrity/backfill:
+    post:
+      tags: [Integrity]
+      operationId: backfillIntegrity
+      summary: Synchronously run one TOFU maintenance action for a single gallery (admin endpoint)
+      description: |
+        Triggers the Wave 2 (S4) maintenance actions synchronously for ONE
+        gallery (the request thread performs the work, so gid is mandatory —
+        full-library scans are reserved for the operator CLI / checkpointed
+        runs). Two kinds are defined:
+
+        - "hashes": TOFU hash backfill — walks the gallery's page files on
+          disk (one selection per page via the shared duplicate-page rule),
+          V-gates and SHA-256 hashes each, and creates page_file_hash baseline
+          rows with origin=import. Existing (gid,page) rows are NEVER
+          overwritten (trust-on-first-use), structurally invalid files land a
+          verdict=struct_bad row with an empty hash. Reads are rate limited to
+          the current storage profile's scrub rate (SSD 400 / HDD 60 / ZFS
+          120 MB/s).
+        - "pageCounts": disk page-count backfill — recounts the page files on
+          disk (deduplicated by page number across 4- and 8-digit names) and
+          corrects download_info.pages, additionally completing legacy
+          state=WAIT rows with total=0 to state=FINISHED (total=done=disk
+          count). Rows whose disk directory is missing or empty are never
+          touched.
+
+        With dryRun=true both kinds only report what would change and write
+        nothing (no rows, no checkpoint KV).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IntegrityBackfillRequest'
+      responses:
+        '200':
+          description: >-
+            Maintenance action finished synchronously; the payload is the
+            stats of the requested kind (hashes → IntegrityBackfillStats,
+            pageCounts → IntegrityApplyPageCountsStats)
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: '#/components/schemas/IntegrityBackfillStats'
+                  - $ref: '#/components/schemas/IntegrityApplyPageCountsStats'
+        '400':
+          description: >-
+            Missing gid or unknown kind (code=VALIDATION_ERROR); gid is
+            mandatory to keep the request thread off full-library scans
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '401':
+          description: Invalid or missing API token
+        '404':
+          description: 'No local download row for this gid (code=INTEGRITY_NOT_FOUND)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+
   /api/v1/integrity/report:
     get:
       tags: [Integrity]
@@ -6029,6 +6121,16 @@ components:
         divergences:
           type: integer
           description: Baseline-vs-peer hash divergences the run found
+        oneSided:
+          type: integer
+          default: 0
+          description: >-
+            Pages carrying evidence on only one side (a baseline without peer
+            evidence or peer evidence without a baseline). Contract-extra
+            additive field: the task brief requires the one-sided count in the
+            report, so it rides on the last-run summary instead of the
+            IntegrityReport top level (clients not knowing it simply ignore
+            it).
 
     IntegrityBadPageDto:
       type: object
@@ -6096,6 +6198,116 @@ components:
         divergenceTotal:
           type: integer
           description: Unfiltered size of the divergence list
+
+    IntegrityScrubTriggerResponse:
+      type: object
+      description: POST /api/v1/integrity/scrub response
+      required: [accepted]
+      properties:
+        accepted:
+          type: boolean
+          description: true = the scrub was enqueued on the background thread
+
+    IntegrityBackfillRequest:
+      type: object
+      description: POST /api/v1/integrity/backfill body (synchronous single-gallery maintenance action)
+      required: [kind, gid]
+      properties:
+        kind:
+          type: string
+          enum: [hashes, pageCounts]
+          description: >-
+            hashes = TOFU hash backfill (V-gate + SHA-256 baseline rows,
+            origin=import, existing rows never overwritten); pageCounts =
+            disk page-count backfill into download_info.pages (plus legacy
+            WAIT-row completion)
+        gid:
+          type: integer
+          format: int64
+          description: Gallery ID to operate on; mandatory so the request thread never runs a full-library scan
+        dryRun:
+          type: boolean
+          default: false
+          description: true = count what would change without writing any rows or checkpoint KV
+
+    IntegrityStructBadPage:
+      type: object
+      description: One page file rejected by the V gate during the backfill
+      properties:
+        gid:
+          type: integer
+          format: int64
+        page:
+          type: integer
+          description: 0-based page number (page_file_hash.page alignment)
+        fileName:
+          type: string
+          description: Page file name on disk (4- or 8-digit number + extension)
+        reason:
+          type: string
+          enum: [V1_MAGIC, V2_TAIL]
+          description: V-gate rejection reason
+
+    IntegrityBackfillStats:
+      type: object
+      description: Result of kind="hashes" (TOFU baseline backfill)
+      required: [gids, scanned, accepted, rejected, skipped, ioErrors, rejectedPages, resumedFromCheckpoint, dryRun]
+      properties:
+        gids:
+          type: integer
+          description: Galleries actually reached on disk during the run
+        scanned:
+          type: integer
+          description: Page files really read and V-gated this run (checkpoint-skipped files not counted)
+        accepted:
+          type: integer
+          description: Files passing the V gate (including those skipped for having a baseline already)
+        rejected:
+          type: integer
+          description: Files rejected by the V gate (struct_bad)
+        skipped:
+          type: integer
+          description: Files passing the gate whose (gid,page) row already exists (TOFU never overwrites)
+        ioErrors:
+          type: integer
+          description: Files failing to read (no V-gate verdict; not counted in rejected)
+        rejectedPages:
+          type: array
+          description: Rejection details in scan order
+          items:
+            $ref: '#/components/schemas/IntegrityStructBadPage'
+        resumedFromCheckpoint:
+          type: boolean
+          description: true when the run consumed an interrupt checkpoint
+        dryRun:
+          type: boolean
+          description: Echo of the request
+
+    IntegrityApplyPageCountsStats:
+      type: object
+      description: Result of kind="pageCounts" (disk page-count backfill)
+      required: [gids, rowsExamined, rowsPagesUpdated, rowsCompleted, dryRun]
+      properties:
+        gids:
+          type: integer
+          description: Distinct galleries among the examined download rows
+        rowsExamined:
+          type: integer
+          description: Live download rows examined
+        rowsPagesUpdated:
+          type: integer
+          description: >-
+            Rows whose pages field disagreed with the disk page count (dryRun
+            reports would-update counts)
+        rowsCompleted:
+          type: integer
+          description: >-
+            Legacy state=WAIT rows with total=0 completed from the disk page
+            count (state=3, total=done=disk count); dryRun reports would-update
+            counts
+        dryRun:
+          type: boolean
+          description: Echo of the request
 
     # ----------------------------------------------------------
     # Common
