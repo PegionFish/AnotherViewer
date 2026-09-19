@@ -241,11 +241,11 @@ const statusBarRef = ref<InstanceType<typeof ReaderStatusBar> | null>(null)
 /**
  * Chrome (status bar + toolbar + seek bar) visibility — tap to toggle.
  * 初值接 reader.fullscreen 偏好（true = 进阅读器即全屏、chrome 藏起）；
- * 默认 false 维持既有行为（进入时 chrome 可见）。T1c：偏好同时驱动真全屏
- * （Fullscreen API，见下方 T1c 段）；请求被拒时本预隐藏行为即回退态，
- * 退出/切页/tap 切换语义不变。
+ * 三端统一默认 true（Wave-2 T2 定案，与服务端 PreferenceDto、App Settings
+ * 同值）。T1c：偏好同时驱动真全屏（Fullscreen API，见下方 T1c 段）；请求被拒
+ * 时本预隐藏行为即回退态，退出/切页/tap 切换语义不变。
  */
-const chromeVisible = ref(!(preferencesStore.prefs?.reader.fullscreen ?? false))
+const chromeVisible = ref(!(preferencesStore.prefs?.reader.fullscreen ?? true))
 const settingsVisible = ref(false)
 /** True while the seek bar is being scrubbed. */
 const seeking = ref(false)
@@ -397,8 +397,10 @@ function stopAutoPlay() {
 /* Brightness mask (activity_gallery.xml `mask` ColorView)             */
 /* ------------------------------------------------------------------ */
 
+// Wave-2 T2 定案：brightness 为压暗等级 0–100（0 = 跟随系统），遮罩不透明度
+// = (1 - v/100) * 0.87——系数与 App 端遮罩 alpha 0xde/255 ≈ 0.87 三端统一。
 const maskOpacity = computed(() =>
-  props.brightness <= 0 ? 0 : (1 - props.brightness / 100) * 0.9,
+  props.brightness <= 0 ? 0 : (1 - props.brightness / 100) * 0.87,
 )
 
 /* ------------------------------------------------------------------ */

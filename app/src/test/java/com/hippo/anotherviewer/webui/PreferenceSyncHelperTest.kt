@@ -249,7 +249,9 @@ class PreferenceSyncHelperTest {
             Row("custom off exports zero", false, 80, 0),
             Row("unset custom exports zero", null, null, 0),
             Row("custom on without value falls back to default fifty", true, null, 50),
-            Row("stored value above clamp is exported raw", true, 500, 500)
+            // Wave-2 T2: 101–200 背光增强段是设备本地设置，导出钳到 100。
+            Row("backlight boost segment clamps to the sync maximum", true, 150, 100),
+            Row("stored value above the sync clamp is clamped", true, 500, 100)
         )
 
         for (row in rows) {
@@ -315,14 +317,18 @@ class PreferenceSyncHelperTest {
     }
 
     @Test
-    fun pullPageModeMapsDualSingleAndSkipsUnknownTokens() {
-        data class Case(val wire: Any, val expected: Boolean?)
+    fun pullPageModeMapsEveryValidTokenAndSkipsUnknownOnes() {
+        data class Case(val wire: Any, val expectedDual: Boolean?, val expectedRaw: String?)
 
         for (case in listOf(
-            Case("dual", true),
-            Case("single", false),
-            Case("both", null),
-            Case("", null)
+            Case("dual", true, "dual"),
+            Case("single", false, "single"),
+            // Wave-2 T2: auto/scroll 不再被丢弃——映射到最接近的本地布尔，
+            // 并把原 token 记入影子键供导出回吐。
+            Case("auto", true, "auto"),
+            Case("scroll", false, "scroll"),
+            Case("both", null, null),
+            Case("", null, null)
         )) {
             prefs.edit().clear().commit()
             seedBool("reading_dual_page", false)
@@ -331,10 +337,64 @@ class PreferenceSyncHelperTest {
 
             assertEquals(
                 "pageMode <- ${case.wire}",
-                case.expected ?: false,
+                case.expectedDual ?: false,
                 prefs.getBoolean("reading_dual_page", false)
             )
+            assertEquals(
+                "pageMode shadow token <- ${case.wire}",
+                case.expectedRaw,
+                prefs.getString("reader_page_mode_raw", null)
+            )
         }
+    }
+
+    @Test
+    fun exportPreservesAutoAndScrollTokensWhileLocalModeMatches() {
+        data class Row(val name: String, val raw: String, val dual: Boolean, val expected: String)
+
+        for (row in listOf(
+            Row("auto survives an app push", "auto", true, "auto"),
+            Row("scroll survives an app push", "scroll", false, "scroll"),
+            Row("explicit dual re-exports as dual", "dual", true, "dual"),
+            Row("explicit single re-exports as single", "single", false, "single")
+        )) {
+            prefs.edit().clear().commit()
+            seedStrRaw("reader_page_mode_raw", row.raw)
+            seedBool("reading_dual_page", row.dual)
+
+            assertEquals(row.name, row.expected, export().getJSONObject("reader").opt("pageMode"))
+        }
+    }
+
+    @Test
+    fun exportFallsBackToDualSingleOnceLocalModeDivergesFromToken() {
+        data class Row(val name: String, val raw: String, val dual: Boolean, val expected: String)
+
+        for (row in listOf(
+            Row("auto dropped after user switches to single locally", "auto", false, "single"),
+            Row("scroll dropped after user switches to dual locally", "scroll", true, "dual")
+        )) {
+            prefs.edit().clear().commit()
+            seedStrRaw("reader_page_mode_raw", row.raw)
+            seedBool("reading_dual_page", row.dual)
+
+            assertEquals(row.name, row.expected, export().getJSONObject("reader").opt("pageMode"))
+        }
+    }
+
+    @Test
+    fun pageModeRoundTripsThroughLocalMappingWithoutDowngrade() {
+        // Web 'auto' → App pull → App push → 服务器仍是 'auto'（不降级 dual）。
+        prefs.edit().clear().commit()
+        importJson(sectionDoc("reader", "pageMode" to "auto"))
+        assertEquals("auto", export().getJSONObject("reader").opt("pageMode"))
+        assertEquals(true, prefs.getBoolean("reading_dual_page", false))
+
+        // Web 'scroll' 同理。
+        prefs.edit().clear().commit()
+        importJson(sectionDoc("reader", "pageMode" to "scroll"))
+        assertEquals("scroll", export().getJSONObject("reader").opt("pageMode"))
+        assertEquals(false, prefs.getBoolean("reading_dual_page", false))
     }
 
     @Test
@@ -431,9 +491,12 @@ class PreferenceSyncHelperTest {
         )
 
         val rows = listOf(
-            Case("positive enables custom and stores value", 120, null, null, true, 120),
-            Case("values above two hundred are clamped", 300, false, 90, true, 200),
+            Case("dimming values inside 0-100 store as-is", 80, false, 90, true, 80),
             Case("smallest positive is accepted", 1, false, null, true, 1),
+            // Wave-2 T2: 同步值域 0-100；越界值（旧版 push 过的背光段等）钳到
+            // 100 = 无压暗，绝不落进本地 101–200 背光增强段。
+            Case("values above the sync clamp land at 100", 120, null, null, true, 100),
+            Case("way out of range clamps to 100", 300, false, 90, true, 100),
             Case("zero disables custom and keeps stored value", 0, true, 90, false, 90),
             Case("negative is ignored entirely", -3, true, 90, true, 90),
             Case("absent is ignored entirely", null, true, 90, true, 90)

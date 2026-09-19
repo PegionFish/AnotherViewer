@@ -37,6 +37,7 @@ import com.hippo.anotherviewer.dao.DownloadLabel;
 import com.hippo.anotherviewer.spider.SpiderDen;
 import com.hippo.anotherviewer.spider.SpiderInfo;
 import com.hippo.anotherviewer.spider.SpiderQueen;
+import com.hippo.anotherviewer.webui.WebUiSyncEngine;
 import com.hippo.lib.image.Image;
 //import com.hippo.lib.image.Image1;
 import com.hippo.anotherviewer.smb.SmbCacheSettings;
@@ -62,6 +63,7 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 public class DownloadManager implements SpiderQueen.OnSpiderListener {
 
@@ -165,6 +167,13 @@ public class DownloadManager implements SpiderQueen.OnSpiderListener {
         mWaitList = new LinkedList<>();
         mSpeedReminder = new SpeedReminder();
         mDownloadInfoListeners = new ArrayList<>();
+
+        // U3: WebUI sync pulls write only the store; without this hook the
+        // in-memory lists (and every download UI built on them) stay stale
+        // until restart. Register this manager as the sync engine's refresh
+        // sink so pulled download rows are mirrored here. Best-effort on the
+        // engine side: a throwing sink never fails the sync cycle.
+        WebUiSyncEngine.setDownloadRefreshSink(this::onWebUiSyncApplied);
     }
 
     /**
@@ -589,6 +598,177 @@ public class DownloadManager implements SpiderQueen.OnSpiderListener {
                 mMap.put(labelString, new LinkedList<>());
                 mLabelList.add(SiteDB.addDownloadLabel(label));
             }
+        }
+    }
+
+    /**
+     * U3 WebUI sync pull refresh: the sync engine just wrote or tombstoned the
+     * given gids in the store; mirror those rows into the in-memory lists so
+     * open download UI reflects the pull without a restart. Called on the sync
+     * thread (memory mutations here follow the importDB {@code addDownload}
+     * precedent); listener callbacks are posted to the main thread. Reads the
+     * rows back from the store, which is authoritative for the reported gids —
+     * rows the alive-row guard kept local were never written and are not
+     * reported. Best-effort: any store read failure is logged and swallowed,
+     * it must never break the sync cycle that called it.
+     */
+    public void onWebUiSyncApplied(@Nullable Set<Long> gids) {
+        if (gids == null || gids.isEmpty()) {
+            return;
+        }
+        List<DownloadInfo> freshList;
+        try {
+            freshList = SiteDB.getAllDownloadInfo();
+        } catch (Exception e) {
+            Log.e(TAG, "Can't read downloads for the sync refresh", e);
+            return;
+        }
+        SparseJLArray<DownloadInfo> freshMap = new SparseJLArray<>(freshList.size() + 10);
+        for (int i = 0, n = freshList.size(); i < n; i++) {
+            DownloadInfo info = freshList.get(i);
+            freshMap.put(info.gid, info);
+        }
+
+        boolean changed = false;
+        for (long gid : gids) {
+            // The running task owns its row: the live SpiderQueen keeps
+            // writing state and progress and would be clobbered; it re-stamps
+            // and re-pushes its own newer state, so the cycle converges.
+            if (mCurrentTask != null && mCurrentTask.gid == gid) {
+                continue;
+            }
+            DownloadInfo current = mAllInfoMap.get(gid);
+            DownloadInfo fresh = freshMap.get(gid);
+            if (fresh == null) {
+                // Pulled tombstone: the store dropped the row.
+                if (current != null) {
+                    removeFromMemory(gid);
+                    changed = true;
+                }
+            } else if (current == null) {
+                // Row adopted from another device: add without re-saving, so
+                // the pull does not re-stamp it (no self-echo).
+                addToMemoryFromStore(fresh);
+                changed = true;
+            } else {
+                applySyncedRow(current, fresh);
+                changed = true;
+            }
+        }
+
+        if (changed) {
+            Collections.sort(mAllInfoList, DATE_DESC_COMPARATOR);
+            SimpleHandler.getInstance().post(() -> {
+                for (DownloadInfoListener l : mDownloadInfoListeners) {
+                    l.onReload();
+                }
+            });
+        }
+    }
+
+    /** Removes a row from the in-memory lists only (the store already dropped it). */
+    private void removeFromMemory(long gid) {
+        DownloadInfo info = mAllInfoMap.get(gid);
+        if (info == null) {
+            return;
+        }
+        mAllInfoList.remove(info);
+        mAllInfoMap.remove(gid);
+        LinkedList<DownloadInfo> list = getInfoListForLabel(info.label);
+        if (list != null) {
+            list.remove(info);
+        }
+        for (Iterator<DownloadInfo> iterator = mWaitList.iterator(); iterator.hasNext(); ) {
+            if (iterator.next().gid == gid) {
+                iterator.remove();
+            }
+        }
+    }
+
+    /**
+     * Adds a pulled-new row to the in-memory lists. Mirrors
+     * {@link #addDownload(List)} — including the WAIT/DOWNLOAD coercion, a
+     * pulled row is not running in this process — but never calls
+     * {@link #saveDownloadInfo}: the row is already in the store and a re-save
+     * would stamp it and echo back to the server.
+     */
+    private void addToMemoryFromStore(DownloadInfo info) {
+        if (DownloadInfo.STATE_WAIT == info.state || DownloadInfo.STATE_DOWNLOAD == info.state) {
+            info.state = DownloadInfo.STATE_NONE;
+        }
+        LinkedList<DownloadInfo> list = getInfoListForLabel(info.label);
+        if (null == list) {
+            list = new LinkedList<>();
+            mMap.put(info.label, list);
+            if (!containLabel(info.label)) {
+                // Same as addDownload(List): make the pulled row's label
+                // addressable, in memory and in the store.
+                mLabelList.add(SiteDB.addDownloadLabel(info.label));
+            }
+        }
+        list.add(info);
+        Collections.sort(list, DATE_DESC_COMPARATOR);
+        mAllInfoList.add(info);
+        mAllInfoMap.put(info.gid, info);
+    }
+
+    /**
+     * Copies the freshly read store row into the in-memory object the UIs
+     * hold (keeping object identity), reconciling the execution state: a row
+     * that stopped waiting is dropped from the wait list, and a WAIT/DOWNLOAD
+     * store state on a row this process is not running (and has not queued) is
+     * coerced to NONE, exactly like {@link #addDownload(List)}. A pulled label
+     * change moves the row between label lists.
+     */
+    private void applySyncedRow(DownloadInfo current, DownloadInfo fresh) {
+        String oldLabel = current.label;
+
+        current.updateInfo(fresh);
+        current.rated = fresh.rated;
+        current.pages = fresh.pages;
+        current.thumbWidth = fresh.thumbWidth;
+        current.thumbHeight = fresh.thumbHeight;
+        current.spanSize = fresh.spanSize;
+        current.spanIndex = fresh.spanIndex;
+        current.spanGroupIndex = fresh.spanGroupIndex;
+        current.favoriteSlot = fresh.favoriteSlot;
+        current.favoriteName = fresh.favoriteName;
+        current.state = fresh.state;
+        current.legacy = fresh.legacy;
+        current.time = fresh.time;
+        current.label = fresh.label;
+        current.total = fresh.total;
+        current.finished = fresh.finished;
+        current.downloaded = fresh.downloaded;
+        current.fileSize = fresh.fileSize;
+        current.lastModified = fresh.lastModified;
+        current.archiveUri = fresh.archiveUri;
+
+        boolean inWaitList = mWaitList.contains(current);
+        if (inWaitList) {
+            if (current.state != DownloadInfo.STATE_WAIT) {
+                mWaitList.remove(current);
+            }
+        } else if (current.state == DownloadInfo.STATE_WAIT
+                || current.state == DownloadInfo.STATE_DOWNLOAD) {
+            current.state = DownloadInfo.STATE_NONE;
+        }
+
+        if (!ObjectUtils.equal(oldLabel, current.label)) {
+            LinkedList<DownloadInfo> src = getInfoListForLabel(oldLabel);
+            if (src != null) {
+                src.remove(current);
+            }
+            LinkedList<DownloadInfo> dst = getInfoListForLabel(current.label);
+            if (dst == null) {
+                dst = new LinkedList<>();
+                mMap.put(current.label, dst);
+                if (!containLabel(current.label)) {
+                    mLabelList.add(SiteDB.addDownloadLabel(current.label));
+                }
+            }
+            dst.add(current);
+            Collections.sort(dst, DATE_DESC_COMPARATOR);
         }
     }
 

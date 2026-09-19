@@ -196,6 +196,27 @@ public final class WebUiSyncEngine {
     }
 
     /**
+     * U3: receives the gids whose download rows {@link #applyDownloads} just
+     * wrote or tombstoned in the store, so the running DownloadManager can
+     * mirror them into its in-memory lists (its UI state is otherwise stale
+     * until restart). Production wires the {@code SiteApplication}
+     * DownloadManager singleton; the unwired default drops the notification
+     * (nothing to refresh). A sink must never throw back into the cycle — the
+     * engine additionally guards the call, since the pulled rows are already
+     * committed to the store at that point.
+     */
+    public interface DownloadRefreshSink {
+        void onDownloadsApplied(@NonNull Set<Long> gids);
+    }
+
+    @Nullable
+    private static volatile DownloadRefreshSink sDownloadRefreshSink;
+
+    public static void setDownloadRefreshSink(@Nullable DownloadRefreshSink sink) {
+        sDownloadRefreshSink = sink;
+    }
+
+    /**
      * Supplies the device's local EH login session and applies a pulled one
      * (ADR-0004). Production wires {@link SiteEhSessionSource}, which reads the
      * {@link SiteCookieStore} jar plus the display/avatar/gallery-site Settings;
@@ -246,6 +267,39 @@ public final class WebUiSyncEngine {
         String localPlatform = platformOf(localDeviceId);
         if (incomingPlatform.equals(localPlatform)) return incomingNewer;
         return priority.equals(incomingPlatform);
+    }
+
+    /**
+     * U3 alive-row guard (pure predicate): decides whether a locally alive
+     * download row survives an incoming server copy in {@link #applyDownloads}.
+     * A local row that is actively downloading ({@code STATE_WAIT} /
+     * {@code STATE_DOWNLOAD}) or already finished ({@code STATE_FINISH}) and is
+     * not behind the server keeps its local copy — the server row may be a
+     * stale snapshot from another device or this device's own push echo, and
+     * blindly overwriting regressed running/finished downloads until restart.
+     * A local row behind the server (older stamp, or equal stamp with lower
+     * page progress) still follows the server, and every non-alive local row
+     * (NONE / INVALID / FAILED / UPDATE) does too — exactly the old behavior.
+     * Stamps are the effective values ({@link #downloadLastModified}); a 0
+     * stamp (legacy row with no stamp and no time) loses only against a
+     * stamped server row, like any other older value.
+     */
+    static boolean shouldKeepLocalDownload(long localLastModified, int localState, int localFinished,
+            long serverLastModified, int serverFinished) {
+        if (!isAliveDownloadState(localState)) {
+            return false;
+        }
+        if (localLastModified < serverLastModified) {
+            return false;
+        }
+        return localFinished >= serverFinished;
+    }
+
+    /** Local row states with in-flight or completed work worth protecting. */
+    static boolean isAliveDownloadState(int state) {
+        return state == DownloadInfo.STATE_WAIT
+                || state == DownloadInfo.STATE_DOWNLOAD
+                || state == DownloadInfo.STATE_FINISH;
     }
 
     private static volatile WebUiSyncEngine sInstance;
@@ -1126,6 +1180,14 @@ public final class WebUiSyncEngine {
      * Downloads follow the server unconditionally: incoming tombstones remove
      * the local record, alive records overwrite every synced field via
      * {@code putDownloadInfo} (the server already resolved union/LWW conflicts).
+     *
+     * <p>Two U3 guards soften the unconditional apply. The alive-row guard
+     * ({@link #shouldKeepLocalDownload}) keeps a local downloading/finished
+     * row that is not behind the server, so a stale server snapshot or this
+     * device's own push echo cannot regress it. And every row actually written
+     * or removed here is reported to the {@link DownloadRefreshSink} so the
+     * running DownloadManager mirrors the change into memory — the pull path
+     * writes only the store, and its UI would stay stale until restart.
      */
     private void applyDownloads(List<WebUiSyncModels.SyncDownload> downloads,
             Result result, Set<Long> snapshotDownloads, Map<String, Long> ledger,
@@ -1134,6 +1196,7 @@ public final class WebUiSyncEngine {
         for (DownloadInfo info : mStore.getAllDownloadInfo()) {
             locals.put(info.gid, info);
         }
+        Set<Long> appliedGids = new HashSet<>();
         for (WebUiSyncModels.SyncDownload dto : downloads) {
             String ledgerKey = Long.toString(dto.gid);
             if (dto.deleted) {
@@ -1148,6 +1211,7 @@ public final class WebUiSyncEngine {
                 mStore.removeDownloadInfo(dto.gid);
                 locals.remove(dto.gid);
                 snapshotDownloads.remove(dto.gid);
+                appliedGids.add(dto.gid);
                 ledger.remove(ledgerKey);
                 result.pulledDownloads++;
                 continue;
@@ -1158,17 +1222,50 @@ public final class WebUiSyncEngine {
             if (existing != null) {
                 // Keep the local archive URI (not part of the wire model).
                 info.archiveUri = existing.archiveUri;
+                // U3: a local alive row at or ahead of the server survives the
+                // pull. The ledger still adopts the wire stamp (A3 semantics:
+                // an equal stamp stays silent, a newer local row re-pushes
+                // once and converges).
+                if (shouldKeepLocalDownload(downloadLastModified(existing), existing.state,
+                        existing.finished, downloadLastModified(info), info.finished)) {
+                    ledger.put(ledgerKey, downloadLastModified(info));
+                    continue;
+                }
             }
             mStore.putDownloadInfo(info);
             locals.put(dto.gid, info);
             snapshotDownloads.add(dto.gid);
+            appliedGids.add(dto.gid);
             // A3: copyDtoToDownload now carries the wire B2 stamp into
-            // info.lastModified, so a self-push echo rewritten in the same
-            // cycle keeps its DownloadManager stamp instead of being wiped to
-            // 0. Ledger at the row's effective push value (= what this device
-            // would send for it), which keeps the no-echo guarantee intact.
+            // info.lastModified, so applyDownloads (including a
+            // same-cycle self-push echo) never rewrites a local row with a
+            // wiped (0) stamp. Ledger at the row's effective push value
+            // (= what this device would send for it), which keeps the
+            // no-echo guarantee intact.
             ledger.put(ledgerKey, downloadLastModified(info));
             result.pulledDownloads++;
+        }
+        notifyDownloadsApplied(appliedGids);
+    }
+
+    /**
+     * Hands the applied gids to the refresh sink, best-effort: the pulled rows
+     * are already committed to the store, so a broken or missing sink (no
+     * running DownloadManager, or a listener throwing) must never fail the
+     * sync cycle — the next process start re-reads the store anyway.
+     */
+    private void notifyDownloadsApplied(Set<Long> gids) {
+        if (gids.isEmpty()) {
+            return;
+        }
+        DownloadRefreshSink sink = sDownloadRefreshSink;
+        if (sink == null) {
+            return;
+        }
+        try {
+            sink.onDownloadsApplied(Collections.unmodifiableSet(new HashSet<>(gids)));
+        } catch (Exception e) {
+            // Refresh is best-effort; never fail the cycle here.
         }
     }
 

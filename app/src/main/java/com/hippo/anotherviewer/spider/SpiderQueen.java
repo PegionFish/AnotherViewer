@@ -48,6 +48,7 @@ import com.hippo.anotherviewer.client.parser.GalleryDetailParser;
 import com.hippo.anotherviewer.client.parser.GalleryPageApiParser;
 import com.hippo.anotherviewer.client.parser.GalleryPageParser;
 import com.hippo.anotherviewer.client.parser.GalleryPageUrlParser;
+import com.hippo.anotherviewer.dao.PageHashStore;
 import com.hippo.anotherviewer.gallery.GalleryProvider2;
 import com.hippo.anotherviewer.webui.WebUiSettings;
 import com.hippo.anotherviewer.webui.WebUiTier2ProxyInterceptor;
@@ -1451,6 +1452,9 @@ public final class SpiderQueen implements Runnable {
                     }
 
                     OutputStreamPipe osPipe = null;
+                    // Integrity hook (Wave 2 A3): hashes this attempt's page bytes
+                    // while they stream into the page file
+                    PageHashRecorder hashRecorder = PageHashRecorder.sha256();
                     try {
                         // Get out put pipe
                         osPipe = mSpiderDen.openOutputStreamPipe(index, extension);
@@ -1464,7 +1468,7 @@ public final class SpiderQueen implements Runnable {
                         long contentLength = responseBody.contentLength();
                         is = responseBody.byteStream();
                         osPipe.obtain();
-                        OutputStream os = osPipe.open();
+                        OutputStream os = hashRecorder.tee(osPipe.open());
 
                         final byte[] data = new byte[1024 * 4];
                         long receivedSize = 0;
@@ -1520,6 +1524,59 @@ public final class SpiderQueen implements Runnable {
                         if (osPipe != null) {
                             osPipe.close();
                             osPipe.release();
+                        }
+                    }
+
+                    // Integrity hook (Wave 2 A3): V-gate the bytes just written,
+                    // then record the file's SHA-256 baseline. The gate reads the
+                    // file back through SpiderDen — the same handle the plain-text
+                    // check below uses — and always judges through VGate, never a
+                    // local re-implementation. Skipped when interrupted: the write
+                    // loop above may have bailed early and the page fails anyway.
+                    if (!Thread.currentThread().isInterrupted()) {
+                        String origin;
+                        if (mSpiderDen.isDownloadMode()) {
+                            origin = PageHashStore.ORIGIN_DOWNLOADER;
+                        } else if (mSpiderDen.shouldWriteToDownloadDir()) {
+                            // Reading with "sync download while reading" wrote
+                            // the file into the download dir
+                            origin = PageHashStore.ORIGIN_READ_SYNC;
+                        } else {
+                            // Read-cache-only write: gate it but record nothing —
+                            // page_file_hash describes download-dir page files
+                            origin = null;
+                        }
+
+                        InputStreamPipe vPipe = null;
+                        boolean accepted;
+                        try {
+                            vPipe = mSpiderDen.openInputStreamPipe(index);
+                            if (vPipe == null) {
+                                // A file we cannot read back cannot be verified
+                                // nor served; fail the attempt, the loop exit
+                                // below removes it
+                                error = GetText.getString(R.string.error_reading_failed);
+                                break;
+                            }
+                            vPipe.obtain();
+                            InputStream vIn = vPipe.open();
+                            accepted = hashRecorder.verifyAndRecord(vIn,
+                                    () -> mSpiderDen.remove(index),
+                                    gid, index, extension, origin,
+                                    this::recordBaselineQuietly);
+                        } finally {
+                            if (vPipe != null) {
+                                vPipe.close();
+                                vPipe.release();
+                            }
+                        }
+                        if (!accepted) {
+                            if (DEBUG_LOG) {
+                                Log.d(TAG, "V gate rejected page " + index);
+                            }
+                            error = "Image data failed integrity check";
+                            forceHtml = true;
+                            continue;
                         }
                     }
 
@@ -1596,6 +1653,22 @@ public final class SpiderQueen implements Runnable {
 
             updatePageState(index, STATE_FAILED, error);
             return !interrupt;
+        }
+
+        /**
+         * Baseline sink for the download hook (Wave 2 A3). A failure here must
+         * not fail a download the V gate already accepted — the file is good,
+         * only its bookkeeping row is missing (the integrity scan can backfill
+         * it later).
+         */
+        private void recordBaselineQuietly(long gid, int page, String ext,
+                long size, String hash, String origin) {
+            try {
+                PageHashStore.upsert(gid, page, ext, size, hash, origin);
+            } catch (RuntimeException e) {
+                Analytics.recordException(e);
+                Log.e(TAG, "Failed to record page hash baseline, gid=" + gid + ", page=" + page, e);
+            }
         }
 
         // false for stop

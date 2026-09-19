@@ -6,7 +6,7 @@ vi.mock('@/api/client', () => ({
 }))
 
 import client from '@/api/client'
-import { preferencesApi, DEFAULT_PREFERENCES } from '@/api/preferences'
+import { preferencesApi, DEFAULT_PREFERENCES, DEFAULT_READER_PREFERENCES } from '@/api/preferences'
 
 const mockedGet = vi.mocked(client.get)
 const mockedPut = vi.mocked(client.put)
@@ -14,6 +14,17 @@ const mockedPut = vi.mocked(client.put)
 beforeEach(() => {
   mockedGet.mockReset()
   mockedPut.mockReset()
+})
+
+describe('DEFAULT_READER_PREFERENCES（Wave-2 T2 跨端契约）', () => {
+  it('matches the server PreferenceDto sync defaults', () => {
+    // fullscreen 三端统一 true（PreferenceDto / App reading_fullscreen 同值）。
+    expect(DEFAULT_READER_PREFERENCES.fullscreen).toBe(true)
+    // brightness = 压暗等级 0–100，0 = 跟随系统；App 101–200 背光段不进同步。
+    expect(DEFAULT_READER_PREFERENCES.brightness).toBe(0)
+    // pageMode 保留 Web 语义 auto，App 导出不降级。
+    expect(DEFAULT_READER_PREFERENCES.pageMode).toBe('auto')
+  })
 })
 
 describe('preferencesApi（T-F2 TH5）', () => {

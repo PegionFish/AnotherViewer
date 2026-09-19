@@ -40,7 +40,13 @@ export interface ReaderPreferences {
   autoPlayIntervalSec: number
   showProgress: boolean
   showPageInterval: boolean
+  /** 三端统一默认 true（Wave-2 T2 定案）：消费侧 chromeVisible 初值 = !fullscreen。 */
   fullscreen: boolean
+  /**
+   * Wave-2 T2 契约：相对当前亮度的压暗等级 0–100，0 = 跟随系统（无遮罩）；
+   * 1–100 遮罩不透明度 = (1 - v/100) * 0.87。App 端 101–200 背光增强段是
+   * 设备本地设置，不进同步（App 导出钳到 100）。
+   */
   brightness: number
   /** Wave-1 A: black|gray|white */
   backgroundColor: string
@@ -109,9 +115,10 @@ export const DEFAULT_READER_PREFERENCES: ReaderPreferences = {
   autoPlayIntervalSec: 2,
   showProgress: true,
   showPageInterval: true,
-  // false 才能维持既有行为（进入阅读器 chrome 可见）：消费侧是
-  // 「chromeVisible 初值 = !fullscreen」，默认 true 会让 chrome 一进就藏。
-  fullscreen: false,
+  // Wave-2 T2 定案：与服务端 PreferenceDto（默认 true）、App Settings
+  // （reading_fullscreen 默认 true）三端统一。消费侧 chromeVisible 初值 =
+  // !fullscreen，默认 true = 进阅读器即全屏、chrome 藏起（真全屏语义）。
+  fullscreen: true,
   brightness: 0,
   backgroundColor: 'black',
   tapZoneScheme: 'threeZone',

@@ -61,6 +61,26 @@ class PreferenceDtoTest {
         assertEquals("slide", resp.reader.pageTransition)
     }
 
+    @Test
+    fun `reader sync keys carry the wave-2 T2 contract defaults`() {
+        // fullscreen 三端统一 true（App reading_fullscreen、web
+        // DEFAULT_READER_PREFERENCES 同值）；brightness = 压暗等级 0-100，
+        // 0 = 跟随系统；pageMode 值域含 auto/scroll，App 侧透传不降级。
+        val reader = ReaderPreferences()
+        assertEquals(true, reader.fullscreen)
+        assertEquals(0, reader.brightness)
+        assertEquals("auto", reader.pageMode)
+    }
+
+    @Test
+    fun `legacy json without fullscreen fills the unified true default`() {
+        val json = """{"reader":{"brightness":40}}"""
+
+        val resp = mapper.readValue(json, PreferenceResponse::class.java)
+        assertEquals(true, resp.reader.fullscreen)
+        assertEquals(40, resp.reader.brightness)
+    }
+
     // ---- 校验: 合法边界 ----
 
     private fun violations(general: GeneralPreferences? = null, reader: ReaderPreferences? = null) =

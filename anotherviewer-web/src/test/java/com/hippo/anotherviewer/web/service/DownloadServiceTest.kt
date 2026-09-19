@@ -6,10 +6,18 @@ import com.hippo.anotherviewer.web.eq
 import com.hippo.anotherviewer.web.config.SiteCoreConfigProperties
 import com.hippo.anotherviewer.web.dto.DownloadAddRequest
 import com.hippo.anotherviewer.web.entity.DownloadInfoEntity
+import com.hippo.anotherviewer.web.entity.PageFileHashEntity
+import com.hippo.anotherviewer.web.entity.PageFileHashId
 import com.hippo.anotherviewer.web.repository.DownloadInfoRepository
 import com.hippo.anotherviewer.web.repository.DownloadLabelRepository
+import com.hippo.anotherviewer.web.repository.PageFileHashRepository
+import okhttp3.OkHttpClient
+import okhttp3.mockwebserver.MockResponse
+import okhttp3.mockwebserver.MockWebServer
+import okio.Buffer
 import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertFalse
+import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.BeforeEach
@@ -21,11 +29,16 @@ import org.mockito.Mockito.never
 import org.mockito.Mockito.verify
 import org.springframework.context.ApplicationEventPublisher
 import java.util.Optional
+import java.util.concurrent.ConcurrentHashMap
 /**
  * Pins the G4 metrics fixes and the EH-DOWN download-start semantics
  * (plan-2026-08-30 §3.2/§3.3): state counts via COUNT SQL (countByState,
  * no entity materialisation) and immediate FAILED instead of a silent
  * pending task while EH is DOWN.
+ *
+ * 另含文件完整性 Wave 2（S3）下载写入钩子测试：V 门拒收不落盘不建基线
+ * （截断页 → FAILED 计入重试）、合法页落盘 + SHA-256 基线（origin=downloader，
+ * 0-based 页号）、覆盖写刷新基线。fixtures 取 Wave 0 classpath /integrity/。
  */
 class DownloadServiceTest {
 
@@ -38,6 +51,10 @@ class DownloadServiceTest {
     private lateinit var availability: EhAvailabilityService
     private lateinit var downloadDirIndex: DownloadDirIndex
     private lateinit var historyRepository: com.hippo.anotherviewer.web.repository.HistoryInfoRepository
+    private lateinit var pageFileHashRepository: PageFileHashRepository
+    private lateinit var galleryLookup: GalleryLookupService
+    private lateinit var sessionManager: SiteSessionManager
+    private lateinit var hashStore: ConcurrentHashMap<PageFileHashId, PageFileHashEntity>
     private lateinit var service: DownloadService
 
     @BeforeEach
@@ -47,7 +64,20 @@ class DownloadServiceTest {
         availability = mock(EhAvailabilityService::class.java)
         downloadDirIndex = mock(DownloadDirIndex::class.java)
         historyRepository = mock(com.hippo.anotherviewer.web.repository.HistoryInfoRepository::class.java)
-        val sessionManager = mock(SiteSessionManager::class.java)
+        hashStore = ConcurrentHashMap()
+        pageFileHashRepository = mock(PageFileHashRepository::class.java).apply {
+            `when`(findByGidAndPage(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyInt()))
+                .thenAnswer { inv ->
+                    hashStore[PageFileHashId(inv.getArgument<Long>(0), inv.getArgument<Int>(1))]
+                }
+            `when`(save(any(PageFileHashEntity::class.java))).thenAnswer { inv ->
+                val e = inv.getArgument<PageFileHashEntity>(0)
+                hashStore[PageFileHashId(e.gid, e.page)] = e
+                e
+            }
+        }
+        galleryLookup = mock(GalleryLookupService::class.java)
+        sessionManager = mock(SiteSessionManager::class.java)
         service = DownloadService(
             downloadRepository,
             labelRepository,
@@ -57,14 +87,32 @@ class DownloadServiceTest {
             mock(ApplicationEventPublisher::class.java),
             mock(ImageCacheService::class.java),
             sessionManager,
-            mock(GalleryLookupService::class.java),
+            galleryLookup,
             mock(ServerConfigService::class.java),
             availability,
             downloadDirIndex,
             historyRepository,
             stubProvider("test-user"),
+            pageFileHashRepository,
         )
     }
+
+    /** Wave 0 classpath fixture（src/test/resources/integrity/，口径见 MANIFEST.sha256）。 */
+    private fun fixture(name: String): ByteArray =
+        javaClass.getResourceAsStream("/integrity/$name")!!.readBytes()
+
+    /** 轮询等待异步 worker 落到终态（下载任务跑在 workerPool/pageExecutor 上）。 */
+    private fun awaitUntil(timeoutMs: Long = 15_000, predicate: () -> Boolean) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        while (!predicate() && System.currentTimeMillis() < deadline) Thread.sleep(20)
+    }
+
+    /** MockWebServer 供给一页字节（downloadImage 走真实 OkHttp 客户端）。 */
+    private fun startPageServer(bytes: ByteArray): MockWebServer =
+        MockWebServer().apply {
+            start()
+            enqueue(MockResponse().setResponseCode(200).setBody(Buffer().write(bytes)))
+        }
 
     /** A7-1: 纯 Mockito 单测不碰 SecurityContext——注入固定用户的 Provider stub。 */
     private fun stubProvider(name: String): com.hippo.anotherviewer.web.config.CurrentUsernameProvider =
@@ -442,6 +490,148 @@ class DownloadServiceTest {
         assertEquals(20, service.galleryConcurrency)
         service.applyGalleryConcurrency(0)
         assertEquals(1, service.galleryConcurrency)
+    }
+
+    // ── 文件完整性 Wave 2（S3）：下载写入钩子 ────────────────────
+
+    @Test
+    fun `writePageWithBaseline writes a valid page and builds the downloader baseline`() {
+        val dir = java.io.File(tempDir, "dl-hook-42").apply { mkdirs() }
+        val bytes = fixture("valid.jpg")
+        val target = java.io.File(dir, "00000001.jpg")
+
+        val accepted = service.writePageWithBaseline(42L, 1, target, bytes)
+
+        assertTrue(accepted)
+        assertTrue(target.readBytes().contentEquals(bytes))
+        // 基线 0-based 页号（下载循环 1-based → page-1），origin=downloader，未巡检。
+        val baseline = hashStore[PageFileHashId(42L, 0)]
+        assertNotNull(baseline)
+        assertEquals("24ac74130806ae02d7e4ee72881b977601999c6c9f94ee1545ed4830459b737f", baseline!!.hash)
+        assertEquals(bytes.size.toLong(), baseline.size)
+        assertEquals("jpg", baseline.ext)
+        assertEquals("sha256", baseline.algo)
+        assertEquals("downloader", baseline.origin)
+        assertTrue(baseline.createdAt > 0)
+        assertNull(baseline.lastVerifiedAt)
+        assertNull(baseline.verdict)
+    }
+
+    @Test
+    fun `writePageWithBaseline rejects a truncated page without writing or baselining`() {
+        val dir = java.io.File(tempDir, "dl-hook-reject").apply { mkdirs() }
+        val target = java.io.File(dir, "00000003.jpg")
+
+        val accepted = service.writePageWithBaseline(42L, 3, target, fixture("truncated.jpg"))
+
+        // 拒收 = 该页下载失败：不落盘、不计 done（调用方不增计数）、不建基线；
+        // 文件缺席让下一次重跑按断点续传自然重试。
+        assertFalse(accepted)
+        assertFalse(target.exists())
+        assertTrue(hashStore.isEmpty())
+    }
+
+    @Test
+    fun `writePageWithBaseline refreshes a stale baseline on overwrite`() {
+        val dir = java.io.File(tempDir, "dl-hook-refresh").apply { mkdirs() }
+        hashStore[PageFileHashId(42L, 0)] = PageFileHashEntity().apply {
+            gid = 42L
+            page = 0
+            ext = "png"
+            size = 9
+            hash = "old-hash"
+            origin = "import"
+            createdAt = 1L
+            lastVerifiedAt = 99L
+            verdict = "ok"
+        }
+        val bytes = fixture("valid.jpg")
+        val target = java.io.File(dir, "00000001.jpg")
+
+        assertTrue(service.writePageWithBaseline(42L, 1, target, bytes))
+
+        // 覆盖写已有基线的文件 = 刷新基线：同 PK 不增行，origin 回 downloader，
+        // 内容已变 → 巡检结论（verdict/last_verified_at）复位为未巡检。
+        assertEquals(1, hashStore.size)
+        val baseline = hashStore.getValue(PageFileHashId(42L, 0))
+        assertEquals("24ac74130806ae02d7e4ee72881b977601999c6c9f94ee1545ed4830459b737f", baseline.hash)
+        assertEquals(bytes.size.toLong(), baseline.size)
+        assertEquals("jpg", baseline.ext)
+        assertEquals("downloader", baseline.origin)
+        assertNull(baseline.lastVerifiedAt)
+        assertNull(baseline.verdict)
+        assertTrue(baseline.createdAt > 1L)
+    }
+
+    @Test
+    fun `download pipeline lands a valid page with its baseline (S3 e2e)`() {
+        val bytes = fixture("valid.jpg")
+        val server = startPageServer(bytes)
+        try {
+            val row = DownloadInfoEntity().apply {
+                id = 1L
+                gid = 42L
+                token = "tok"
+                title = "T"
+                state = 0
+                downloadDir = java.io.File(java.io.File(tempDir, "downloads"), "42").absolutePath
+            }
+            `when`(availability.isBlocked()).thenReturn(false)
+            `when`(downloadRepository.findById(1L)).thenReturn(Optional.of(row))
+            `when`(downloadRepository.save(any(DownloadInfoEntity::class.java))).thenAnswer { it.getArgument(0) }
+            `when`(galleryLookup.fetchPageCount(42L, "tok")).thenReturn(1)
+            `when`(galleryLookup.fetchImageUrl(42L, "tok", 1)).thenReturn(server.url("/1.jpg").toString())
+            `when`(sessionManager.okHttpClient).thenReturn(OkHttpClient())
+
+            assertTrue(service.startDownload(1L))
+            awaitUntil { row.state == 3 }
+
+            assertEquals(3, row.state)
+            assertEquals(1, row.done)
+            val pageFile = java.io.File(row.downloadDir, "00000001.jpg")
+            assertTrue(pageFile.isFile)
+            assertTrue(pageFile.readBytes().contentEquals(bytes))
+            val baseline = hashStore[PageFileHashId(42L, 0)]
+            assertNotNull(baseline, "合法页必须建基线")
+            assertEquals("downloader", baseline!!.origin)
+            assertEquals("24ac74130806ae02d7e4ee72881b977601999c6c9f94ee1545ed4830459b737f", baseline.hash)
+        } finally {
+            server.shutdown()
+        }
+    }
+
+    @Test
+    fun `download pipeline fails a truncated page without persisting it (S3 e2e)`() {
+        val server = startPageServer(fixture("truncated.jpg"))
+        try {
+            val row = DownloadInfoEntity().apply {
+                id = 1L
+                gid = 42L
+                token = "tok"
+                title = "T"
+                state = 0
+                downloadDir = java.io.File(java.io.File(tempDir, "downloads"), "42").absolutePath
+            }
+            `when`(availability.isBlocked()).thenReturn(false)
+            `when`(downloadRepository.findById(1L)).thenReturn(Optional.of(row))
+            `when`(downloadRepository.save(any(DownloadInfoEntity::class.java))).thenAnswer { it.getArgument(0) }
+            `when`(galleryLookup.fetchPageCount(42L, "tok")).thenReturn(1)
+            `when`(galleryLookup.fetchImageUrl(42L, "tok", 1)).thenReturn(server.url("/1.jpg").toString())
+            `when`(sessionManager.okHttpClient).thenReturn(OkHttpClient())
+
+            assertTrue(service.startDownload(1L))
+            awaitUntil { row.state == 4 }
+
+            // 既有失败语义：V 门拒收等同该页失败 → 终态 FAILED，done 不计；
+            // 不落盘、不建基线；重跑时该页因文件缺席被自然重试。
+            assertEquals(4, row.state)
+            assertEquals(0, row.done)
+            assertTrue(row.error!!.contains("incomplete"))
+            assertFalse(java.io.File(row.downloadDir, "00000001.jpg").exists())
+            assertTrue(hashStore.isEmpty())
+        } finally {
+            server.shutdown()
+        }
     }
 
     /** 测试辅助：构造同 id 的独立副本（startDownload 会把 state 写进加载的行）。 */

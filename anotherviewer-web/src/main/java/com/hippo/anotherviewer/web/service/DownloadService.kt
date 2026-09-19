@@ -6,9 +6,13 @@ import com.hippo.anotherviewer.web.config.SiteCoreConfigProperties
 import com.hippo.anotherviewer.web.dto.*
 import com.hippo.anotherviewer.web.entity.DownloadInfoEntity
 import com.hippo.anotherviewer.web.entity.DownloadLabelEntity
+import com.hippo.anotherviewer.web.entity.PageFileHashEntity
 import com.hippo.anotherviewer.web.repository.DownloadInfoRepository
 import com.hippo.anotherviewer.web.repository.DownloadInfoRepository.TitleProjection
 import com.hippo.anotherviewer.web.repository.DownloadLabelRepository
+import com.hippo.anotherviewer.web.repository.PageFileHashRepository
+import com.hippo.anotherviewer.web.service.integrity.VGate
+import com.hippo.anotherviewer.web.service.integrity.VGateResult
 import com.fasterxml.jackson.core.type.TypeReference
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.slf4j.LoggerFactory
@@ -18,6 +22,7 @@ import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Sort
 import org.springframework.stereotype.Service
 import java.io.File
+import java.security.MessageDigest
 import java.util.concurrent.*
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
@@ -56,6 +61,10 @@ class DownloadService(
     // S10: 批量取 history 行 page 填下载列表 readProgress（findByGidIn，避免 N+1）。
     private val historyRepository: com.hippo.anotherviewer.web.repository.HistoryInfoRepository,
     private val usernameProvider: com.hippo.anotherviewer.web.config.CurrentUsernameProvider,
+    // 文件完整性 Wave 2（S3）：页文件落盘时过 V 门并建/刷新 SHA-256 基线
+    // （origin=downloader）。默认 null 仅为既有直构测试（DownloadControllerTest）
+    // 的源兼容保留——那些用例不触达下载写入路径；Spring 装配按类型注入真实仓库。
+    private val pageFileHashRepository: PageFileHashRepository? = null,
 ) : DisposableBean {
     private val logger = LoggerFactory.getLogger(DownloadService::class.java)
 
@@ -772,13 +781,83 @@ class DownloadService(
             val imageData = downloadImage(imageUrl) ?: return
             if (task.stopRequested.get()) return
 
-            file.writeBytes(imageData)
+            // S3 写入钩子（文件完整性 Wave 2）：落盘前过 V 门——拒收 = 该页下载
+            // 失败（不落盘、不计 done、不建基线）；文件缺席让下一次重启/重跑按
+            // 既有断点续传语义自然重试该页。
+            if (!writePageWithBaseline(task.gid, page, file, imageData)) return
             val current = done.incrementAndGet()
             imageCacheService.cacheImage(imageUrl, imageData)
             persistProgress(task, current)
             publishProgress(task, 2, current, totalPages)
         } catch (e: Exception) {
             logger.warn("Page download failed for gid={} page={}: {}", task.gid, page, e.message)
+        }
+    }
+
+    /**
+     * S3 写入钩子：V 门校验 → 落盘（覆盖写）→ SHA-256 基线 upsert。
+     *
+     * - V 门拒收（contracts/integrity-vgate.md §2/§3）：不落盘、不建/不刷基线，
+     *   返回 false——调用方按该页下载失败处理（不计 done，终态走既有 FAILED
+     *   语义，下次运行按断点续传重试该页）。
+     * - 通过：写文件后对落盘字节计算 SHA-256 → [PageFileHashRepository] upsert
+     *   （origin=downloader）。下载字节本已全量驻内存（[downloadImage] 返回
+     *   ByteArray），单遍 `MessageDigest.digest(bytes)` 与流式聚合等价，无额外
+     *   常驻。覆盖已有基线（重下/重传同一页）= 刷新 hash/size/ext，并把
+     *   verdict/last_verified_at 复位为未巡检（内容已变，旧巡检结论作废）。
+     *   哈希落库失败不影响该页成功（基线 best-effort，可由巡检/TOFU 回填）。
+     *
+     * @param page 1-based（下载循环/文件名口径）；基线行按 0-based 口径落库（page-1）。
+     * @return true = 已落盘并建基线；false = V 门拒收（未落盘）。
+     */
+    internal fun writePageWithBaseline(gid: Long, page: Int, file: File, bytes: ByteArray): Boolean {
+        val gate = VGate.check(bytes)
+        if (gate is VGateResult.Reject) {
+            logger.warn(
+                "V gate rejected page for gid={} page={}: reason={} format={}",
+                gid, page, gate.reason, gate.format
+            )
+            return false
+        }
+        file.writeBytes(bytes)
+        upsertPageHash(gid, page - 1, file, bytes, ORIGIN_DOWNLOADER)
+        return true
+    }
+
+    /**
+     * SHA-256 基线 upsert（Wave 1 契约：先 [PageFileHashRepository.findByGidAndPage]
+     * 取旧行改字段再 save——复合主键覆盖语义，且不误伤巡检字段）。任何异常只记日志
+     * 不上抛：基线是 best-effort 附属产物，不得让已落盘的页被记为失败。
+     */
+    private fun upsertPageHash(gid: Long, page0: Int, file: File, bytes: ByteArray, writeOrigin: String) {
+        val hashRepository = pageFileHashRepository
+        if (hashRepository == null) {
+            // 仅可能出现在未注入仓库的直构测试构造里；Spring 装配恒注入。
+            logger.warn("PageFileHashRepository not wired; skipping baseline for gid={} page={}", gid, page0)
+            return
+        }
+        try {
+            val sha256 = MessageDigest.getInstance("SHA-256").digest(bytes)
+                .joinToString("") { "%02x".format(it) }
+            val now = System.currentTimeMillis()
+            val row = hashRepository.findByGidAndPage(gid, page0) ?: PageFileHashEntity().also {
+                it.gid = gid
+                it.page = page0
+            }
+            row.ext = file.extension.lowercase().ifEmpty { "jpg" }
+            row.size = bytes.size.toLong()
+            row.hash = sha256
+            row.algo = "sha256"
+            row.origin = writeOrigin
+            row.createdAt = now
+            row.lastVerifiedAt = null
+            row.verdict = null
+            hashRepository.save(row)
+        } catch (e: Exception) {
+            logger.warn(
+                "Failed to persist page hash baseline for gid={} page={}: {}",
+                gid, page0, e.message
+            )
         }
     }
 
@@ -943,6 +1022,9 @@ class DownloadService(
     private companion object {
         /** 跨页全选/批量单次解析的全集上限（9000+ 级规模安全；超限取前 N 条）。 */
         const val MAX_BATCH_IDS = 100_000
+
+        /** 页文件基线 origin：服务端自己下载（文件完整性 Wave 2 S3）。 */
+        private const val ORIGIN_DOWNLOADER = "downloader"
 
         /** 筛选槽位持久化键（serverConfig KV，随备份自动导出）。 */
         const val KEY_FILTER_SLOTS = "download.filterSlots"

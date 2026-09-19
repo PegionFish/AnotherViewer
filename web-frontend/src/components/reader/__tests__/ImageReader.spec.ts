@@ -366,3 +366,44 @@ describe('ImageReader T1c — 真全屏（Fullscreen API 接管 reader.fullscree
     expect(fs.current()).toBeNull()
   })
 })
+
+describe('ImageReader Wave-2 T2 — brightness 压暗遮罩（系数三端统一 0.87）', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    prefsWithReader()
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    propRestores.splice(0).reverse().forEach((restore) => restore())
+  })
+
+  function maskOpacity(): string {
+    return (wrapper!.find('.image-reader__mask').element as HTMLElement).style.opacity
+  }
+
+  it('shows no mask at 0 (follow system)', async () => {
+    wrapper = mountReader({ brightness: 0 })
+    await flushPromises()
+    expect(maskOpacity()).toBe('0')
+  })
+
+  it('applies (1 - v/100) * 0.87 inside the dimming range', async () => {
+    wrapper = mountReader({ brightness: 50 })
+    await flushPromises()
+    expect(maskOpacity()).toBe(String((1 - 50 / 100) * 0.87))
+
+    await wrapper.setProps({ brightness: 30 })
+    await flushPromises()
+    expect(maskOpacity()).toBe(String((1 - 30 / 100) * 0.87))
+  })
+
+  it('is mask-free again at the brightest end (100)', async () => {
+    wrapper = mountReader({ brightness: 100 })
+    await flushPromises()
+    expect(maskOpacity()).toBe('0')
+  })
+})

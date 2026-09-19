@@ -61,6 +61,8 @@ data class ReaderPreferences(
     // 'auto'（非 'dual'）：竖屏单页全屏适应、横屏并排双页，与前端
     // DEFAULT_READER_PREFERENCES 保持一致（固定 dual 在竖屏手机上每页
     // 只有半屏宽，用户被迫逐页手动缩放）。
+    // Wave-2 T2 契约：值域 auto|single|dual|scroll；App 导出经影子键透传
+    // auto/scroll 原值不降级（App 本地只存 dual 布尔）。
     val pageMode: String = "auto",
     val firstPageCover: Boolean = true,
     @field:Size(max = 64, message = "pageScaling must be at most 64 characters")
@@ -72,9 +74,16 @@ data class ReaderPreferences(
     val autoPlayIntervalSec: Int = 2,
     val showProgress: Boolean = true,
     val showPageInterval: Boolean = true,
+    // Wave-2 T2 定案：三端统一默认 true（App reading_fullscreen 与 web
+    // DEFAULT_READER_PREFERENCES 同值）。默认生效点：本缺省值经 Jackson
+    // 缺省填充（UserPreferenceService.readStored）兜底存量 JSON 缺字段，
+    // 新用户走 PreferenceResponse() 全缺省。
     val fullscreen: Boolean = true,
-    // App 共享键：0 = 跟随系统亮度。注意 App 端滑条技术上到 200（max=200），
-    // 但 App 同步走 sync/push 原样存储不经本校验；本端点仅 WebUI 消费，收在 100。
+    // Wave-2 T2 语义定案：相对当前亮度的压暗等级 0–100，0 = 跟随系统
+    // （无遮罩），1–100 遮罩不透明度 = (1 - v/100) * 0.87（与 App 遮罩
+    // alpha 0xde/255 统一）。App 端 101–200 背光增强段是设备本地设置，
+    // 不进同步（App 导出钳到 100）。注意 App push 走 sync/push 原样存储
+    // 不经本校验；本端点仅 WebUI 消费，收在 100。
     @field:Min(0, message = "brightness must be between 0 and 100")
     @field:Max(100, message = "brightness must be between 0 and 100")
     val brightness: Int = 0,

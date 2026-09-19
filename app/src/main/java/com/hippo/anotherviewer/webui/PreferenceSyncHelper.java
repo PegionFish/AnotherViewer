@@ -47,6 +47,12 @@ import okhttp3.ResponseBody;
  * malformed fields are skipped on import, and an unparseable document aborts
  * the whole import without writing anything. This helper never imports or
  * exports anything but the preference keys listed below.
+ *
+ * <p>Wave-2 T2 contract: {@code pageMode} keeps the Web's {@code auto} /
+ * {@code scroll} tokens across app pushes (shadow key
+ * {@link #KEY_PAGE_MODE_RAW}); {@code brightness} is a relative dimming level
+ * 0–100 (0 = follow system, pure mask — no brightness pinning), and the
+ * app-local 101–200 backlight-boost segment never crosses the sync boundary.
  */
 public final class PreferenceSyncHelper {
 
@@ -107,6 +113,15 @@ public final class PreferenceSyncHelper {
     private static final String KEY_READING_FULLSCREEN = "reading_fullscreen";
     private static final String KEY_CUSTOM_SCREEN_LIGHTNESS = "custom_screen_lightness";
     private static final String KEY_SCREEN_LIGHTNESS = "screen_lightness";
+    /**
+     * Helper-owned shadow of the last imported {@code pageMode} wire token.
+     * The app's local state ({@link #KEY_READING_DUAL_PAGE}) is a boolean and
+     * cannot represent the Web's {@code auto} / {@code scroll} page modes;
+     * this key remembers the raw token so a later export can re-emit it
+     * (instead of downgrading the server value to dual/single) for as long as
+     * the local boolean still matches what the token implies.
+     */
+    private static final String KEY_PAGE_MODE_RAW = "reader_page_mode_raw";
 
     // Defaults mirroring Settings.java
     private static final int DEFAULT_LAUNCH_PAGE = 0;
@@ -120,6 +135,15 @@ public final class PreferenceSyncHelper {
     private static final int DEFAULT_START_TRANSFER_TIME = 2;
     private static final int DEFAULT_SCREEN_LIGHTNESS = 50;
     private static final int MAX_SCREEN_LIGHTNESS = 200;
+    /**
+     * Upper bound of the synced {@code brightness} value (Wave-2 T2 contract:
+     * the wire field is a relative dimming level 0–100, 0 = follow system).
+     * The app's local 101–200 screen-lightness segment is a device-local
+     * backlight boost and never crosses the sync boundary in either direction:
+     * export clamps it to 100, import clamps out-of-range wire values to 100
+     * so stale server data cannot leak into the local boost segment.
+     */
+    private static final int MAX_SYNC_BRIGHTNESS = 100;
 
     private static volatile OkHttpClient sClient;
 
@@ -216,7 +240,7 @@ public final class PreferenceSyncHelper {
     private static JSONObject buildReader() throws JSONException {
         JSONObject reader = new JSONObject();
         reader.put(JSON_READING_DIRECTION, readingDirectionToJson(Settings.getIntFromStr(KEY_READING_DIRECTION, DEFAULT_READING_DIRECTION)));
-        reader.put(JSON_PAGE_MODE, Settings.getBoolean(KEY_READING_DUAL_PAGE, true) ? "dual" : "single");
+        reader.put(JSON_PAGE_MODE, pageModeToJson());
         reader.put(JSON_FIRST_PAGE_COVER, Settings.getBoolean(KEY_READING_FIRST_PAGE_COVER, true));
         reader.put(JSON_PAGE_SCALING, pageScalingToJson(Settings.getIntFromStr(KEY_PAGE_SCALING, DEFAULT_PAGE_SCALING)));
         reader.put(JSON_START_POSITION, startPositionToJson(Settings.getIntFromStr(KEY_START_POSITION, DEFAULT_START_POSITION)));
@@ -224,8 +248,12 @@ public final class PreferenceSyncHelper {
         reader.put(JSON_SHOW_PROGRESS, Settings.getBoolean(KEY_SHOW_PROGRESS, true));
         reader.put(JSON_SHOW_PAGE_INTERVAL, Settings.getBoolean(KEY_SHOW_PAGE_INTERVAL, true));
         reader.put(JSON_FULLSCREEN, Settings.getBoolean(KEY_READING_FULLSCREEN, true));
+        // Wave-2 T2 契约：brightness 是相对当前亮度的压暗等级（0 = 跟随系统，
+        // 1–100 应用为纯遮罩）。本地 101–200 段是背光增强（设备本地设置），
+        // 不导出——钳到 100（无压暗，是 0–100 值域内最贴近的表达）。
         boolean customLightness = Settings.getBoolean(KEY_CUSTOM_SCREEN_LIGHTNESS, false);
-        reader.put(JSON_BRIGHTNESS, customLightness ? Settings.getInt(KEY_SCREEN_LIGHTNESS, DEFAULT_SCREEN_LIGHTNESS) : 0);
+        int lightness = customLightness ? Settings.getInt(KEY_SCREEN_LIGHTNESS, DEFAULT_SCREEN_LIGHTNESS) : 0;
+        reader.put(JSON_BRIGHTNESS, Math.min(lightness, MAX_SYNC_BRIGHTNESS));
         return reader;
     }
 
@@ -276,9 +304,14 @@ public final class PreferenceSyncHelper {
         if (direction >= 0) {
             Settings.putIntToStr(KEY_READING_DIRECTION, direction);
         }
+        // Wave-2 T2 契约：pageMode 值域 auto|single|dual|scroll。App 本地只有
+        // dual 布尔——auto/scroll 映射到最接近的本地行为并记入影子键，导出时
+        // 原样回吐（见 pageModeToJson），不再把 Web 的 auto/scroll 降级覆盖。
         String pageMode = optStringIfPresent(reader, JSON_PAGE_MODE);
-        if ("dual".equals(pageMode) || "single".equals(pageMode)) {
-            Settings.putBoolean(KEY_READING_DUAL_PAGE, "dual".equals(pageMode));
+        String rawPageMode = pageModeFromJson(pageMode);
+        if (rawPageMode != null) {
+            Settings.putBoolean(KEY_READING_DUAL_PAGE, "dual".equals(pageMode) || "auto".equals(pageMode));
+            Settings.putString(KEY_PAGE_MODE_RAW, rawPageMode);
         }
         putBooleanIfBoolean(reader, JSON_FIRST_PAGE_COVER, KEY_READING_FIRST_PAGE_COVER);
         int scaling = pageScalingFromJson(optStringIfPresent(reader, JSON_PAGE_SCALING));
@@ -299,7 +332,10 @@ public final class PreferenceSyncHelper {
         int brightness = optIntIfPresent(reader, JSON_BRIGHTNESS);
         if (brightness > 0) {
             Settings.putBoolean(KEY_CUSTOM_SCREEN_LIGHTNESS, true);
-            Settings.putInt(KEY_SCREEN_LIGHTNESS, Math.min(brightness, MAX_SCREEN_LIGHTNESS));
+            // 0–100 原样同步（应用为纯遮罩，见 GalleryActivity 移除钉底亮度）；
+            // 越界值（旧版 App push 过的 101–200 背光段等）钳到 100 = 无压暗，
+            // 绝不落进本地 101–200 背光增强段。
+            Settings.putInt(KEY_SCREEN_LIGHTNESS, Math.min(brightness, MAX_SYNC_BRIGHTNESS));
         } else if (brightness == 0) {
             Settings.putBoolean(KEY_CUSTOM_SCREEN_LIGHTNESS, false);
         }
@@ -446,6 +482,48 @@ public final class PreferenceSyncHelper {
                 return 2;
             default:
                 return -1;
+        }
+    }
+
+    /**
+     * Minimal-loss pageMode export. The app cannot represent {@code auto}
+     * (portrait single / landscape dual — the app's dual flag already only
+     * takes effect in landscape) or {@code scroll} (no continuous mode) in its
+     * local boolean, so on import they are remembered in
+     * {@link #KEY_PAGE_MODE_RAW}: the token is re-emitted verbatim for as long
+     * as the local boolean still matches what the token implies (i.e. the user
+     * has not switched the mode locally since the import); once it diverges —
+     * or no token is known — the boolean maps to dual/single as before. This
+     * keeps an app push from silently downgrading the Web's auto/scroll.
+     */
+    @NonNull
+    private static String pageModeToJson() {
+        boolean dual = Settings.getBoolean(KEY_READING_DUAL_PAGE, true);
+        String raw = Settings.getString(KEY_PAGE_MODE_RAW, "");
+        if ("auto".equals(raw) && dual) {
+            return "auto";
+        }
+        if ("scroll".equals(raw) && !dual) {
+            return "scroll";
+        }
+        return dual ? "dual" : "single";
+    }
+
+    /**
+     * Returns the canonical wire token for an imported {@code pageMode}, or
+     * {@code null} when the token is unknown and the field must be skipped.
+     * {@code auto} maps to the closest local behavior dual=true (landscape
+     * dual, like the Web's landscape leg); {@code scroll} maps to single.
+     */
+    private static String pageModeFromJson(String pageMode) {
+        switch (pageMode) {
+            case "dual":
+            case "single":
+            case "auto":
+            case "scroll":
+                return pageMode;
+            default:
+                return null;
         }
     }
 
