@@ -81,6 +81,7 @@ import com.hippo.anotherviewer.client.SiteCacheKeyFactory;
 import com.hippo.anotherviewer.client.SiteClient;
 import com.hippo.anotherviewer.client.SiteRequest;
 import com.hippo.anotherviewer.client.SiteTagDatabase;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.SiteUrl;
 import com.hippo.anotherviewer.client.SiteUtils;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
@@ -748,7 +749,8 @@ public final class GalleryListScene extends BaseScene
             popupWindow.dismiss();
         }
 
-        if (gi != null && (gi.tgList == null || gi.tgList.isEmpty())) {
+        // 内容打码：预览标签是真实标签文本，打码时不弹出（与详情隐藏标签一致）
+        if (gi == null || PrivacyMask.isEnabled() || gi.tgList == null || gi.tgList.isEmpty()) {
             onItemClick(view, gi);
             return;
         }
@@ -777,6 +779,10 @@ public final class GalleryListScene extends BaseScene
 
     private ChipGroup buildChipGroup(GalleryInfo gi, ChipGroup tagFlowLayout) {
         int colorTag = AttrResources.getAttrColor(getContext(), R.attr.tagBackgroundColor);
+        // 内容打码：不渲染真实预览标签（长按对话框复用此处，旧数据行同样被覆盖）
+        if (PrivacyMask.isEnabled()) {
+            return tagFlowLayout;
+        }
         if (null == gi.tgList) {
             String tagName = "暂无预览标签";
             @SuppressLint("InflateParams") Chip chip = (Chip) getLayoutInflater().inflate(R.layout.item_chip_tag, null);
@@ -1371,7 +1377,10 @@ public final class GalleryListScene extends BaseScene
                             if (downloaded) {
                                 new AlertDialog.Builder(context)
                                         .setTitle(R.string.download_remove_dialog_title)
-                                        .setMessage(getString(R.string.download_remove_dialog_message, gi.title))
+                                        // 内容打码：确认框文案用打码标题，避免旧数据真实标题上屏
+                                        .setMessage(getString(R.string.download_remove_dialog_message,
+                                                PrivacyMask.isEnabled()
+                                                        ? SiteUtils.getSuitableTitle(gi) : gi.title))
                                         .setPositiveButton(android.R.string.ok, (dialog1, which1) -> mDownloadManager.deleteDownload(gi.gid))
                                         .show();
                             } else {

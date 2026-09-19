@@ -406,7 +406,9 @@ public class ArchiverDownloadDialog implements
 
             request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE);
 
-            request.setTitle(galleryDetail.title);
+            // 内容打码：系统下载通知标题用 "#<gid>"，不把真实标题带出应用
+            request.setTitle(com.hippo.anotherviewer.client.PrivacyMask.isEnabled()
+                    ? "#" + galleryDetail.gid : galleryDetail.title);
 
             request.setDescription(context.getString(R.string.download_archive_started));
 

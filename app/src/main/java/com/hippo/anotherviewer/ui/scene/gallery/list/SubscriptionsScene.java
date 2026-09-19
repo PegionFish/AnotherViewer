@@ -16,6 +16,7 @@
 
 package com.hippo.anotherviewer.ui.scene.gallery.list;
 
+import android.annotation.SuppressLint;
 import android.content.Context;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.NinePatchDrawable;
@@ -46,6 +47,7 @@ import com.hippo.anotherviewer.client.SiteTagDatabase;
 import com.hippo.anotherviewer.client.SiteUrl;
 import com.hippo.anotherviewer.client.data.userTag.UserTag;
 import com.hippo.anotherviewer.client.data.userTag.UserTagList;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.ui.scene.SiteCallback;
 import com.hippo.anotherviewer.ui.scene.ToolbarScene;
 import com.hippo.scene.SceneFragment;
@@ -54,6 +56,9 @@ import com.hippo.view.ViewTransition;
 import com.hippo.widget.ProgressView;
 import com.hippo.lib.yorozuya.AssertUtils;
 import com.hippo.lib.yorozuya.ViewUtils;
+import org.greenrobot.eventbus.EventBus;
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
 
 import java.util.ArrayList;
 
@@ -89,11 +94,27 @@ public final class SubscriptionsScene extends ToolbarScene {
         }
         userTagList = SiteApplication.getUserTagList(context);
         ehTags = SiteTagDatabase.getInstance(context);
+        //注册事件（与 GalleryListScene 一致：onCreate 注册、onDestroy 注销）
+        EventBus.getDefault().register(this);
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，立即重绑当前列表。
+     * 本场景当前只展示订阅标签名（不受打码影响），刷新为 no-op，但保持与其他列表场景一致的响应。
+     */
+    @SuppressLint("NotifyDataSetChanged")
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged e) {
+        if (mRecyclerView != null && mRecyclerView.getAdapter() != null) {
+            mRecyclerView.getAdapter().notifyDataSetChanged();
+        }
     }
 
     @Override
     public void onDestroy() {
         super.onDestroy();
+        //注销事件
+        EventBus.getDefault().unregister(this);
         userTagList = null;
     }
 

@@ -20,6 +20,7 @@ import com.hippo.anotherviewer.AppConfig;
 import com.hippo.anotherviewer.SiteApplication;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.Settings;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
 import com.hippo.anotherviewer.dao.DownloadInfo;
 import com.hippo.anotherviewer.gallery.GalleryProvider2;
@@ -423,6 +424,10 @@ public class ArchiverDownloadCompleter {
     }
 
     public static String createFileName(@Nullable String name, long gid) {
+        // 内容打码：文件名会落入公共 Downloads 目录，打码时以 "#<gid>" 代替真实标题
+        if (name != null && gid > 0 && PrivacyMask.isEnabled()) {
+            name = "#" + gid;
+        }
         String result = name == null ? "" : com.hippo.lib.yorozuya.FileUtils.sanitizeFilename(name);
         result = truncateUtf8ToMaxBytes(result, MAX_ARCHIVER_BASENAME_UTF8_BYTES);
         if (result.isEmpty()) {

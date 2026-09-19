@@ -69,6 +69,7 @@ import com.hippo.anotherviewer.client.SiteUrl
 import com.hippo.anotherviewer.client.data.FavListUrlBuilder
 import com.hippo.anotherviewer.client.data.GalleryInfo
 import com.hippo.anotherviewer.client.parser.FavoritesParser
+import com.hippo.anotherviewer.event.PrivacyMaskChanged
 import com.hippo.anotherviewer.ui.CommonOperations
 import com.hippo.anotherviewer.ui.annotation.DrawerLifeCircle
 import com.hippo.anotherviewer.ui.annotation.ViewLifeCircle
@@ -91,6 +92,9 @@ import com.hippo.scene.Announcer
 import com.hippo.scene.SceneFragment
 import com.hippo.util.AppHelper.Companion.hideSoftInput
 import com.hippo.util.DrawableManager
+import org.greenrobot.eventbus.EventBus
+import org.greenrobot.eventbus.Subscribe
+import org.greenrobot.eventbus.ThreadMode
 import com.hippo.widget.ContentLayout
 import com.hippo.widget.FabLayout
 import com.hippo.widget.FabLayout.OnClickFabListener
@@ -209,6 +213,16 @@ class FavoritesScene : BaseScene(), EasyRecyclerView.OnItemClickListener,
         } else {
             onRestore(savedInstanceState)
         }
+        //注册事件（与 GalleryListScene 一致：onCreate 注册、onDestroy 注销）
+        EventBus.getDefault().register(this)
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，立即刷新收藏列表行（标题/上传者/占位图）
+     */
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    fun onPrivacyMaskChanged(e: PrivacyMaskChanged) {
+        mAdapter?.notifyDataSetChanged()
     }
 
     private fun onInit() {
@@ -244,6 +258,9 @@ class FavoritesScene : BaseScene(), EasyRecyclerView.OnItemClickListener,
 
     override fun onDestroy() {
         super.onDestroy()
+
+        //注销事件
+        EventBus.getDefault().unregister(this)
 
         mClient = null
         mFavCatArray = null

@@ -1403,6 +1403,11 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
         popup.setOnMenuItemClickListener(item -> {
             switch (item.getItemId()) {
                 case R.id.action_open_in_other_app:
+                    // 内容打码：令牌 URL 不外发（与分享一致），WebUI 打码时同样隐藏
+                    if (PrivacyMask.isEnabled()) {
+                        showTip(R.string.privacy_mask_reader_placeholder, LENGTH_SHORT);
+                        break;
+                    }
                     String url = getGalleryDetailUrl();
                     Activity activity = getActivity2();
                     if (null != url && null != activity) {
@@ -1551,9 +1556,14 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
                 startActivity(intent);
             }
         } else if (mInfo == v) {
-            Bundle args = new Bundle();
-            args.putParcelable(GalleryInfoScene.KEY_GALLERY_DETAIL, mGalleryDetail);
-            startScene(new Announcer(GalleryInfoScene.class).setArgs(args));
+            // 内容打码：画廊信息页会展示并可直接复制真实标题/上传者/令牌 URL，一律拦截
+            if (PrivacyMask.isEnabled()) {
+                showTip(R.string.privacy_mask_reader_placeholder, LENGTH_SHORT);
+            } else if (mGalleryDetail != null) {
+                Bundle args = new Bundle();
+                args.putParcelable(GalleryInfoScene.KEY_GALLERY_DETAIL, mGalleryDetail);
+                startScene(new Announcer(GalleryInfoScene.class).setArgs(args));
+            }
         } else if (mHeartGroup == v) {
             if (mGalleryDetail != null && !mModifingFavorites) {
                 boolean remove = false;
@@ -1574,9 +1584,14 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
                 updateFavoriteDrawable();
             }
         } else if (mShare == v) {
-            String url = getGalleryDetailUrl();
-            if (url != null) {
-                AppHelper.share(activity, url);
+            // 内容打码：分享的画廊 URL 含站点域名与令牌（WebUI 打码时同样隐藏），拦截
+            if (PrivacyMask.isEnabled()) {
+                showTip(R.string.privacy_mask_reader_placeholder, LENGTH_SHORT);
+            } else {
+                String url = getGalleryDetailUrl();
+                if (url != null) {
+                    AppHelper.share(activity, url);
+                }
             }
         } else if (mTorrent == v) {
             showTorrentListDialog();
@@ -1648,7 +1663,9 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
             }
         } else if (mTitle == v) {
             if (mGalleryDetail != null && mGalleryDetail.title != null) {
-                ClipboardUtil.copyText(mGalleryDetail.title);
+                // 内容打码：复制的是打码标题 "#<gid>"，不落真实标题进剪贴板
+                ClipboardUtil.copyText(PrivacyMask.isEnabled()
+                        ? SiteUtils.getSuitableTitle(mGalleryDetail) : mGalleryDetail.title);
                 Toast.makeText(getContext(), R.string.copied_to_clipboard, Toast.LENGTH_SHORT).show();
             }
         } else {
@@ -1682,6 +1699,11 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
     }
 
     private void showFilterUploaderDialog() {
+        // 内容打码：屏蔽上传者流程会把真实上传者名显示/写入过滤器，一律拦截
+        if (PrivacyMask.isEnabled()) {
+            showTip(R.string.privacy_mask_reader_placeholder, LENGTH_SHORT);
+            return;
+        }
         Context context = getEHContext();
         String uploader = getUploader();
         if (context == null || uploader == null) {
@@ -1810,7 +1832,10 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
             } else {
                 new AlertDialog.Builder(mContext)
                         .setTitle(R.string.download_remove_dialog_title)
-                        .setMessage(getString(R.string.download_remove_dialog_message, galleryInfo.title))
+                        // 内容打码：确认框文案用打码标题，避免旧数据真实标题上屏
+                        .setMessage(getString(R.string.download_remove_dialog_message,
+                                PrivacyMask.isEnabled()
+                                        ? SiteUtils.getSuitableTitle(galleryInfo) : galleryInfo.title))
                         .setPositiveButton(android.R.string.ok, (dialog1, which1) -> SiteApplication.getDownloadManager(mContext).deleteDownload(galleryInfo.gid))
                         .show();
             }
