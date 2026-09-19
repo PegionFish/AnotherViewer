@@ -93,6 +93,7 @@ import com.hippo.anotherviewer.dao.DownloadInfo;
 import com.hippo.anotherviewer.dao.DownloadLabel;
 import com.hippo.anotherviewer.download.DownloadManager;
 import com.hippo.anotherviewer.download.DownloadService;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.event.SomethingNeedRefresh;
 import com.hippo.anotherviewer.spider.SpiderInfo;
 import com.hippo.anotherviewer.sync.DownloadListInfosExecutor;
@@ -703,6 +704,8 @@ public class DownloadsScene extends ToolbarScene
 
         guide();
         updatePaginationIndicator();
+        //注册事件
+        EventBus.getDefault().register(this);
         return view;
     }
 
@@ -1715,7 +1718,20 @@ public class DownloadsScene extends ToolbarScene
     @Subscribe(threadMode = ThreadMode.MAIN)
     public void updateDownloadLabels(SomethingNeedRefresh somethingNeedRefresh) {
         if (somethingNeedRefresh.isDownloadLabelDrawNeed()) {
-            downloadLabelDraw.updateDownloadLabels();
+            if (downloadLabelDraw != null) {
+                downloadLabelDraw.updateDownloadLabels();
+            }
+        }
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，刷新下载列表标题与上传者显示
+     */
+    @SuppressLint("NotifyDataSetChanged")
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged e) {
+        if (mAdapter != null) {
+            mAdapter.notifyDataSetChanged();
         }
     }
 

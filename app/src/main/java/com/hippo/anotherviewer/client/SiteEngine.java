@@ -32,14 +32,19 @@ import com.hippo.anotherviewer.Settings;
 import com.hippo.anotherviewer.client.data.ArchiverData;
 import com.hippo.anotherviewer.client.data.SiteNewsDetail;
 import com.hippo.anotherviewer.client.data.SiteTopListDetail;
+import com.hippo.anotherviewer.client.data.GalleryComment;
 import com.hippo.anotherviewer.client.data.GalleryCommentList;
 import com.hippo.anotherviewer.client.data.GalleryDetail;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
+import com.hippo.anotherviewer.client.data.GalleryTagGroup;
 import com.hippo.anotherviewer.client.data.HomeDetail;
 import com.hippo.anotherviewer.client.data.TorrentInfo;
 import com.hippo.anotherviewer.client.data.userTag.TagPushParam;
 import com.hippo.anotherviewer.client.data.userTag.UserTag;
 import com.hippo.anotherviewer.client.data.userTag.UserTagList;
+import com.hippo.anotherviewer.client.data.topList.TopListItem;
+import com.hippo.anotherviewer.client.data.topList.TopListItemArray;
+import com.hippo.anotherviewer.client.data.topList.TopListInfo;
 import com.hippo.anotherviewer.client.data.PreviewSet;
 import com.hippo.anotherviewer.client.exception.CancelledException;
 import com.hippo.anotherviewer.client.exception.SiteException;
@@ -112,6 +117,64 @@ public class SiteEngine {
 
     public static void initialize() {
         sSiteFilter = SiteFilter.getInstance();
+    }
+
+    // 内容打码（隐私遮蔽）：与 WebUI 端 PrivacyMaskFilter 行为对齐。打码开启时，
+    // 网络解析出的敏感文本在进入 UI/DB/通知前被清洗；gid/token/thumb/posted/
+    // category/pages/rating 等功能字段保持不变，浏览与下载不受影响。打码关闭时为空操作。
+    private static void applyPrivacyMask(GalleryInfo gi) {
+        if (gi == null || !PrivacyMask.isEnabled()) return;
+        gi.title = "#" + gi.gid;
+        gi.titleJpn = null;
+        gi.uploader = null;
+        gi.simpleTags = new String[0];
+    }
+
+    private static void applyPrivacyMask(GalleryDetail gd) {
+        if (gd == null || !PrivacyMask.isEnabled()) return;
+        applyPrivacyMask((GalleryInfo) gd);
+        gd.tags = new GalleryTagGroup[0];
+        clearComments(gd.comments);
+        // 历史版本名即旧版画廊标题；置 null 与解析器无版本时的状态一致，调用方均已判空
+        gd.newVersions = null;
+    }
+
+    private static void clearComments(@Nullable GalleryCommentList comments) {
+        if (comments == null) return;
+        comments.comments = new GalleryComment[0];
+        comments.hasMore = false;
+    }
+
+    private static void applyPrivacyMaskToList(@Nullable List<GalleryInfo> list) {
+        if (list == null || !PrivacyMask.isEnabled()) return;
+        for (GalleryInfo gi : list) {
+            applyPrivacyMask(gi);
+        }
+    }
+
+    private static void applyPrivacyMaskToTopList(@Nullable SiteTopListDetail detail) {
+        if (detail == null || !PrivacyMask.isEnabled()) return;
+        for (int i = 0; i < 7; i++) {
+            TopListInfo topListInfo = detail.get(i);
+            if (topListInfo == null) continue;
+            for (int j = 0; j < topListInfo.size(); j++) {
+                TopListItemArray items = topListInfo.get(j);
+                if (items == null || items.itemArray == null) continue;
+                for (TopListItem item : items.itemArray) {
+                    if (item == null) continue;
+                    // 画廊榜单：显示文本 → "#<gid>"；上传者/标签榜单：清空显示文本。
+                    // gid/token/href 为功能字段，保留。
+                    item.value = null;
+                    item.tag = null;
+                    if (item.gid != null) {
+                        try {
+                            item.value = "#" + Long.parseLong(item.gid);
+                        } catch (NumberFormatException ignored) {
+                        }
+                    }
+                }
+            }
+        }
     }
 
     private static void doThrowException(Call call, int code, @Nullable Headers headers,
@@ -289,6 +352,7 @@ public class SiteEngine {
         }
 
         fillGalleryList(task, okHttpClient, result.galleryInfoList, url, true);
+        applyPrivacyMaskToList(result.galleryInfoList);
 
         if (code == 200 && url.equals("https://exhentai.org/") && body.isEmpty()) {
             result.customErrorString = GetText.getString(R.string.error_igneous_wrong);
@@ -310,6 +374,7 @@ public class SiteEngine {
                 requestItems.clear();
             }
         }
+        applyPrivacyMaskToList(galleryInfoList);
         return galleryInfoList;
     }
 
@@ -382,7 +447,9 @@ public class SiteEngine {
             if (html != null) {
                 SiteApplication.getInstance().showEventPane(html);
             }
-            return GalleryDetailParser.parse(body);
+            GalleryDetail gd = GalleryDetailParser.parse(body);
+            applyPrivacyMask(gd);
+            return gd;
         } catch (Throwable e) {
             ExceptionUtils.throwIfFatal(e);
             throwException(call, code, headers, body, e);
@@ -500,7 +567,11 @@ public class SiteEngine {
                 throw new SiteException(elements.get(0).text());
             }
 
-            return GalleryDetailParser.parseComments(document);
+            GalleryCommentList comments = GalleryDetailParser.parseComments(document);
+            if (PrivacyMask.isEnabled()) {
+                clearComments(comments);
+            }
+            return comments;
         } catch (Throwable e) {
             ExceptionUtils.throwIfFatal(e);
             throwException(call, code, headers, body, e);
@@ -612,6 +683,7 @@ public class SiteEngine {
             throw e;
         }
 
+        applyPrivacyMaskToList(result.galleryInfoList);
         return result;
     }
 
@@ -644,6 +716,7 @@ public class SiteEngine {
             throw e;
         }
         fillGalleryList(task, okHttpClient, result.galleryInfoList, url, false);
+        applyPrivacyMaskToList(result.galleryInfoList);
         return result;
     }
 
@@ -754,6 +827,7 @@ public class SiteEngine {
         }
 
         fillGalleryList(task, okHttpClient, result.galleryInfoList, url, false);
+        applyPrivacyMaskToList(result.galleryInfoList);
 
         return result;
     }
@@ -785,6 +859,14 @@ public class SiteEngine {
             ExceptionUtils.throwIfFatal(e);
             throwException(call, code, headers, body, e);
             throw e;
+        }
+
+        if (PrivacyMask.isEnabled()) {
+            // 种子名与下载 URL 含站点域名/令牌；posted 保留
+            for (int i = 0; i < result.length; i++) {
+                TorrentInfo ti = result[i];
+                result[i] = new TorrentInfo("", "#" + gid, ti.posted);
+            }
         }
 
         return result;
@@ -826,6 +908,8 @@ public class SiteEngine {
             throw e;
         }
 
+        applyPrivacyMaskToTopList(result);
+
         return result;
     }
 
@@ -856,6 +940,14 @@ public class SiteEngine {
             ExceptionUtils.throwIfFatal(e);
             throwException(call, code, headers, body, e);
             throw e;
+        }
+
+        if (PrivacyMask.isEnabled()) {
+            // 显示名含画廊信息；or(res) 为下载功能参数，保留
+            Pair<String, String>[] items = result.second;
+            for (int i = 0; i < items.length; i++) {
+                items[i] = new Pair<>(items[i].first, "#" + gid);
+            }
         }
 
         return result;
@@ -1199,6 +1291,7 @@ public class SiteEngine {
             imageFile.delete();
         }
         fillGalleryList(task, okHttpClient, result.galleryInfoList, url, true);
+        applyPrivacyMaskToList(result.galleryInfoList);
 
         return result;
     }

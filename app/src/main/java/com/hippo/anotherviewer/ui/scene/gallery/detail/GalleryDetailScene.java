@@ -85,8 +85,10 @@ import com.hippo.anotherviewer.client.data.PreviewSet;
 import com.hippo.anotherviewer.client.data.userTag.UserTagList;
 import com.hippo.anotherviewer.client.exception.NoHAtHClientException;
 import com.hippo.anotherviewer.client.parser.RateGalleryParser;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.dao.DownloadInfo;
 import com.hippo.anotherviewer.dao.Filter;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.spider.SpiderQueen;
 import com.hippo.anotherviewer.ui.CommonOperations;
 import com.hippo.anotherviewer.ui.GalleryActivity;
@@ -133,6 +135,10 @@ import com.hippo.widget.LoadImageView;
 import com.hippo.widget.ObservedTextView;
 import com.hippo.widget.ProgressView;
 import com.hippo.widget.SimpleGridAutoSpanLayout;
+
+import org.greenrobot.eventbus.EventBus;
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
 
 import java.io.File;
 import java.io.FileNotFoundException;
@@ -640,10 +646,7 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
 
         mComments = (LinearLayout) ViewUtils.$$(belowHeader, R.id.comments);
         mCommentsText = (TextView) ViewUtils.$$(mComments, R.id.comments_text);
-        if (!Settings.getShowGalleryComment()) {
-            mComments.setVisibility(View.GONE);
-            mCommentsText.setVisibility(View.GONE);
-        }
+        updateCommentsVisibility();
         if (!Settings.getShowGalleryRating()) {
             mRating.setVisibility(View.INVISIBLE);
             mRatingText.setVisibility(View.INVISIBLE);
@@ -680,6 +683,8 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
         }
 
         SiteApplication.getDownloadManager(context).addDownloadInfoListener(this);
+        //注册事件
+        EventBus.getDefault().register(this);
         if (myUpdateDialog == null) {
             myUpdateDialog = new GalleryUpdateDialog(this, context);
         }
@@ -707,6 +712,8 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
         Context context = getEHContext();
         AssertUtils.assertNotNull(context);
         SiteApplication.getDownloadManager(context).removeDownloadInfoListener(this);
+        //销毁事件
+        EventBus.getDefault().unregister(this);
 
         setDrawerGestureBlocker(null);
 
@@ -961,7 +968,7 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
             GalleryInfo gi = mGalleryInfo;
             mThumb.load(SiteCacheKeyFactory.getThumbKey(gi.gid), gi.thumb);
             mTitle.setText(SiteUtils.getSuitableTitle(gi));
-            mUploader.setText(gi.uploader);
+            bindUploaderText(gi);
             mCategory.setText(SiteUtils.getCategory(gi.category));
             mCategory.setTextColor(SiteUtils.getCategoryColor(gi.category));
             updateDownloadText();
@@ -1022,7 +1029,7 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
         }
 
         mTitle.setText(SiteUtils.getSuitableTitle(gd));
-        mUploader.setText(gd.uploader);
+        bindUploaderText(gd);
         mCategory.setText(SiteUtils.getCategory(gd.category));
         mCategory.setTextColor(SiteUtils.getCategoryColor(gd.category));
         updateDownloadText();
@@ -1088,8 +1095,61 @@ public class GalleryDetailScene extends BaseScene implements View.OnClickListene
         });
     }
 
+    /**
+     * 绑定上传者：隐私打码开启时隐藏上传者，关闭时恢复
+     */
+    private void bindUploaderText(GalleryInfo info) {
+        if (mUploader == null) {
+            return;
+        }
+        if (PrivacyMask.isEnabled()) {
+            mUploader.setText(null);
+            mUploader.setVisibility(View.GONE);
+        } else {
+            mUploader.setText(info.uploader);
+            mUploader.setVisibility(View.VISIBLE);
+        }
+    }
+
+    /**
+     * 评论可见性：设置关闭或隐私打码开启时隐藏，否则显示
+     */
+    private void updateCommentsVisibility() {
+        if (mComments == null || mCommentsText == null) {
+            return;
+        }
+        if (!Settings.getShowGalleryComment() || PrivacyMask.isEnabled()) {
+            mComments.setVisibility(View.GONE);
+            mCommentsText.setVisibility(View.GONE);
+        } else {
+            mComments.setVisibility(View.VISIBLE);
+            mCommentsText.setVisibility(View.VISIBLE);
+        }
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，重新应用受影响的上传者、标签与评论区
+     */
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged e) {
+        if (mGalleryDetail != null) {
+            bindUploaderText(mGalleryDetail);
+            if (mTags != null && mNoTags != null) {
+                bindTags(mGalleryDetail.tags);
+            }
+            updateCommentsVisibility();
+        } else {
+            // 详情未加载完成时，重新走首次绑定路径刷新标题与上传者
+            bindViewFirst();
+        }
+    }
+
     @SuppressWarnings("deprecation")
     private void bindTags(GalleryTagGroup[] tagGroups) {
+        if (PrivacyMask.isEnabled()) {
+            // 隐私打码开启时不显示标签，走已有的"无标签"空状态
+            tagGroups = new GalleryTagGroup[0];
+        }
         Context context = getEHContext();
         LayoutInflater inflater = getLayoutInflater2();
         Resources resources = getResources2();

@@ -142,6 +142,7 @@ object SiteUtils {
 
     @JvmStatic
     fun getSuitableTitle(gi: GalleryInfo): String? {
+        if (PrivacyMask.isEnabled()) return "#" + gi.gid
         if (Settings.getShowJpnTitle()) {
             return if (TextUtils.isEmpty(gi.titleJpn)) gi.title else gi.titleJpn
         } else {

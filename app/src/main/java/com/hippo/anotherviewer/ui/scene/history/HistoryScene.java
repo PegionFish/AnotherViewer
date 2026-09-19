@@ -22,6 +22,7 @@ import android.content.res.Resources;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
 import android.graphics.drawable.Drawable;
+import android.annotation.SuppressLint;
 import android.os.Build;
 import android.os.Bundle;
 import android.view.LayoutInflater;
@@ -52,10 +53,12 @@ import com.hippo.easyrecyclerview.MarginItemDecoration;
 import com.hippo.anotherviewer.SiteDB;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.Settings;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.SiteCacheKeyFactory;
 import com.hippo.anotherviewer.client.SiteUtils;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
 import com.hippo.anotherviewer.dao.HistoryInfo;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.ui.CommonOperations;
 import com.hippo.anotherviewer.ui.MainActivity;
 import com.hippo.anotherviewer.ui.scene.SiteCallback;
@@ -74,6 +77,9 @@ import com.hippo.widget.recyclerview.AutoStaggeredGridLayoutManager;
 import com.hippo.lib.yorozuya.AssertUtils;
 import com.hippo.lib.yorozuya.ViewUtils;
 
+import org.greenrobot.eventbus.EventBus;
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
 import org.greenrobot.greendao.query.LazyList;
 
 
@@ -155,6 +161,9 @@ public class HistoryScene extends ToolbarScene
         updateLazyList();
         updateView(false);
 
+        //注册事件
+        EventBus.getDefault().register(this);
+
         return view;
     }
 
@@ -168,6 +177,9 @@ public class HistoryScene extends ToolbarScene
     @Override
     public void onDestroyView() {
         super.onDestroyView();
+
+        //销毁事件
+        EventBus.getDefault().unregister(this);
 
         if (null != mLazyList) {
             mLazyList.close();
@@ -192,6 +204,17 @@ public class HistoryScene extends ToolbarScene
             mLazyList.close();
         }
         mLazyList = lazyList;
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，刷新历史记录标题与上传者显示
+     */
+    @SuppressLint("NotifyDataSetChanged")
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged e) {
+        if (null != mAdapter) {
+            mAdapter.notifyDataSetChanged();
+        }
     }
 
     private void updateView(boolean animation) {
@@ -375,7 +398,13 @@ public class HistoryScene extends ToolbarScene
             GalleryInfo gi = mLazyList.get(position);
             holder.thumb.load(SiteCacheKeyFactory.getThumbKey(gi.gid), gi.thumb);
             holder.title.setText(SiteUtils.getSuitableTitle(gi));
-            holder.uploader.setText(gi.uploader);
+            if (PrivacyMask.isEnabled()) {
+                holder.uploader.setText(null);
+                holder.uploader.setVisibility(View.GONE);
+            } else {
+                holder.uploader.setText(gi.uploader);
+                holder.uploader.setVisibility(View.VISIBLE);
+            }
             holder.rating.setRating(gi.rating);
             TextView category = holder.category;
             String newCategoryText = SiteUtils.getCategory(gi.category);

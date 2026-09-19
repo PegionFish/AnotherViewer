@@ -25,7 +25,8 @@ public class SimpleAdapter extends GalleryView.Adapter implements GalleryProvide
 
     private final GalleryProvider mProvider;
     private final ImageTexture.Uploader mUploader;
-    private boolean mShowIndex = true;
+    // protected for GalleryActivity.GalleryAdapter to mask page pixels
+    protected boolean mShowIndex = true;
 
     public SimpleAdapter(@NonNull GLRootView glRootView, @NonNull GalleryProvider provider) {
         mProvider = provider;

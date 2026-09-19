@@ -94,6 +94,7 @@ import com.hippo.anotherviewer.client.parser.GalleryPageUrlParser;
 import com.hippo.anotherviewer.dao.DownloadInfo;
 import com.hippo.anotherviewer.dao.QuickSearch;
 import com.hippo.anotherviewer.download.DownloadManager;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.event.SomethingNeedRefresh;
 import com.hippo.anotherviewer.ui.CommonOperations;
 import com.hippo.anotherviewer.ui.GalleryActivity;
@@ -423,6 +424,8 @@ public final class GalleryListScene extends BaseScene
             onRestore(savedInstanceState);
         }
         showReadProgress = Settings.getShowReadProgress();
+        //注册事件
+        EventBus.getDefault().register(this);
     }
 
     public void onInit() {
@@ -1155,6 +1158,10 @@ public final class GalleryListScene extends BaseScene
         if (!refresh.isBookmarkDrawNeed()) {
             return;
         }
+        //视图可能已销毁（场景被覆盖），此时无需重建抽屉
+        if (drawPager == null) {
+            return;
+        }
         LayoutInflater inflater = getLayoutInflater();
         bookmarksView = bookmarksViewBuild(inflater);
         if (subscriptionView == null) {
@@ -1168,6 +1175,17 @@ public final class GalleryListScene extends BaseScene
         DrawViewPagerAdapter pagerAdapter = new DrawViewPagerAdapter(views);
 
         drawPager.setAdapter(pagerAdapter);
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，刷新列表标题与上传者显示
+     */
+    @SuppressLint("NotifyDataSetChanged")
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged e) {
+        if (null != mAdapter) {
+            mAdapter.notifyDataSetChanged();
+        }
     }
 
     private boolean checkDoubleClickExit() {

@@ -39,6 +39,7 @@ import com.hippo.easyrecyclerview.MarginItemDecoration;
 import com.hippo.anotherviewer.SiteApplication;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.Settings;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.SiteCacheKeyFactory;
 import com.hippo.anotherviewer.client.SiteUtils;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
@@ -218,7 +219,13 @@ abstract class GalleryAdapterNew extends RecyclerView.Adapter<GalleryAdapterNew.
             case TYPE_LIST: {
                 holder.thumb.load(SiteCacheKeyFactory.getThumbKey(gi.gid), gi.thumb);
                 holder.title.setText(SiteUtils.getSuitableTitle(gi));
-                holder.uploader.setText(gi.uploader);
+                if (PrivacyMask.isEnabled()) {
+                    holder.uploader.setText(null);
+                    holder.uploader.setVisibility(View.GONE);
+                } else {
+                    holder.uploader.setText(gi.uploader);
+                    holder.uploader.setVisibility(View.VISIBLE);
+                }
                 if(!Settings.getShowGalleryRating()){
                     holder.rating.setVisibility(View.INVISIBLE);
                 }else {

@@ -33,6 +33,7 @@ import androidx.fragment.app.Fragment;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.SiteApplication;
 import com.hippo.anotherviewer.SiteDB;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.SiteCacheKeyFactory;
 import com.hippo.anotherviewer.client.SiteClient;
 import com.hippo.anotherviewer.client.SiteRequest;
@@ -41,12 +42,17 @@ import com.hippo.anotherviewer.client.SiteUtils;
 import com.hippo.anotherviewer.client.data.GalleryDetail;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
 import com.hippo.anotherviewer.client.data.GalleryTagGroup;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.sync.GalleryDetailTagsSyncTask;
 import com.hippo.anotherviewer.ui.GalleryActivity;
 import com.hippo.anotherviewer.ui.scene.gallery.detail.GalleryDetailScene;
 import com.hippo.util.ExceptionUtils;
 import com.hippo.lib.yorozuya.IntIdGenerator;
 import com.hippo.widget.LoadImageView;
+
+import org.greenrobot.eventbus.EventBus;
+import org.greenrobot.eventbus.Subscribe;
+import org.greenrobot.eventbus.ThreadMode;
 
 import java.lang.ref.WeakReference;
 
@@ -226,6 +232,38 @@ public class GalleryDetailPaneFragment extends Fragment implements View.OnClickL
     }
 
     @Override
+    public void onResume() {
+        super.onResume();
+        //注册事件
+        EventBus.getDefault().register(this);
+        // 恢复时按当前数据重新绑定，补上暂停期间错过的打码开关变化
+        if (mGalleryDetail != null) {
+            bindSecond();
+        } else if (mGalleryInfo != null) {
+            bindFirst();
+        }
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        //销毁事件
+        EventBus.getDefault().unregister(this);
+    }
+
+    /**
+     * eventBus 通知隐私打码开关变化，按当前已有数据重新绑定上传者与标签
+     */
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged e) {
+        if (mGalleryDetail != null) {
+            bindSecond();
+        } else if (mGalleryInfo != null) {
+            bindFirst();
+        }
+    }
+
+    @Override
     public void onClick(View v) {
         if (v == mRead) {
             onReadClick();
@@ -339,7 +377,7 @@ public class GalleryDetailPaneFragment extends Fragment implements View.OnClickL
         }
         mThumb.load(SiteCacheKeyFactory.getThumbKey(gi.gid), gi.thumb);
         mTitle.setText(SiteUtils.getSuitableTitle(gi));
-        mUploader.setText(gi.uploader);
+        bindUploaderText(gi);
         mCategory.setText(SiteUtils.getCategory(gi.category));
         mCategory.setTextColor(SiteUtils.getCategoryColor(gi.category));
         bindPages(gi.pages);
@@ -355,7 +393,7 @@ public class GalleryDetailPaneFragment extends Fragment implements View.OnClickL
         }
         mThumb.load(SiteCacheKeyFactory.getThumbKey(gd.gid), gd.thumb);
         mTitle.setText(SiteUtils.getSuitableTitle(gd));
-        mUploader.setText(gd.uploader);
+        bindUploaderText(gd);
         mCategory.setText(SiteUtils.getCategory(gd.category));
         mCategory.setTextColor(SiteUtils.getCategoryColor(gd.category));
         bindPages(gd.pages);
@@ -381,8 +419,26 @@ public class GalleryDetailPaneFragment extends Fragment implements View.OnClickL
         mPages.setText(getResources().getQuantityString(R.plurals.page_count, pages, pages));
     }
 
+    /** 绑定上传者：隐私打码开启时隐藏上传者，关闭时恢复。 */
+    private void bindUploaderText(@Nullable GalleryInfo info) {
+        if (mUploader == null) {
+            return;
+        }
+        if (PrivacyMask.isEnabled()) {
+            mUploader.setText(null);
+            mUploader.setVisibility(View.GONE);
+        } else {
+            mUploader.setText(info.uploader);
+            mUploader.setVisibility(View.VISIBLE);
+        }
+    }
+
     /** 简单标签渲染：每个标签组一行"组名: tag1, tag2, ..."。 */
     private void bindTags(@Nullable GalleryTagGroup[] tagGroups) {
+        if (PrivacyMask.isEnabled()) {
+            // 隐私打码开启时不显示标签，显示"无标签"空状态
+            tagGroups = new GalleryTagGroup[0];
+        }
         LinearLayout tags = mTags;
         Context context = getContext();
         if (tags == null || context == null) {

@@ -29,6 +29,7 @@ import androidx.annotation.Nullable
 import androidx.core.app.NotificationCompat
 import com.hippo.anotherviewer.R
 import com.hippo.anotherviewer.SiteApplication
+import com.hippo.anotherviewer.client.PrivacyMask
 import com.hippo.anotherviewer.client.data.GalleryInfo
 import com.hippo.anotherviewer.dao.DownloadInfo
 import com.hippo.anotherviewer.spider.SpiderDen
@@ -204,10 +205,12 @@ class DownloadUploadService : Service() {
         }
         val dir = SpiderDen.getExistingGalleryDownloadDir(info) ?: return 2
 
+        // 写回保护：打码期间落库的 "#<gid>" 标题不上送（服务端也拒绝该形态标题）
+        val maskedTitle = PrivacyMask.isMaskedTitle(info.title)
         val request = WebUiUploadModels.UploadInitRequest().apply {
             token = spiderInfo.token
-            title = info.title
-            titleJpn = info.titleJpn
+            title = if (maskedTitle) null else info.title
+            titleJpn = if (maskedTitle) null else info.titleJpn
             thumb = info.thumb
             category = info.category
             uploader = info.uploader

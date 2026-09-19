@@ -41,6 +41,7 @@ import com.hippo.conaco.Unikery;
 import com.hippo.drawable.PreciselyClipDrawable;
 import com.hippo.anotherviewer.SiteApplication;
 import com.hippo.anotherviewer.R;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.lib.image.Image;
 import com.hippo.util.DrawableManager;
 
@@ -277,6 +278,14 @@ public class LoadImageViewNew extends FixedAspectImageView implements Unikery<Im
 
     @Override
     public boolean onGetValue(@NonNull Image value, int source) {
+        if (PrivacyMask.isEnabled()) {
+            clearDrawable();
+            Drawable placeholder = DrawableManager.getVectorDrawable(getContext(), R.drawable.privacy_mask_placeholder);
+            onPreSetImageDrawable(placeholder, true);
+            setImageDrawable(placeholder);
+            return true;
+        }
+
         Drawable drawable;
         try {
             drawable = value.getDrawable();

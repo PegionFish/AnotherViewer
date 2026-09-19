@@ -82,11 +82,13 @@ import com.hippo.android.resource.AttrResources;
 import com.hippo.anotherviewer.AppConfig;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.Settings;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.data.GalleryInfo;
 import com.hippo.anotherviewer.SiteDB;
 import com.hippo.anotherviewer.dao.DownloadInfo;
 import com.hippo.anotherviewer.dao.HistoryInfo;
 import com.hippo.anotherviewer.event.GalleryActivityEvent;
+import com.hippo.anotherviewer.event.PrivacyMaskChanged;
 import com.hippo.anotherviewer.gallery.ArchiveGalleryProvider;
 import com.hippo.anotherviewer.gallery.DirGalleryProvider;
 import com.hippo.anotherviewer.gallery.DownloadGalleryProvider;
@@ -103,9 +105,11 @@ import com.hippo.anotherviewer.widget.FoldPolicy;
 import com.hippo.anotherviewer.widget.GalleryGuideView;
 import com.hippo.anotherviewer.widget.GalleryHeader;
 import com.hippo.anotherviewer.widget.ReversibleSeekBar;
+import com.hippo.lib.glgallery.GalleryPageView;
 import com.hippo.lib.glgallery.GalleryProvider;
 import com.hippo.lib.glgallery.GalleryView;
 import com.hippo.lib.glgallery.SimpleAdapter;
+import com.hippo.lib.glview.image.ImageWrapper;
 import com.hippo.lib.glview.view.GLRootView;
 import com.hippo.unifile.UniFile;
 import com.hippo.util.ExceptionUtils;
@@ -368,6 +372,19 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
         mPage = event.pagePosition;
         buildProvider();
         onCreateView(null);
+    }
+
+    /**
+     * eventbus 通知，内容打码开关切换后重新绑定可见页面。经 provider 的
+     * NotifyTask 走 GL 渲染线程（GalleryView.onDataChanged 仅在渲染线程生效）。
+     *
+     * @param event 通知数据对象
+     */
+    @Subscribe(threadMode = ThreadMode.MAIN)
+    public void onPrivacyMaskChanged(PrivacyMaskChanged event) {
+        if (mGalleryProvider != null) {
+            mGalleryProvider.notifyDataChanged();
+        }
     }
 
     private void onInit() {
@@ -1347,6 +1364,12 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
                 return;
             }
 
+            // 内容打码：除刷新外的操作（分享/保存/另存为）都会导出原图，一律拦截
+            if (PrivacyMask.isEnabled() && which != 0) {
+                Toast.makeText(GalleryActivity.this, R.string.privacy_mask_reader_placeholder, Toast.LENGTH_SHORT).show();
+                return;
+            }
+
             switch (which) {
                 case 0: // Refresh
                     mGalleryProvider.removeCache(page);
@@ -1715,6 +1738,28 @@ public class GalleryActivity extends SiteActivity implements SeekBar.OnSeekBarCh
 
         public GalleryAdapter(@NonNull GLRootView glRootView, @NonNull GalleryProvider provider) {
             super(glRootView, provider);
+        }
+
+        @Override
+        public void onPageSucceed(int index, ImageWrapper image) {
+            // 内容打码：图片照常在后台下载（预热缓存/统计不变），但不上屏，
+            // 页面只显示占位信息（对齐 WebUI 的灰占位行为）
+            if (PrivacyMask.isEnabled()) {
+                GalleryPageView page = mGalleryView != null ? mGalleryView.findPageByIndex(index) : null;
+                if (page != null) {
+                    page.showInfo();
+                    page.setImage(null);
+                    if (mShowIndex) {
+                        page.setPage(index + 1);
+                    } else {
+                        page.hidePage();
+                    }
+                    page.setProgress(GalleryPageView.PROGRESS_GONE);
+                    page.setError(getString(R.string.privacy_mask_reader_placeholder), mGalleryView);
+                }
+                return;
+            }
+            super.onPageSucceed(index, image);
         }
 
         @Override

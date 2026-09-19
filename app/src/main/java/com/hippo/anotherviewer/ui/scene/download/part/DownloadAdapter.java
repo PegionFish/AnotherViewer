@@ -41,6 +41,7 @@ import com.hippo.easyrecyclerview.EasyRecyclerView;
 import com.hippo.anotherviewer.SiteDB;
 import com.hippo.anotherviewer.R;
 import com.hippo.anotherviewer.Settings;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.SiteCacheKeyFactory;
 import com.hippo.anotherviewer.client.SiteUtils;
 import com.hippo.anotherviewer.dao.DownloadInfo;
@@ -193,7 +194,11 @@ public class DownloadAdapter extends RecyclerView.Adapter<DownloadAdapter.Downlo
 
 
             holder.title.setText(title);
-            holder.uploader.setText(info.uploader);
+            if (PrivacyMask.isEnabled()) {
+                holder.uploader.setText(null);
+            } else {
+                holder.uploader.setText(info.uploader);
+            }
 
             // Handle rating display for imported archives
             if (info.archiveUri != null && info.archiveUri.startsWith("content://")) {
@@ -297,7 +302,7 @@ public class DownloadAdapter extends RecyclerView.Adapter<DownloadAdapter.Downlo
     }
 
     private void bindState(DownloadHolder holder, DownloadInfo info, String state) {
-        holder.uploader.setVisibility(View.VISIBLE);
+        holder.uploader.setVisibility(PrivacyMask.isEnabled() ? View.GONE : View.VISIBLE);
         holder.rating.setVisibility(View.VISIBLE);
         holder.category.setVisibility(View.VISIBLE);
         holder.readProgress.setVisibility(View.VISIBLE);

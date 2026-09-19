@@ -23,6 +23,7 @@ import androidx.annotation.Nullable;
 
 import com.hippo.anotherviewer.Settings;
 import com.hippo.anotherviewer.SiteApplication;
+import com.hippo.anotherviewer.client.PrivacyMask;
 import com.hippo.anotherviewer.client.SiteCookieStore;
 import com.hippo.anotherviewer.client.SiteUrl;
 import com.hippo.anotherviewer.client.SiteUtils;
@@ -1535,8 +1536,11 @@ public final class WebUiSyncEngine {
     private void copyGalleryToDto(GalleryInfo gi, WebUiSyncModels.GalleryBase dto) {
         dto.gid = gi.gid;
         dto.token = gi.token;
-        dto.title = gi.title;
-        dto.titleJpn = gi.titleJpn;
+        // 写回保护：打码期间落库的 "#<gid>" 标题不上送（服务端也拒绝该形态标题），
+        // gid/token 等功能字段照常同步
+        boolean maskedTitle = PrivacyMask.isMaskedTitle(gi.title);
+        dto.title = maskedTitle ? null : gi.title;
+        dto.titleJpn = maskedTitle ? null : gi.titleJpn;
         dto.thumb = gi.thumb;
         dto.category = gi.category;
         dto.posted = gi.posted;
