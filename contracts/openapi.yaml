@@ -57,6 +57,8 @@ tags:
     description: Health check and metrics
   - name: Privacy
     description: Server-side content-mask switch state (admin advanced settings)
+  - name: Integrity
+    description: Download file integrity (peer hash evidence, page repair, reverify, scrub report)
 
 paths:
   # ============================================================
@@ -2933,6 +2935,217 @@ paths:
               schema:
                 $ref: '#/components/schemas/DashboardResponse'
 
+  # ============================================================
+  # Integrity (download file integrity: peer hash evidence, page
+  # repair, full re-verification, scrub report)
+  # ============================================================
+  /api/v1/integrity/hashes/{gid}:
+    post:
+      tags: [Integrity]
+      operationId: pushIntegrityHashes
+      summary: >-
+        Push the App's per-page hashes for a gallery as peer evidence
+        (peer_hash); never touches the server's own baseline
+      description: |
+        Android uploads the per-page hash list it computed for its downloaded
+        page files during sync. The server stores the entries as peer evidence
+        in the peer_hash table (keyed by gid/page with the uploading device as
+        peer); the server's own page_file_hash baseline is never overwritten.
+        Later comparisons surface baseline-vs-peer divergences in
+        GET /api/v1/integrity/report. Repeated pushes for the same gid/page
+        upsert the peer evidence.
+      parameters:
+        - name: gid
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: Gallery ID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                $ref: '#/components/schemas/IntegrityHashEntry'
+      responses:
+        '200':
+          description: >-
+            Entries accepted and stored as peer evidence. An empty list is a
+            no-op (accepted=0).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrityHashAcceptResponse'
+        '400':
+          description: >-
+            Invalid payload (malformed hex digest or unsupported algo)
+            (code=INTEGRITY_INVALID_HASH)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '401':
+          description: Invalid or missing API token
+
+  /api/v1/integrity/refresh/{gid}/{page}:
+    post:
+      tags: [Integrity]
+      operationId: repairIntegrityPage
+      summary: >-
+        Force-heal one page: fetch from source bypassing the local pool,
+        verify, overwrite, refresh the baseline, clear the page cache
+      description: |
+        Single-page forced repair. The page is fetched from the Gallery Site
+        bypassing the local pool, validated (V gate), the local file is
+        overwritten, the hash baseline is refreshed with origin=heal, and the
+        page cache is cleared. The outcome is returned synchronously;
+        attribution is diagnostic (log semantics) but included so maintenance
+        UIs can display it. On failure the local file is left untouched.
+      parameters:
+        - name: gid
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: Gallery ID
+        - name: page
+          in: path
+          required: true
+          schema:
+            type: integer
+            minimum: 1
+          description: 1-based page number
+      responses:
+        '200':
+          description: >-
+            Repair attempt finished. Both outcomes ride 200: status=healed on
+            success, status=failed (with attribution + message) when the
+            source fetch or V-gate verification did not produce a valid file.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RepairResult'
+        '400':
+          description: 'Invalid page number (code=INTEGRITY_INVALID_PAGE)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '401':
+          description: Invalid or missing API token
+        '404':
+          description: 'No local download row or page file for this gid+page (code=INTEGRITY_NOT_FOUND)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+
+  /api/v1/integrity/reverify/{gid}:
+    post:
+      tags: [Integrity]
+      operationId: reverifyIntegrityGallery
+      summary: Start (or interrupt) a full per-page re-verification of one gallery (REVERIFY job)
+      description: |
+        Aligned with the unified background-job mode (plan 2026-08-06). A call
+        without a body (or interrupt=false) submits a REVERIFY job that
+        re-reads every page file on disk, hashes it and compares against the
+        baseline. Progress is polled via GET /api/v1/jobs/{jobId}
+        (processed/total = pages); the final ReverifyStats arrive as
+        JobDto.result on COMPLETED. One active job per type (same as
+        EXPORT/IMPORT/RESTORE): re-submitting while a REVERIFY job is active
+        is rejected with 409 CONFLICT. The run is idempotent and re-entrant:
+        a finished run can be restarted at any time, and verification never
+        mutates the baseline (only origin=heal refreshes do).
+
+        Interrupt: POST again with {"interrupt": true} to set the cooperative
+        stop flag on the active REVERIFY job (regardless of the gid path
+        parameter — jobs are single-instance per type). The run finishes the
+        current page and completes with partial ReverifyStats
+        (interrupted=true) at state=COMPLETED, not FAILED. When no REVERIFY
+        job is active, the interrupt call returns 404
+        (code=NO_ACTIVE_JOB).
+      parameters:
+        - name: gid
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+          description: Gallery ID to re-verify
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReverifyRequest'
+      responses:
+        '202':
+          description: >-
+            REVERIFY job accepted (start) or interrupt flag delivered
+            (interrupt). Poll GET /api/v1/jobs/{jobId}; the stats land as
+            JobDto.result.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobSubmitResponse'
+        '401':
+          description: Invalid or missing API token
+        '404':
+          description: >-
+            No local download row for this gid (code=INTEGRITY_NOT_FOUND), or
+            interrupt requested while no REVERIFY job is active
+            (code=NO_ACTIVE_JOB)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+        '409':
+          description: 'Another REVERIFY job is already active (code=CONFLICT)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiErrorEnvelope'
+
+  /api/v1/integrity/report:
+    get:
+      tags: [Integrity]
+      operationId: getIntegrityReport
+      summary: Latest integrity report (last scrub run, bad pages, baseline-vs-peer divergences)
+      description: |
+        Snapshot of the most recent monthly scrub run and its findings. The
+        page/pageSize parameters slice the badPages and divergences lists
+        independently (each list carries its own unfiltered total); the run
+        summary is never paginated. When no scrub has run yet, lastRun is
+        null and both lists are empty.
+      parameters:
+        - name: page
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 0
+          description: Page number (0-based), applied to badPages and divergences
+        - name: pageSize
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 20
+          description: Results per page, clamped to 1..200, applied to both lists
+      responses:
+        '200':
+          description: Integrity report
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IntegrityReport'
+        '401':
+          description: Invalid or missing API token
+
 # ==============================================================
 # Components
 # ==============================================================
@@ -4483,8 +4696,8 @@ components:
     # ----------------------------------------------------------
     JobType:
       type: string
-      enum: [IMPORT, EXPORT, RESTORE, CACHE_CLEAR]
-      description: Background job type (A2)
+      enum: [IMPORT, EXPORT, RESTORE, CACHE_CLEAR, REVERIFY]
+      description: Background job type (A2); REVERIFY added by the download file integrity feature (C1)
 
     JobState:
       type: string
@@ -4538,7 +4751,8 @@ components:
             Terminal result, shaped by type (A1): IMPORT → EhImportResponse;
             EXPORT → {downloadUrl: "/api/v1/backup/export/{jobId}",
             filename: "anotherviewer-backup-<stamp>.zip", sizeBytes};
-            RESTORE → {success, message}; CACHE_CLEAR → {removed, total}
+            RESTORE → {success, message}; CACHE_CLEAR → {removed, total};
+            REVERIFY → ReverifyStats
 
     JobSubmitResponse:
       type: object
@@ -5699,6 +5913,189 @@ components:
       properties:
         enabled:
           type: boolean
+
+    # ----------------------------------------------------------
+    # Integrity
+    # ----------------------------------------------------------
+    IntegrityHashEntry:
+      type: object
+      required: [page, ext, size, hash]
+      description: One page-hash entry pushed by the App (peer evidence only)
+      properties:
+        page:
+          type: integer
+          minimum: 1
+          description: 1-based page number
+        ext:
+          type: string
+          description: Page file extension without the dot (jpg/jpeg/png/gif/webp)
+        size:
+          type: integer
+          format: int64
+          description: File size in bytes as hashed by the App
+        hash:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: SHA-256 digest of the page file (64 hex characters)
+        algo:
+          type: string
+          enum: [SHA-256]
+          default: SHA-256
+          description: Hash algorithm; only SHA-256 is defined
+
+    IntegrityHashAcceptResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted:
+          type: integer
+          description: Number of entries stored as peer evidence (0 for an empty list)
+
+    RepairResult:
+      type: object
+      required: [status]
+      properties:
+        status:
+          type: string
+          enum: [healed, failed]
+          description: healed = file overwritten and baseline refreshed (origin=heal); failed = local file untouched
+        attribution:
+          type: string
+          enum: [local_corrupt, source_changed]
+          nullable: true
+          description: >-
+            Diagnostic only (log semantics): local_corrupt = the fresh source
+            copy differs from the corrupt local file; source_changed = the
+            source itself changed vs the baseline. null when status=healed or
+            the cause is undetermined.
+        message:
+          type: string
+          nullable: true
+          description: Human-readable detail when status=failed
+
+    ReverifyRequest:
+      type: object
+      properties:
+        interrupt:
+          type: boolean
+          default: false
+          description: >-
+            true = set the cooperative stop flag on the active REVERIFY job
+            (finishes the current page, completes with partial stats);
+            false/absent = submit a new REVERIFY job for the gallery.
+
+    ReverifyStats:
+      type: object
+      required: [total, ok, bad]
+      description: Terminal result of a REVERIFY job (JobDto.result)
+      properties:
+        total:
+          type: integer
+          description: Pages found for the gallery at run start
+        ok:
+          type: integer
+          description: Pages whose on-disk hash matched the baseline
+        bad:
+          type: integer
+          description: Pages missing, unreadable or hash-mismatched
+        refreshed:
+          type: integer
+          nullable: true
+          description: Pages whose baseline was refreshed with origin=heal during the run; null when the run performed no healing
+        interrupted:
+          type: boolean
+          default: false
+          description: true when the run stopped early via the interrupt flag (counts cover processed pages only)
+
+    IntegrityScrubRunDto:
+      type: object
+      description: Summary of the most recent scrub run
+      properties:
+        startedAt:
+          type: integer
+          format: int64
+          description: Run start (ms epoch)
+        finishedAt:
+          type: integer
+          format: int64
+          nullable: true
+          description: Run end (ms epoch); null while the run is still going
+        totalPages:
+          type: integer
+          description: Page files examined by the run
+        badPages:
+          type: integer
+          description: Pages the run flagged bad
+        divergences:
+          type: integer
+          description: Baseline-vs-peer hash divergences the run found
+
+    IntegrityBadPageDto:
+      type: object
+      description: One bad-page entry of the latest scrub run
+      properties:
+        gid:
+          type: integer
+          format: int64
+        page:
+          type: integer
+          description: 1-based page number
+        verdict:
+          type: string
+          enum: [MISSING, MISMATCH, READ_ERROR]
+          description: MISSING = no file on disk; MISMATCH = hash differs from baseline; READ_ERROR = file present but unreadable
+        size:
+          type: integer
+          format: int64
+          nullable: true
+          description: On-disk file size in bytes; null when the file is missing
+        hashShort:
+          type: string
+          nullable: true
+          description: Short digest for display (first 12 hex characters of the computed hash); null when the file is missing or unreadable
+
+    IntegrityDivergenceDto:
+      type: object
+      description: One baseline-vs-peer hash divergence
+      properties:
+        gid:
+          type: integer
+          format: int64
+        page:
+          type: integer
+          description: 1-based page number
+        localHash:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: Server baseline hash (page_file_hash)
+        peerHash:
+          type: string
+          pattern: '^[0-9a-fA-F]{64}$'
+          description: Peer (App) hash (peer_hash)
+
+    IntegrityReport:
+      type: object
+      description: Latest integrity report (GET /api/v1/integrity/report)
+      properties:
+        lastRun:
+          description: Most recent scrub run; null when no scrub has run yet
+          $ref: '#/components/schemas/IntegrityScrubRunDto'
+        badPages:
+          type: array
+          description: Paged slice of the bad-page list
+          items:
+            $ref: '#/components/schemas/IntegrityBadPageDto'
+        badPageTotal:
+          type: integer
+          description: Unfiltered size of the bad-page list
+        divergences:
+          type: array
+          description: Paged slice of the baseline-vs-peer divergence list
+          items:
+            $ref: '#/components/schemas/IntegrityDivergenceDto'
+        divergenceTotal:
+          type: integer
+          description: Unfiltered size of the divergence list
 
     # ----------------------------------------------------------
     # Common
