@@ -5,6 +5,9 @@ import { KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
 import HistoryView from '../HistoryView.vue'
 import { historyApi } from '@/api/history'
 import type { HistoryItem } from '@/api/history'
+import { galleryApi } from '@/api/gallery'
+import { commentApi } from '@/api/comment'
+import type { GalleryDetail } from '@/types'
 import { filterSlotsApi } from '@/api/filterSlots'
 import { preferencesApi } from '@/api/preferences'
 import { usePreferencesStore } from '@/stores/preferences'
@@ -23,6 +26,14 @@ vi.mock('@/api/history', () => ({
 
 vi.mock('@/api/filterSlots', () => ({
   filterSlotsApi: { get: vi.fn(), put: vi.fn() },
+}))
+
+vi.mock('@/api/gallery', () => ({
+  galleryApi: { getDetail: vi.fn() },
+}))
+
+vi.mock('@/api/comment', () => ({
+  commentApi: { listComments: vi.fn(), postComment: vi.fn(), voteComment: vi.fn() },
 }))
 
 vi.mock('@/api/preferences', () => ({
@@ -77,11 +88,43 @@ function seedPrefs(general: Record<string, unknown>): void {
   store.prefs = { general } as unknown as Preferences
 }
 
+/* ---------------------- 双栏断点桩（T3，平板对齐） ---------------------- */
+
+type MqlListener = (event: MediaQueryListEvent) => void
+
+/**
+ * happy-dom 的 matchMedia 对 min-width 查询恒 true（默认视口 1024px），会把
+ * 视图直接推进宽屏双栏。断点桩把判定钉死：默认窄屏（现状行为回归保护），
+ * 双栏用例显式 stubMatchMedia(true)，setWide() 模拟跨 960px。
+ */
+let setWide: (matches: boolean) => void = () => {}
+
+function stubMatchMedia(matches: boolean): void {
+  const listeners = new Set<MqlListener>()
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      addEventListener: (_type: string, cb: MqlListener) => {
+        listeners.add(cb)
+      },
+      removeEventListener: (_type: string, cb: MqlListener) => {
+        listeners.delete(cb)
+      },
+    })),
+  )
+  setWide = (next: boolean) => {
+    for (const cb of [...listeners]) cb({ matches: next } as MediaQueryListEvent)
+  }
+}
+
 describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
     setActivePinia(createPinia())
+    stubMatchMedia(false)
     pushMock.mockClear()
     vi.mocked(historyApi.clearHistory).mockResolvedValue({ success: true })
     vi.mocked(filterSlotsApi.get).mockResolvedValue([])
@@ -91,6 +134,7 @@ describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
   afterEach(() => {
     setPrivacyMaskEnabled(false)
     wrapper?.unmount()
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -552,5 +596,104 @@ describe('HistoryView (W3-F3 A4 单列密信息行 + 服务端分页)', () => {
       await flushPromises()
       expect(document.querySelector('.dialog-scrim')).not.toBeNull()
     })
+  })
+})
+
+describe('HistoryView — 宽屏双栏（T3 平板对齐，2026-09-20 定案）', () => {
+  let wrapper: VueWrapper
+
+  function detailFixture(overrides: Partial<GalleryDetail> = {}): GalleryDetail {
+    return {
+      gid: 42,
+      token: 'abc123',
+      title: 'Detail Gallery',
+      titleJpn: '',
+      thumb: '',
+      category: 2,
+      posted: '',
+      uploader: '',
+      rating: 4,
+      rated: false,
+      simpleLanguage: '',
+      simpleTags: [],
+      thumbWidth: 0,
+      thumbHeight: 0,
+      pages: 10,
+      favoriteSlot: -2,
+      favoriteName: '',
+      tags: [],
+      imageUrl: '',
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    stubMatchMedia(true)
+    pushMock.mockClear()
+    vi.mocked(filterSlotsApi.get).mockResolvedValue([])
+    vi.mocked(preferencesApi.get).mockReturnValue(new Promise(() => {})) // never settles
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    vi.mocked(commentApi.listComments).mockResolvedValue({ comments: [] })
+  })
+
+  afterEach(() => {
+    setPrivacyMaskEnabled(false)
+    wrapper?.unmount()
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  async function mountWide(items: HistoryItem[]) {
+    vi.mocked(historyApi.listHistory).mockResolvedValue({ history: items, total: items.length })
+    wrapper = mount(HistoryView)
+    await flushPromises()
+    await flushPromises()
+    return wrapper
+  }
+
+  it('宽屏：无选中 → 占位符；点选历史行 → 右栏原位加载详情（token 透传）、路由不变', async () => {
+    await mountWide([makeHistoryItem({ gid: 42, token: 'abc123' })])
+
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+
+    expect(pushMock).not.toHaveBeenCalled()
+    expect(wrapper.find('.detail-header__title').text()).toBe('Detail Gallery')
+    expect(galleryApi.getDetail).toHaveBeenCalledWith(42, 'abc123')
+  })
+
+  it('宽屏：Esc 先清除选中回到占位符', async () => {
+    await mountWide([makeHistoryItem({ gid: 42, token: 'abc123' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.detail-header__title').exists()).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+    expect(pushMock).not.toHaveBeenCalled()
+  })
+
+  it('跨 960px 阈值来回：选中态保留，回宽后详情不重载', async () => {
+    await mountWide([makeHistoryItem({ gid: 42, token: 'abc123' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
+
+    setWide(false)
+    await flushPromises()
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="gallery-detail-pane"]').exists()).toBe(true)
+
+    setWide(true)
+    await flushPromises()
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(true)
+    expect(wrapper.find('.detail-header__title').text()).toBe('Detail Gallery')
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
   })
 })

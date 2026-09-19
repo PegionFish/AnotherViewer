@@ -1,203 +1,229 @@
 <template>
   <div class="home" :style="homeBannerOffset">
-    <!-- EH 熔断提示（plan-2026-08-30）：只读本地内容仍可用；「重新连接」探测
-         成功后刷新列表。放在视图根顶部一行（ContentLayout 外）。 -->
-    <AvailabilityBanner
-      v-if="availability.state === 'down'"
-      class="home__banner"
-      @refresh="onRefresh"
-    />
-    <!-- Floating SearchBar (Android: the search bar floats over the list;
-         the list clears it via --gallery-padding-top-search-bar). Kept below
-         the pull-to-refresh header (z 5) but above the scrolling content. -->
-    <div class="home__searchbar">
-      <SearchBar
-        :state="searchState"
-        :title="searchTitle"
-        :query="keyword"
-        hint="搜索画廊"
-        :left-icon="null"
-        right-icon="magnify-dark"
-        :suggestions="suggestions"
-        filter-visible
-        :filter-panel-open="filterPanelOpen"
-        :filter-active="activeFilterChips.length > 0"
-        :filter-chips="activeFilterChips"
-        @update:query="keyword = $event"
-        @search="applySearch"
-        @click-title="enterSearchMode"
-        @click-action="enterSearchMode"
-        @back="leaveSearchMode"
-        @select-suggestion="onSelectSuggestion"
-        @dismiss-suggestion="onDismissSuggestion"
-        @click-filter="filterPanelOpen = !filterPanelOpen"
-        @remove-filter-chip="onRemoveFilterChip"
-        @clear-filter-chips="onClearFilters"
-      />
-      <!-- Wave-1 1a: anchored PC filter popover, coexists with the search
-           input (keywordMode + save-quick-search wiring mirrors SearchView,
-           plan-2026-09-05 C3 — the radio and the save action were dead
-           without it). -->
-      <FilterPanel
-        v-model:open="filterPanelOpen"
-        v-model:keyword-mode="keywordMode"
-        :filters="activeFilters"
-        @update:filters="applyFilters"
-        @search="onFilterPanelSearch"
-        @save-quick-search="openSaveQuickSearch"
-      />
-    </div>
-
-    <!-- 分页条（A4 定案，W3-F1）：与下载/历史页同构的固定分页导航——页码
-         窗口 + 前后页 + 跳页。上游（EH 站点列表）固定每页 25 条、没有条数
-         档位，故不提供条/页下拉。total ≤ pageSize 隐藏（Android
-         PaginationIndicator 语义）；toplist 无上游分页（total=返回行数），
-         同样不渲染。固定在滚动区上方、吃浮动搜索条清理位。 -->
-    <nav
-      v-if="showPagination"
-      class="pagination-bar home__pagination"
-      data-testid="home-pagination"
-      aria-label="首页分页"
+    <!-- 平板对齐（T3，2026-09-20 定案）：宽屏（≥960px）双栏——列表恒驻左栏
+         （360px 固定宽）+ 详情右栏；无选中渲染占位符（不自动选中）。窄屏
+         (<960px) 退化为单列列表，行为与现状完全一致（点击进整页详情）。
+         返回语义（宽屏有选中）：Esc / 浏览器返回先清选中，再按一次才真正
+         离开页面（拦截在 TwoPaneLayout，宿主只接 clear-selection）。 -->
+    <TwoPaneLayout
+      :has-selection="selectedGid !== null"
+      placeholder="从左侧选择一个画廊查看详情"
+      @clear-selection="clearSelection"
     >
-      <span class="pagination-bar__info">
-        第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
-      </span>
-      <span class="pagination-bar__pages" role="group" aria-label="页码">
-        <button
-          type="button"
-          class="pagination-bar__page"
-          :disabled="currentPage <= 1"
-          aria-label="上一页"
-          @click="jumpToPage(currentPage - 1)"
-        >
-          ‹
-        </button>
-        <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
-          <button
-            v-if="item !== '…'"
-            type="button"
-            class="pagination-bar__page"
-            :class="{ 'pagination-bar__page--active': item === currentPage }"
-            :aria-current="item === currentPage ? 'page' : undefined"
-            :aria-label="`第 ${item} 页`"
-            @click="jumpToPage(item)"
-          >
-            {{ item }}
-          </button>
-          <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
-        </template>
-        <button
-          type="button"
-          class="pagination-bar__page"
-          :disabled="currentPage >= totalPages"
-          aria-label="下一页"
-          @click="jumpToPage(currentPage + 1)"
-        >
-          ›
-        </button>
-      </span>
-      <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留——站点最新列表是流式
-           内容， arbitrary 页码没有目标语义。页码窗口/前后页保留。 -->
-    </nav>
-
-    <!-- ContentLayout: loading spinner / sadpanda empty tip / error retry /
-         pull-to-refresh header（无限滚动页脚已随 A4 分页退役）. -->
-    <ContentLayout
-      ref="contentLayoutRef"
-      class="home__content"
-      :state="contentState"
-      :refreshing="refreshing"
-      empty-text="这里什么都没有"
-      :error-text="errorText"
-      @update:refreshing="refreshing = $event"
-      @refresh="onRefresh"
-      @retry="onRefresh"
-    >
-      <template #empty>
-        <AppIcon name="sad-panda-primary" size="64px" class="home__empty-icon" />
-        <p class="home__empty-text">还没有画廊数据&#10;去搜索或登录后开始浏览</p>
-        <div class="home__empty-actions">
-          <button
-            type="button"
-            class="home__empty-cta"
-            @click.stop="goSearch"
-          >
-            去搜索
-          </button>
-          <button
-            v-if="!authStore.isAuthenticated"
-            type="button"
-            class="home__empty-cta home__empty-cta--ghost"
-            @click.stop="goLogin"
-          >
-            登录
-          </button>
+      <template #list="{ wide }">
+        <!-- EH 熔断提示（plan-2026-08-30）：只读本地内容仍可用；「重新连接」
+             探测成功后刷新列表。列表栏顶部一行（与浮动搜索条同步避让）。 -->
+        <AvailabilityBanner
+          v-if="availability.state === 'down'"
+          class="home__banner"
+          @refresh="onRefresh"
+        />
+        <!-- Floating SearchBar (Android: the search bar floats over the list;
+             the list clears it via --gallery-padding-top-search-bar). Kept below
+             the pull-to-refresh header (z 5) but above the scrolling content. -->
+        <div class="home__searchbar">
+          <SearchBar
+            :state="searchState"
+            :title="searchTitle"
+            :query="keyword"
+            hint="搜索画廊"
+            :left-icon="null"
+            right-icon="magnify-dark"
+            :suggestions="suggestions"
+            filter-visible
+            :filter-panel-open="filterPanelOpen"
+            :filter-active="activeFilterChips.length > 0"
+            :filter-chips="activeFilterChips"
+            @update:query="keyword = $event"
+            @search="applySearch"
+            @click-title="enterSearchMode"
+            @click-action="enterSearchMode"
+            @back="leaveSearchMode"
+            @select-suggestion="onSelectSuggestion"
+            @dismiss-suggestion="onDismissSuggestion"
+            @click-filter="filterPanelOpen = !filterPanelOpen"
+            @remove-filter-chip="onRemoveFilterChip"
+            @clear-filter-chips="onClearFilters"
+          />
+          <!-- Wave-1 1a: anchored PC filter popover, coexists with the search
+               input (keywordMode + save-quick-search wiring mirrors SearchView,
+               plan-2026-09-05 C3 — the radio and the save action were dead
+               without it). -->
+          <FilterPanel
+            v-model:open="filterPanelOpen"
+            v-model:keyword-mode="keywordMode"
+            :filters="activeFilters"
+            @update:filters="applyFilters"
+            @search="onFilterPanelSearch"
+            @save-quick-search="openSaveQuickSearch"
+          />
         </div>
-        <p v-if="ehSessionChecked && !ehSignedIn" class="home__empty-eh-hint">
-          未登录 EH 会话，画廊可能无法阅读
-          <button type="button" class="home__empty-eh-link" @click.stop="goEhSession">
-            前往配置
-          </button>
-        </p>
-      </template>
-      <!-- Toplist feed: lightweight ranked rows (rank + tag + value).
-           Feed mode replaces the gallery list entirely. -->
-      <div v-if="feedMode === 'toplist'" class="home__toplist">
-        <!-- 打码模式下后端把 value 替换为 #gid、href 清空——行退化为不可点的
-             div（href 为空时不渲染 <a>，避免点击原地刷新）。 -->
-        <component
-          :is="item.href ? 'a' : 'div'"
-          v-for="(item, index) in topList"
-          :key="item.gid ?? index"
-          class="home__toplist-row"
-          :href="item.href || undefined"
-          :target="item.href ? '_blank' : undefined"
-          :rel="item.href ? 'noopener' : undefined"
-          :data-testid="`toplist-row-${index}`"
-        >
-          <span class="home__toplist-rank">{{ index + 1 }}</span>
-          <span class="home__toplist-tag">{{ item.tag }}</span>
-          <span class="home__toplist-value">{{ item.value }}</span>
-        </component>
-      </div>
-      <!-- A4 定案（W3-F1）：与下载/历史页完全同构的全宽单列密信息行——共享
-           AppListRow。用户定案（2026-09-07）：整行点击进 gallery 详情，
-           「主体直达阅读」为下载页专属交互。 -->
-      <div v-else class="home__list" :class="{ 'home__list--bar': showPagination }">
-        <AppListRow
-          v-for="row in rows"
-          :key="row.gallery.gid"
-          :id="row.gallery.gid"
-          :gid="row.gallery.gid"
-          :title="displayTitle(row.gallery)"
-          :subtitle="displaySubtitle(row.gallery)"
-          :thumb="row.gallery.thumb"
-          @open="openDetail"
-          @read="openDetail"
-        >
-          <!-- 元信息行：分类 chip + 页数（元数据优先，对齐 GalleryCard）。 -->
-          <template #meta>
-            <CategoryChip v-if="row.chip" :category="row.chip" />
-            <span v-if="row.gallery.pages > 0" class="home__row-pages">
-              {{ row.gallery.pages }}P
-            </span>
-          </template>
-        </AppListRow>
-      </div>
-    </ContentLayout>
 
-    <!-- FAB pair: primary = back to top (Android `v_go_to`), secondary =
-         refresh. The cluster once expanded speed-dial style, but after the
-         list/grid toggle retired with the waterfall (A4) only refresh
-         remained — a single action behind an expand step is pure friction,
-         so both FABs are permanently visible (FabLayout alwaysVisible). -->
-    <FabLayout
-      always-visible
-      primary-icon="go-to-dark"
-      :actions="fabActions"
-      @click-primary="onPrimaryFab"
-      @click-secondary="onSecondaryFab"
-    />
+        <!-- 分页条（A4 定案，W3-F1）：与下载/历史页同构的固定分页导航——页码
+             窗口 + 前后页 + 跳页。上游（EH 站点列表）固定每页 25 条、没有条数
+             档位，故不提供条/页下拉。total ≤ pageSize 隐藏（Android
+             PaginationIndicator 语义）；toplist 无上游分页（total=返回行数），
+             同样不渲染。固定在滚动区上方、吃浮动搜索条清理位。 -->
+        <nav
+          v-if="showPagination"
+          class="pagination-bar home__pagination"
+          data-testid="home-pagination"
+          aria-label="首页分页"
+        >
+          <span class="pagination-bar__info">
+            第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
+          </span>
+          <span class="pagination-bar__pages" role="group" aria-label="页码">
+            <button
+              type="button"
+              class="pagination-bar__page"
+              :disabled="currentPage <= 1"
+              aria-label="上一页"
+              @click="jumpToPage(currentPage - 1)"
+            >
+              ‹
+            </button>
+            <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+              <button
+                v-if="item !== '…'"
+                type="button"
+                class="pagination-bar__page"
+                :class="{ 'pagination-bar__page--active': item === currentPage }"
+                :aria-current="item === currentPage ? 'page' : undefined"
+                :aria-label="`第 ${item} 页`"
+                @click="jumpToPage(item)"
+              >
+                {{ item }}
+              </button>
+              <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+            </template>
+            <button
+              type="button"
+              class="pagination-bar__page"
+              :disabled="currentPage >= totalPages"
+              aria-label="下一页"
+              @click="jumpToPage(currentPage + 1)"
+            >
+              ›
+            </button>
+          </span>
+          <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留——站点最新列表是流式
+               内容， arbitrary 页码没有目标语义。页码窗口/前后页保留。 -->
+        </nav>
+
+        <!-- ContentLayout: loading spinner / sadpanda empty tip / error retry /
+             pull-to-refresh header（无限滚动页脚已随 A4 分页退役）. -->
+        <ContentLayout
+          ref="contentLayoutRef"
+          class="home__content"
+          :state="contentState"
+          :refreshing="refreshing"
+          empty-text="这里什么都没有"
+          :error-text="errorText"
+          @update:refreshing="refreshing = $event"
+          @refresh="onRefresh"
+          @retry="onRefresh"
+        >
+          <template #empty>
+            <AppIcon name="sad-panda-primary" size="64px" class="home__empty-icon" />
+            <p class="home__empty-text">还没有画廊数据&#10;去搜索或登录后开始浏览</p>
+            <div class="home__empty-actions">
+              <button
+                type="button"
+                class="home__empty-cta"
+                @click.stop="goSearch"
+              >
+                去搜索
+              </button>
+              <button
+                v-if="!authStore.isAuthenticated"
+                type="button"
+                class="home__empty-cta home__empty-cta--ghost"
+                @click.stop="goLogin"
+              >
+                登录
+              </button>
+            </div>
+            <p v-if="ehSessionChecked && !ehSignedIn" class="home__empty-eh-hint">
+              未登录 EH 会话，画廊可能无法阅读
+              <button type="button" class="home__empty-eh-link" @click.stop="goEhSession">
+                前往配置
+              </button>
+            </p>
+          </template>
+          <!-- Toplist feed: lightweight ranked rows (rank + tag + value).
+               Feed mode replaces the gallery list entirely. -->
+          <div v-if="feedMode === 'toplist'" class="home__toplist">
+            <!-- 打码模式下后端把 value 替换为 #gid、href 清空——行退化为不可点的
+                 div（href 为空时不渲染 <a>，避免点击原地刷新）。 -->
+            <component
+              :is="item.href ? 'a' : 'div'"
+              v-for="(item, index) in topList"
+              :key="item.gid ?? index"
+              class="home__toplist-row"
+              :href="item.href || undefined"
+              :target="item.href ? '_blank' : undefined"
+              :rel="item.href ? 'noopener' : undefined"
+              :data-testid="`toplist-row-${index}`"
+            >
+              <span class="home__toplist-rank">{{ index + 1 }}</span>
+              <span class="home__toplist-tag">{{ item.tag }}</span>
+              <span class="home__toplist-value">{{ item.value }}</span>
+            </component>
+          </div>
+          <!-- A4 定案（W3-F1）：与下载/历史页完全同构的全宽单列密信息行——共享
+               AppListRow。用户定案（2026-09-07）：整行点击进 gallery 详情，
+               「主体直达阅读」为下载页专属交互。宽屏（≥960px）双栏下两个点击
+               分区都改为选中右栏（不跳路由，T3）；窄屏保持整页跳转。 -->
+          <div v-else class="home__list" :class="{ 'home__list--bar': showPagination }">
+            <AppListRow
+              v-for="row in rows"
+              :key="row.gallery.gid"
+              :id="row.gallery.gid"
+              :gid="row.gallery.gid"
+              :title="displayTitle(row.gallery)"
+              :subtitle="displaySubtitle(row.gallery)"
+              :thumb="row.gallery.thumb"
+              @open="(gid: number) => openDetail(gid, wide)"
+              @read="(gid: number) => openDetail(gid, wide)"
+            >
+              <!-- 元信息行：分类 chip + 页数（元数据优先，对齐 GalleryCard）。 -->
+              <template #meta>
+                <CategoryChip v-if="row.chip" :category="row.chip" />
+                <span v-if="row.gallery.pages > 0" class="home__row-pages">
+                  {{ row.gallery.pages }}P
+                </span>
+              </template>
+            </AppListRow>
+          </div>
+        </ContentLayout>
+
+        <!-- FAB pair: primary = back to top (Android `v_go_to`), secondary =
+             refresh. The cluster once expanded speed-dial style, but after the
+             list/grid toggle retired with the waterfall (A4) only refresh
+             remained — a single action behind an expand step is pure friction,
+             so both FABs are permanently visible (FabLayout alwaysVisible).
+             宽屏双栏下集群锚回左栏右下角（TwoPaneLayout :deep 规则）。 -->
+        <FabLayout
+          always-visible
+          primary-icon="go-to-dark"
+          :actions="fabActions"
+          @click-primary="onPrimaryFab"
+          @click-secondary="onSecondaryFab"
+        />
+      </template>
+
+      <!-- 详情右栏：选中即原位加载（不跳路由，深链 /gallery/:gid 行为不变）；
+           面板返回箭头 = 清除选中回到占位符。 -->
+      <template #detail>
+        <GalleryDetailPane
+          :gid="selectedGid!"
+          :token="selectedToken"
+          pane
+          @back="clearSelection"
+        />
+      </template>
+    </TwoPaneLayout>
 
     <!-- Save-as-quick-search dialog (C3 wiring): minimal Android
          EditTextDialog replica — name the current filter state and POST the
@@ -275,6 +301,10 @@
  *                     jump / stale guard; view states stay in this host via
  *                     onLoadStart/onSuccess/onError hooks.
  * - `FabLayout`     — primary go-to-top + secondary refresh.
+ * - `TwoPaneLayout` — 平板对齐（T3，2026-09-20 定案）：宽屏（≥960px）列表
+ *                     恒驻左栏（360px 固定宽）+ 详情右栏（GalleryDetailPane
+ *                     原位加载，不跳路由）；无选中渲染占位符；窄屏单列行为
+ *                     与现状一致。Esc/浏览器返回先清选中（拦截在布局组件）。
  *
  * KeepAlive（App.vue 列表缓存按 fullPath 分实例）：页码还原语义 = 页码
  * （currentPage 随组件实例存续）+ 页内滚动（滚动容器 DOM 随 KeepAlive 保留
@@ -293,7 +323,9 @@ import AvailabilityBanner from '@/components/common/AvailabilityBanner.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import CategoryChip from '@/components/atoms/CategoryChip.vue'
 import AppListRow from '@/components/gallery/AppListRow.vue'
+import GalleryDetailPane from '@/components/gallery/GalleryDetailPane.vue'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
+import TwoPaneLayout from '@/components/layout/TwoPaneLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
@@ -826,8 +858,35 @@ const rows = computed(() =>
 
 /* --------------------------------- routing ------------------------------- */
 
-/** 缩略图点击 → 详情页（本地 token 透传）。 */
-function openDetail(gid: number): void {
+/**
+ * 双栏右栏选中态（T3，内存组件态，不持久化）：宽屏点选列表项 → 右栏原位
+ * 加载该画廊详情（不跳路由；同项再点不重载不闪烁）；跨 960px 阈值来回
+ * 选中保留（窄屏仅不渲染右栏，回宽即恢复）。深链 `/gallery/:gid` 整页详情
+ * 行为不受影响。
+ */
+const selectedGid = ref<number | null>(null)
+const selectedToken = ref<string | undefined>(undefined)
+
+/** 选中列表项（携带行内 token，供 getDetail 上游直取）。 */
+function selectGallery(gid: number): void {
+  const gallery = galleries.value.find((g) => g.gid === gid)
+  selectedGid.value = gid
+  selectedToken.value = gallery?.token || undefined
+}
+
+/** 清除选中（右栏返回箭头 / Esc / 宽屏浏览器返回首次触发）。 */
+function clearSelection(): void {
+  selectedGid.value = null
+  selectedToken.value = undefined
+}
+
+/** 缩略图/主体点击：宽屏双栏 = 选中右栏（不跳路由）；窄屏 = 详情页（本地
+ *  token 透传，现状行为）。 */
+function openDetail(gid: number, wide: boolean): void {
+  if (wide) {
+    selectGallery(gid)
+    return
+  }
   const gallery = galleries.value.find((g) => g.gid === gid)
   void router.push({
     path: `/gallery/${gid}`,

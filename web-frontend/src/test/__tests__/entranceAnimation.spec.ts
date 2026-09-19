@@ -111,7 +111,8 @@ describe('T-1 no-delay entrance overlays (scrim/dialog/toast/card/hero)', () => 
     { view: 'views/DownloadView.vue', selector: 'dialog', shorthand: 'animation: dialog-in 200ms var(--ease-decelerate-quart)' },
     { view: 'views/DownloadView.vue', selector: 'toast', shorthand: 'animation: toast-in 220ms var(--ease-decelerate-quint)' },
     { view: 'views/LoginView.vue', selector: 'login-card', shorthand: 'animation: card-in var(--duration-scene-translate) var(--ease-decelerate-quint)' },
-    { view: 'views/GalleryDetailView.vue', selector: 'detail-header__hero', shorthand: 'animation: rise var(--duration-scene-translate) var(--ease-decelerate-quint)' },
+    // T3（平板对齐）：详情主体抽入共享 GalleryDetailPane——入场编排随实现走。
+    { view: 'components/gallery/GalleryDetailPane.vue', selector: 'detail-header__hero', shorthand: 'animation: rise var(--duration-scene-translate) var(--ease-decelerate-quint)' },
   ]
 
   for (const overlay of overlays) {
@@ -129,7 +130,10 @@ describe('T-1 no-delay entrance overlays (scrim/dialog/toast/card/hero)', () => 
 })
 
 describe('T-1 staggered detail sections', () => {
-  const block = ruleBlock(readSource('views/GalleryDetailView.vue'), 'gallery-detail__body > section')
+  const block = ruleBlock(
+    readSource('components/gallery/GalleryDetailPane.vue'),
+    'gallery-detail__body > section',
+  )
 
   it('uses fill backwards (not both) with natural-state opacity 1', () => {
     expect(collapse(block)).toContain(
@@ -141,7 +145,7 @@ describe('T-1 staggered detail sections', () => {
   })
 
   it('keeps the 60/130/200ms stagger delays', () => {
-    const src = readSource('views/GalleryDetailView.vue')
+    const src = readSource('components/gallery/GalleryDetailPane.vue')
     for (const delay of ['60ms', '130ms', '200ms']) {
       expect(src).toMatch(`animation-delay: ${delay}`)
     }
@@ -155,6 +159,10 @@ describe('T-1 sweep: no `both`/forwards fill anywhere in views', () => {
     'views/DownloadView.vue',
     'views/GalleryDetailView.vue',
     'views/LoginView.vue',
+    // T3：详情实现移入共享 pane；双栏接入的列表页一并纳入扫描。
+    'components/gallery/GalleryDetailPane.vue',
+    'views/HomeView.vue',
+    'views/SearchView.vue',
   ]
 
   for (const view of views) {

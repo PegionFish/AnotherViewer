@@ -17,6 +17,10 @@
     AppListRow       — shared single-column dense info row (W3-C1): thumb →
                        detail / body → reader click partitions; the row title
                        is masked here via `maskedTitle` (隐私红线不动);
+    TwoPaneLayout    — 平板对齐（T3，2026-09-20 定案）：宽屏（≥960px）结果
+                       恒驻左栏（360px 固定宽）+ 详情右栏（GalleryDetailPane
+                       原位加载，不跳路由）；无选中渲染占位符；窄屏单列行为
+                       与现状一致。Esc/浏览器返回先清选中（拦截在布局组件）。
     pagination bar   — DownloadView-aligned pager (page window + prev/next +
                        jump). Upstream search is fixed at 25 rows/page (total
                        = upstream pages × 25) so there is no page-size switch;
@@ -118,130 +122,155 @@
         />
       </div>
 
-      <!-- 分页条（W3-F2 A4：完全参照下载页逻辑；上游搜索固定 25 条/页，
-           total = 上游页数×25，因此没有条数切换——仅页码窗口 + 前后页 +
-           跳页）。页码状态在组件实例里，KeepAlive 停用/还原即「页码+页内
-           滚动」（页内滚动由 ContentLayout scrollMemory 还原）。 -->
-      <nav
-        v-if="paginationVisible"
-        class="pagination-bar"
-        data-testid="search-pagination"
-        aria-label="搜索分页"
+      <!-- 平板对齐（T3，2026-09-20 定案）：宽屏（≥960px）双栏——结果列表恒驻
+           左栏（360px 固定宽）+ 详情右栏（GalleryDetailPane 原位加载，不跳
+           路由）；无选中渲染占位符（不自动选中）。窄屏 (<960px) 单列行为与
+           现状完全一致（点击进整页详情）。浮动搜索条 + FilterPanel 独立锚在
+           双栏上方（全宽），列表/详情分列其下。返回语义（宽屏有选中）：
+           Esc / 浏览器返回先清选中（拦截在 TwoPaneLayout）。 -->
+      <TwoPaneLayout
+        :has-selection="selectedGid !== null"
+        placeholder="从左侧选择一个画廊查看详情"
+        @clear-selection="clearSelection"
       >
-        <span class="pagination-bar__info">
-          第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
-        </span>
-        <span class="pagination-bar__pages" role="group" aria-label="页码">
-          <button
-            type="button"
-            class="pagination-bar__page"
-            :disabled="currentPage <= 1"
-            aria-label="上一页"
-            @click="jumpToPage(currentPage - 1)"
+        <template #list="{ wide }">
+          <!-- 分页条（W3-F2 A4：完全参照下载页逻辑；上游搜索固定 25 条/页，
+               total = 上游页数×25，因此没有条数切换——仅页码窗口 + 前后页 +
+               跳页）。页码状态在组件实例里，KeepAlive 停用/还原即「页码+页内
+               滚动」（页内滚动由 ContentLayout scrollMemory 还原）。 -->
+          <nav
+            v-if="paginationVisible"
+            class="pagination-bar"
+            data-testid="search-pagination"
+            aria-label="搜索分页"
           >
-            ‹
-          </button>
-          <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
-            <button
-              v-if="item !== '…'"
-              type="button"
-              class="pagination-bar__page"
-              :class="{ 'pagination-bar__page--active': item === currentPage }"
-              :aria-current="item === currentPage ? 'page' : undefined"
-              :aria-label="`第 ${item} 页`"
-              @click="jumpToPage(item)"
-            >
-              {{ item }}
-            </button>
-            <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
-          </template>
-          <button
-            type="button"
-            class="pagination-bar__page"
-            :disabled="currentPage >= totalPages"
-            aria-label="下一页"
-            @click="jumpToPage(currentPage + 1)"
-          >
-            ›
-          </button>
-        </span>
-        <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留，搜索结果页无目标语义。 -->
-      </nav>
-
-      <!-- Results: pull-to-refresh via ContentLayout. W3-F2 (A4): the infinite
-           scroll footer is retired — pages swap wholesale from the bar above. -->
-      <ContentLayout
-        ref="contentRef"
-        class="search-scene__content"
-        :state="contentState"
-        :refreshing="refreshing"
-        empty-text="No galleries found — adjust the filters and try again"
-        error-text="Search failed — check the connection and retry"
-        @update:refreshing="refreshing = $event"
-        @refresh="onRefresh"
-        @retry="onRefresh"
-      >
-        <!-- 单列密信息行（A4）：AppListRow 点击分区 = 缩略图→详情、主体→阅读。
-             标题在本视图经 maskedTitle 脱敏后下发（红线）。搜索无多选，`menu`
-             （长按/右键）不接线。 -->
-        <div class="results">
-          <AppListRow
-            v-for="{ gallery, chip } in rows"
-            :key="gallery.gid"
-            :id="gallery.gid"
-            :gid="gallery.gid"
-            :title="displayTitle(gallery)"
-            :subtitle="displaySubtitle(gallery)"
-            :thumb="gallery.thumb"
-            @open="openGallery"
-            @read="openGallery"
-          >
-            <template #meta>
-              <CategoryChip v-if="chip" :category="chip" />
-              <!-- W5: 阅读进度角标顶替页数文案（GalleryCard 同语义）。 -->
-              <span
-                v-if="showReadProgressBadge(gallery)"
-                class="search-item__read-progress"
-                data-testid="read-progress-badge"
+            <span class="pagination-bar__info">
+              第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
+            </span>
+            <span class="pagination-bar__pages" role="group" aria-label="页码">
+              <button
+                type="button"
+                class="pagination-bar__page"
+                :disabled="currentPage <= 1"
+                aria-label="上一页"
+                @click="jumpToPage(currentPage - 1)"
               >
-                {{ readProgressLabel(gallery) }}
-              </span>
-              <span v-else-if="gallery.pages > 0" class="search-item__pages">
-                {{ gallery.pages }}P
-              </span>
-              <RatingStars :rating="gallery.rating" />
-            </template>
+                ‹
+              </button>
+              <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+                <button
+                  v-if="item !== '…'"
+                  type="button"
+                  class="pagination-bar__page"
+                  :class="{ 'pagination-bar__page--active': item === currentPage }"
+                  :aria-current="item === currentPage ? 'page' : undefined"
+                  :aria-label="`第 ${item} 页`"
+                  @click="jumpToPage(item)"
+                >
+                  {{ item }}
+                </button>
+                <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+              </template>
+              <button
+                type="button"
+                class="pagination-bar__page"
+                :disabled="currentPage >= totalPages"
+                aria-label="下一页"
+                @click="jumpToPage(currentPage + 1)"
+              >
+                ›
+              </button>
+            </span>
+            <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留，搜索结果页无目标语义。 -->
+          </nav>
 
-            <!-- Preference-gated info switches (B-2) + tags, mirroring the
-                 GalleryCard list form；打码开启时 uploader/tags 一律隐藏。 -->
-            <div
-              v-if="
-                showUploader(gallery) || showPostedTime(gallery) || rowTags(gallery).length > 0
-              "
-              class="search-item__extra"
-            >
-              <span v-if="showUploader(gallery)" class="search-item__uploader">
-                {{ gallery.uploader }}
-              </span>
-              <span v-if="showPostedTime(gallery)" class="search-item__posted">
-                {{ gallery.posted }}
-              </span>
-              <span v-for="tag in rowTags(gallery)" :key="tag" class="search-item__tag">
-                {{ tag }}
-              </span>
+          <!-- Results: pull-to-refresh via ContentLayout. W3-F2 (A4): the infinite
+               scroll footer is retired — pages swap wholesale from the bar above. -->
+          <ContentLayout
+            ref="contentRef"
+            class="search-scene__content"
+            :state="contentState"
+            :refreshing="refreshing"
+            empty-text="No galleries found — adjust the filters and try again"
+            error-text="Search failed — check the connection and retry"
+            @update:refreshing="refreshing = $event"
+            @refresh="onRefresh"
+            @retry="onRefresh"
+          >
+            <!-- 单列密信息行（A4）：AppListRow 点击分区 = 缩略图→详情、主体→阅读。
+                 标题在本视图经 maskedTitle 脱敏后下发（红线）。搜索无多选，`menu`
+                 （长按/右键）不接线。宽屏双栏下两个分区都改为选中右栏（T3）。 -->
+            <div class="results">
+              <AppListRow
+                v-for="{ gallery, chip } in rows"
+                :key="gallery.gid"
+                :id="gallery.gid"
+                :gid="gallery.gid"
+                :title="displayTitle(gallery)"
+                :subtitle="displaySubtitle(gallery)"
+                :thumb="gallery.thumb"
+                @open="(gid: number) => openGallery(gid, wide)"
+                @read="(gid: number) => openGallery(gid, wide)"
+              >
+                <template #meta>
+                  <CategoryChip v-if="chip" :category="chip" />
+                  <!-- W5: 阅读进度角标顶替页数文案（GalleryCard 同语义）。 -->
+                  <span
+                    v-if="showReadProgressBadge(gallery)"
+                    class="search-item__read-progress"
+                    data-testid="read-progress-badge"
+                  >
+                    {{ readProgressLabel(gallery) }}
+                  </span>
+                  <span v-else-if="gallery.pages > 0" class="search-item__pages">
+                    {{ gallery.pages }}P
+                  </span>
+                  <RatingStars :rating="gallery.rating" />
+                </template>
+
+                <!-- Preference-gated info switches (B-2) + tags, mirroring the
+                     GalleryCard list form；打码开启时 uploader/tags 一律隐藏。 -->
+                <div
+                  v-if="
+                    showUploader(gallery) || showPostedTime(gallery) || rowTags(gallery).length > 0
+                  "
+                  class="search-item__extra"
+                >
+                  <span v-if="showUploader(gallery)" class="search-item__uploader">
+                    {{ gallery.uploader }}
+                  </span>
+                  <span v-if="showPostedTime(gallery)" class="search-item__posted">
+                    {{ gallery.posted }}
+                  </span>
+                  <span v-for="tag in rowTags(gallery)" :key="tag" class="search-item__tag">
+                    {{ tag }}
+                  </span>
+                </div>
+              </AppListRow>
             </div>
-          </AppListRow>
-        </div>
-      </ContentLayout>
+          </ContentLayout>
 
-      <!-- FAB cluster: primary opens filters, secondaries manage presets. -->
-      <FabLayout
-        v-model:expanded="fabExpanded"
-        primary-icon="magnify-dark"
-        :actions="fabActions"
-        @click-primary="onFabPrimary"
-        @click-secondary="onFabSecondary"
-      />
+          <!-- FAB cluster: primary opens filters, secondaries manage presets.
+               宽屏双栏下集群锚回左栏右下角（TwoPaneLayout :deep 规则）。 -->
+          <FabLayout
+            v-model:expanded="fabExpanded"
+            primary-icon="magnify-dark"
+            :actions="fabActions"
+            @click-primary="onFabPrimary"
+            @click-secondary="onFabSecondary"
+          />
+        </template>
+
+        <!-- 详情右栏：选中即原位加载（不跳路由）；面板返回箭头 = 清除选中。 -->
+        <template #detail>
+          <GalleryDetailPane
+            :gid="selectedGid!"
+            :token="selectedToken"
+            pane
+            @back="clearSelection"
+          />
+        </template>
+      </TwoPaneLayout>
     </div>
 
     <!-- Quick-search management dialog. -->
@@ -353,7 +382,9 @@ import NavigationDrawer, { DEFAULT_NAV_ITEMS } from '@/components/layout/Navigat
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
+import TwoPaneLayout from '@/components/layout/TwoPaneLayout.vue'
 import AppListRow from '@/components/gallery/AppListRow.vue'
+import GalleryDetailPane from '@/components/gallery/GalleryDetailPane.vue'
 import CategoryChip from '@/components/atoms/CategoryChip.vue'
 import RatingStars from '@/components/atoms/RatingStars.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
@@ -677,8 +708,32 @@ async function onRefresh(): Promise<void> {
 
 /* ------------------------- AppListRow click zones ------------------------ */
 
-/** 缩略图点击 → 详情页（AppListRow `open` 分区）。 */
-function openGallery(gid: number): void {
+/**
+ * 双栏右栏选中态（T3，内存组件态）：宽屏点选 → 右栏原位加载（不跳路由）；
+ * 跨 960px 阈值选中保留；窄屏跳整页详情（现状行为）。搜索结果行不带
+ * token——透传 undefined，getDetail 走本地行/上游直取默认链路。
+ */
+const selectedGid = ref<number | null>(null)
+const selectedToken = ref<string | undefined>(undefined)
+
+function selectGallery(gid: number): void {
+  const gallery = galleries.value.find((g) => g.gid === gid)
+  selectedGid.value = gid
+  selectedToken.value = gallery?.token || undefined
+}
+
+/** 清除选中（右栏返回箭头 / Esc / 宽屏浏览器返回首次触发）。 */
+function clearSelection(): void {
+  selectedGid.value = null
+  selectedToken.value = undefined
+}
+
+/** 缩略图/主体点击：宽屏双栏 = 选中右栏；窄屏 = 详情页（现状行为）。 */
+function openGallery(gid: number, wide: boolean): void {
+  if (wide) {
+    selectGallery(gid)
+    return
+  }
   router.push(`/gallery/${gid}`)
 }
 

@@ -6,13 +6,14 @@ import HomeView from '../HomeView.vue'
 import SearchBar from '@/components/search/SearchBar.vue'
 import FilterPanel from '@/components/search/FilterPanel.vue'
 import { galleryApi } from '@/api/gallery'
+import { commentApi } from '@/api/comment'
 import { authApi } from '@/api/auth'
 import { siteApi } from '@/api/site'
 import { preferencesApi } from '@/api/preferences'
 import { availability, markUnknown } from '@/stores/availability'
 import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 import type { Preferences } from '@/api/preferences'
-import type { GalleryInfo, GalleryListResponse, TopListItem } from '@/types'
+import type { GalleryDetail, GalleryInfo, GalleryListResponse, TopListItem } from '@/types'
 
 const { pushMock, replaceMock, routeMock } = vi.hoisted(() => ({
   pushMock: vi.fn(),
@@ -33,7 +34,12 @@ vi.mock('@/api/gallery', () => ({
     feed: vi.fn(),
     getQuickSearches: vi.fn(),
     createQuickSearch: vi.fn(),
+    getDetail: vi.fn(),
   },
+}))
+
+vi.mock('@/api/comment', () => ({
+  commentApi: { listComments: vi.fn(), postComment: vi.fn(), voteComment: vi.fn() },
 }))
 
 vi.mock('@/api/auth', () => ({
@@ -99,11 +105,43 @@ function toplistItem(overrides: Partial<TopListItem> = {}): TopListItem {
   }
 }
 
+/* ---------------------- 双栏断点桩（T3，平板对齐） ---------------------- */
+
+type MqlListener = (event: MediaQueryListEvent) => void
+
+/**
+ * happy-dom 的 matchMedia 对 min-width 查询恒 true（默认视口 1024px），会把
+ * 视图直接推进宽屏双栏。断点桩把判定钉死：默认窄屏（现状行为回归保护），
+ * 双栏用例显式 stubMatchMedia(true)，setWide() 模拟跨 960px（change 派发）。
+ */
+let setWide: (matches: boolean) => void = () => {}
+
+function stubMatchMedia(matches: boolean): void {
+  const listeners = new Set<MqlListener>()
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      addEventListener: (_type: string, cb: MqlListener) => {
+        listeners.add(cb)
+      },
+      removeEventListener: (_type: string, cb: MqlListener) => {
+        listeners.delete(cb)
+      },
+    })),
+  )
+  setWide = (next: boolean) => {
+    for (const cb of [...listeners]) cb({ matches: next } as MediaQueryListEvent)
+  }
+}
+
 describe('HomeView (首页)', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
     setActivePinia(createPinia())
+    stubMatchMedia(false)
     localStorage.clear()
     pushMock.mockClear()
     replaceMock.mockClear()
@@ -134,6 +172,7 @@ describe('HomeView (首页)', () => {
   afterEach(() => {
     setPrivacyMaskEnabled(false)
     wrapper?.unmount()
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -471,6 +510,7 @@ describe('HomeView — A4 服务端分页（分页条，usePagedList）', () => 
 
   beforeEach(() => {
     setActivePinia(createPinia())
+    stubMatchMedia(false)
     localStorage.clear()
     pushMock.mockClear()
     routeMock.query = {}
@@ -496,6 +536,7 @@ describe('HomeView — A4 服务端分页（分页条，usePagedList）', () => 
   afterEach(() => {
     setPrivacyMaskEnabled(false)
     wrapper?.unmount()
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -617,6 +658,7 @@ describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
   beforeEach(() => {
     // 迁移 describe 共用同一外层 beforeEach？不——此处建立独立前置。
     setActivePinia(createPinia())
+    stubMatchMedia(false)
     localStorage.clear()
     pushMock.mockClear()
     routeMock.query = {}
@@ -645,6 +687,7 @@ describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
     availability.downAt = null
     availability.lastReason = null
     availability.lastLoadedAt = null
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -707,5 +750,205 @@ describe('HomeView — EH 熔断（plan-2026-08-30 §0）', () => {
     // 探测成功 → 状态 UP → 横幅消失 + 父视图刷新（静默重载第 1 页）。
     expect(wrapper.find('[data-testid="availability-banner"]').exists()).toBe(false)
     expect(galleryApi.search).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('HomeView — 宽屏双栏（T3 平板对齐，2026-09-20 定案）', () => {
+  let wrapper: VueWrapper
+
+  /** 详情面板 fixture（GalleryDetailPane 契约字段）。 */
+  function detailFixture(overrides: Partial<GalleryDetail> = {}): GalleryDetail {
+    return {
+      gid: 42,
+      token: 'tok42',
+      title: 'Detail Gallery',
+      titleJpn: '',
+      thumb: '',
+      category: 2,
+      posted: '',
+      uploader: '',
+      rating: 4,
+      rated: false,
+      simpleLanguage: '',
+      simpleTags: [],
+      thumbWidth: 0,
+      thumbHeight: 0,
+      pages: 10,
+      favoriteSlot: -2,
+      favoriteName: '',
+      tags: [],
+      imageUrl: '',
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    stubMatchMedia(true)
+    localStorage.clear()
+    pushMock.mockClear()
+    routeMock.query = {}
+    availability.state = null
+    availability.downAt = null
+    availability.lastReason = null
+    availability.lastLoadedAt = null
+    markUnknown()
+    setPrivacyMaskEnabled(false)
+    vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
+    vi.mocked(authApi.ehSession).mockResolvedValue({
+      signedIn: false,
+      expired: false,
+      gallerySite: 0,
+      cookies: [],
+    })
+    vi.mocked(preferencesApi.get).mockResolvedValue(makePrefs({}))
+    vi.mocked(preferencesApi.update).mockResolvedValue(makePrefs({}))
+    vi.mocked(siteApi.getAvailability).mockResolvedValue({ state: 'UP' })
+    vi.mocked(siteApi.probeAvailability).mockResolvedValue({ state: 'UP' })
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    vi.mocked(commentApi.listComments).mockResolvedValue({ comments: [] })
+  })
+
+  afterEach(() => {
+    setPrivacyMaskEnabled(false)
+    wrapper?.unmount()
+    availability.state = null
+    availability.downAt = null
+    availability.lastReason = null
+    availability.lastLoadedAt = null
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  async function mountWide(list: GalleryInfo[]) {
+    vi.mocked(galleryApi.search).mockResolvedValue({
+      success: true,
+      data: list,
+      total: list.length,
+    })
+    wrapper = mount(HomeView)
+    await flushPromises()
+    await flushPromises()
+    return wrapper
+  }
+
+  it('宽屏：无选中时右栏渲染占位符，不自动选中任何条目', async () => {
+    await mountWide([gallery({ gid: 42 })])
+
+    expect(wrapper.find('[data-testid="two-pane--wide"], .two-pane--wide').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="gallery-detail-pane"]').exists()).toBe(false)
+    // 不自动选中：详情接口零调用。
+    expect(galleryApi.getDetail).not.toHaveBeenCalled()
+  })
+
+  it('宽屏：点选列表项 → 右栏原位加载详情，路由不变', async () => {
+    await mountWide([gallery({ gid: 42, token: 'abc123' })])
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    await flushPromises()
+
+    expect(pushMock).not.toHaveBeenCalled()
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(false)
+    expect(wrapper.find('.detail-header__title').text()).toBe('Detail Gallery')
+    // 行内 token 透传给 getDetail。
+    expect(galleryApi.getDetail).toHaveBeenCalledWith(42, 'abc123')
+  })
+
+  it('宽屏：主体点击分区同样选中（不跳阅读器）', async () => {
+    await mountWide([gallery({ gid: 7, token: 'tok7' })])
+
+    await wrapper.find('.app-list-row').trigger('click')
+    await flushPromises()
+
+    expect(pushMock).not.toHaveBeenCalled()
+    expect(galleryApi.getDetail).toHaveBeenCalledWith(7, 'tok7')
+  })
+
+  it('宽屏：再点同项不重载详情（无闪烁）', async () => {
+    await mountWide([gallery({ gid: 42, token: 'abc123' })])
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    // gid 未变 → GalleryDetailPane 的 watch 不触发 → 不重新加载。
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.detail-header__title').exists()).toBe(true)
+  })
+
+  it('宽屏：Esc 先清除选中回到占位符（返回语义第一段）', async () => {
+    await mountWide([gallery({ gid: 42, token: 'abc123' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.detail-header__title').exists()).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="gallery-detail-pane"]').exists()).toBe(false)
+    // 清选中不是导航。
+    expect(pushMock).not.toHaveBeenCalled()
+  })
+
+  it('宽屏：Esc 在输入框聚焦时不劫持（搜索词输入不受影响）', async () => {
+    await mountWide([gallery({ gid: 42 })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.focus()
+    // 事件在可编辑元素上派发（冒泡到 window）——event.target 才是 input。
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    input.remove()
+    await flushPromises()
+
+    expect(wrapper.find('.detail-header__title').exists()).toBe(true)
+  })
+
+  it('宽屏：右栏详情面板返回箭头 = 清除选中回到占位符', async () => {
+    await mountWide([gallery({ gid: 42, token: 'abc123' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+
+    await wrapper.find('.detail-header__back').trigger('click')
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+    expect(pushMock).not.toHaveBeenCalled()
+  })
+
+  it('跨 960px 阈值来回：双栏类名切换，选中态与右栏 DOM 保留', async () => {
+    await mountWide([gallery({ gid: 42, token: 'abc123' })])
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
+
+    // 变窄：右栏退役（类名消失），但选中与面板 DOM 不销毁。
+    setWide(false)
+    await flushPromises()
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="gallery-detail-pane"]').exists()).toBe(true)
+
+    // 变宽：右栏原样恢复，详情不重新加载。
+    setWide(true)
+    await flushPromises()
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(true)
+    expect(wrapper.find('.detail-header__title').text()).toBe('Detail Gallery')
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
+  })
+
+  it('窄屏（跨阈值后）：点击列表项仍是整页跳转（现状行为）', async () => {
+    await mountWide([gallery({ gid: 42, token: 'abc123' })])
+    setWide(false)
+    await flushPromises()
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    expect(pushMock).toHaveBeenCalledWith({ path: '/gallery/42', query: { token: 'abc123' } })
   })
 })

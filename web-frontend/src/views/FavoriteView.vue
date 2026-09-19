@@ -1,198 +1,222 @@
 <template>
   <div class="favorite-view">
-    <div class="favorite-view__heading">
-      <h1 class="favorite-view__title">Favorites</h1>
-      <span v-if="state === 'content'" class="favorite-view__count">
-        {{ countLabel }}
-      </span>
-    </div>
-
-    <!-- Server-side search + filter slots (A5d): 防抖 q 搜索，与筛选槽位互斥
-         （useFilterSlots——选槽位清搜索、输入搜索取消槽位）。 -->
-    <div class="search-bar">
-      <AppIcon name="magnify-dark" size="18px" />
-      <input
-        v-model="searchQuery"
-        class="search-bar__input"
-        type="search"
-        :placeholder="filterSlot ? `筛选：${filterSlot.name}` : '搜索标题…'"
-        aria-label="搜索收藏"
-        @compositionstart="searchComposing = true"
-        @compositionend="onSearchCompositionEnd"
-      />
-      <button
-        v-if="searchQuery"
-        type="button"
-        class="search-bar__clear"
-        aria-label="清除搜索"
-        @click="clearSearch"
-      >
-        <AppIcon name="close-dark" size="16px" />
-      </button>
-    </div>
-
-    <FilterSlotBar :slots="slots" :active-id="activeSlotId" @select="onSlotBarSelect" />
-
-    <!-- Favorite folder filter — Android FavoritesScene's folder spinner,
-         reimagined as a scrollable chip strip. Names come from
-         `prefs.general.favoriteSlotNames` (B-4, `|`-separated), empty slots
-         on the SiteConfig.DEFAULT_FAV_CAT_NAMES defaults ("Favorites 0" …
-         "Favorites 9"). -->
-    <nav class="slot-bar" aria-label="Favorite folders">
-      <!-- "All" covers every folder the server knows, including the Android
-           local-favorites slot (-2) which no numbered tab reaches. -->
-      <button
-        type="button"
-        class="slot-bar__chip"
-        :class="{ 'slot-bar__chip--active': activeSlot === -1 }"
-        :aria-current="activeSlot === -1 ? 'true' : undefined"
-        @click="selectSlot(-1, $event)"
-      >
-        {{ 'All' }}
-      </button>
-      <button
-        v-for="(name, slot) in slotNames"
-        :key="slot"
-        type="button"
-        class="slot-bar__chip"
-        :class="{ 'slot-bar__chip--active': activeSlot === slot }"
-        :aria-current="activeSlot === slot ? 'true' : undefined"
-        @click="selectSlot(slot, $event)"
-      >
-        {{ name }}
-      </button>
-    </nav>
-
-    <!-- 分页条（A4 定案：与下载/历史页同构，2026-09-06）：页码窗口 + 前后页 +
-         每页条数切换（50/100/200，默认 50——W3-F4b 起控制器收 pageSize 并钳制
-         1..200，与历史页同口径）+ 跳页 + PC 键盘翻页。total ≤ pageSize 时隐藏
-         （Android PaginationIndicator 语义）。 -->
-    <nav
-      v-if="paginationVisible"
-      class="pagination-bar"
-      data-testid="favorite-pagination"
-      aria-label="收藏分页"
+    <!-- 平板对齐（T3，2026-09-20 定案）：宽屏（≥960px）双栏——收藏列表恒驻
+         左栏（360px 固定宽）+ 详情右栏（GalleryDetailPane 原位加载，不跳
+         路由）；无选中渲染占位符（不自动选中）。窄屏 (<960px) 单列行为与
+         现状完全一致（点击进整页详情）。返回语义（宽屏有选中）：Esc /
+         浏览器返回先清选中（拦截在 TwoPaneLayout），再按一次才离开页面。 -->
+    <TwoPaneLayout
+      :has-selection="selectedGid !== null"
+      placeholder="从左侧选择一个画廊查看详情"
+      @clear-selection="clearSelection"
     >
-      <span class="pagination-bar__info">
-        第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
-      </span>
-      <span class="pagination-bar__pages" role="group" aria-label="页码">
-        <button
-          type="button"
-          class="pagination-bar__page"
-          :disabled="currentPage <= 1"
-          aria-label="上一页"
-          @click="jumpToPage(currentPage - 1)"
-        >
-          ‹
-        </button>
-        <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+      <template #list="{ wide }">
+        <div class="favorite-view__heading">
+          <h1 class="favorite-view__title">Favorites</h1>
+          <span v-if="state === 'content'" class="favorite-view__count">
+            {{ countLabel }}
+          </span>
+        </div>
+
+        <!-- Server-side search + filter slots (A5d): 防抖 q 搜索，与筛选槽位互斥
+             （useFilterSlots——选槽位清搜索、输入搜索取消槽位）。 -->
+        <div class="search-bar">
+          <AppIcon name="magnify-dark" size="18px" />
+          <input
+            v-model="searchQuery"
+            class="search-bar__input"
+            type="search"
+            :placeholder="filterSlot ? `筛选：${filterSlot.name}` : '搜索标题…'"
+            aria-label="搜索收藏"
+            @compositionstart="searchComposing = true"
+            @compositionend="onSearchCompositionEnd"
+          />
           <button
-            v-if="item !== '…'"
+            v-if="searchQuery"
             type="button"
-            class="pagination-bar__page"
-            :class="{ 'pagination-bar__page--active': item === currentPage }"
-            :aria-current="item === currentPage ? 'page' : undefined"
-            :aria-label="`第 ${item} 页`"
-            @click="jumpToPage(item)"
+            class="search-bar__clear"
+            aria-label="清除搜索"
+            @click="clearSearch"
           >
-            {{ item }}
+            <AppIcon name="close-dark" size="16px" />
           </button>
-          <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
-        </template>
-        <button
-          type="button"
-          class="pagination-bar__page"
-          :disabled="currentPage >= totalPages"
-          aria-label="下一页"
-          @click="jumpToPage(currentPage + 1)"
+        </div>
+
+        <FilterSlotBar :slots="slots" :active-id="activeSlotId" @select="onSlotBarSelect" />
+
+        <!-- Favorite folder filter — Android FavoritesScene's folder spinner,
+             reimagined as a scrollable chip strip. Names come from
+             `prefs.general.favoriteSlotNames` (B-4, `|`-separated), empty slots
+             on the SiteConfig.DEFAULT_FAV_CAT_NAMES defaults ("Favorites 0" …
+             "Favorites 9"). -->
+        <nav class="slot-bar" aria-label="Favorite folders">
+          <!-- "All" covers every folder the server knows, including the Android
+               local-favorites slot (-2) which no numbered tab reaches. -->
+          <button
+            type="button"
+            class="slot-bar__chip"
+            :class="{ 'slot-bar__chip--active': activeSlot === -1 }"
+            :aria-current="activeSlot === -1 ? 'true' : undefined"
+            @click="selectSlot(-1, $event)"
+          >
+            {{ 'All' }}
+          </button>
+          <button
+            v-for="(name, slot) in slotNames"
+            :key="slot"
+            type="button"
+            class="slot-bar__chip"
+            :class="{ 'slot-bar__chip--active': activeSlot === slot }"
+            :aria-current="activeSlot === slot ? 'true' : undefined"
+            @click="selectSlot(slot, $event)"
+          >
+            {{ name }}
+          </button>
+        </nav>
+
+        <!-- 分页条（A4 定案：与下载/历史页同构，2026-09-06）：页码窗口 + 前后页 +
+             每页条数切换（50/100/200，默认 50——W3-F4b 起控制器收 pageSize 并钳制
+             1..200，与历史页同口径）+ 跳页 + PC 键盘翻页。total ≤ pageSize 时隐藏
+             （Android PaginationIndicator 语义）。 -->
+        <nav
+          v-if="paginationVisible"
+          class="pagination-bar"
+          data-testid="favorite-pagination"
+          aria-label="收藏分页"
         >
-          ›
-        </button>
-      </span>
-      <label class="pagination-bar__size">
-        条/页
-        <select
-          v-model.number="pageSize"
-          class="pagination-bar__select"
-          aria-label="每页条数"
-        >
-          <option v-for="size in FAVORITE_PAGE_SIZES" :key="size" :value="size">
-            {{ size }}
-          </option>
-        </select>
-      </label>
-      <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留。条数切换/页码窗口保留。 -->
-    </nav>
-
-    <ContentLayout
-      ref="contentRef"
-      class="favorite-view__content"
-      :state="state"
-      v-model:refreshing="refreshing"
-      empty-text="No favorites"
-      :error-text="errorText"
-      @refresh="onRefresh"
-      @retry="onRetry"
-    >
-      <!-- A4 定案（W3-F4）：与下载/历史页同构的全宽单列密信息行——共享
-           AppListRow（缩略图→详情 / 主体→统一阅读器 点击分区 + 角标挂点）。
-           服务端分页（W2-B2 DB 分页）：usePagedList 把 1 起页码直传给
-           /favorite/list（收藏信封 page 1 起，历史是 0 起），整页替换渲染。
-
-           #badge 挂收藏夹角标（F-UX5：♥ + 条目真实 favoriteSlot——tab 0 混合
-           slot -1/0，旧服务器缺字段回落当前页签号；slot -1 只出♥，与 Android
-           徽章无数字一致）。#meta 放 CategoryChip + W6 阅读进度角标。
-
-           KeepAlive（App.vue 按 fullPath 缓存实例）：页码与页内滚动位置随
-           组件实例存续，从阅读器/详情返回即还原——页码还原语义 = 页码 +
-           页内滚动。 -->
-      <div class="favorite-list">
-        <AppListRow
-          v-for="row in rows"
-          :key="row.item.gid"
-          :id="row.item.gid"
-          :gid="row.item.gid"
-          :title="displayTitle(row.item)"
-          :subtitle="displaySubtitle(row.item)"
-          :thumb="row.item.thumb"
-          @open="openDetail"
-          @read="openDetail"
-        >
-          <!-- Favorite folder badge — heart + folder number, accent
-               background; absolutely positioned corner badge anchored to the
-               row (AppListRow badge mount). -->
-          <template #badge>
-            <span class="slot-badge" :title="`In ${slotBadgeName(row.slot)}`">
-              <AppIcon name="heart" size="12px" />
-              <template v-if="row.slot >= 0">{{ row.slot }}</template>
-            </span>
-          </template>
-
-          <!-- 元信息行：CategoryChip + W6 阅读进度角标（N+1P，语义同
-               GalleryCard：showReadProgress 开且进度 > 0 才显示）。 -->
-          <template #meta>
-            <CategoryChip v-if="row.chip" :category="row.chip" />
-            <span
-              v-if="showReadProgressBadge(row.item)"
-              class="favorite-item__read-progress"
-              data-testid="read-progress-badge"
+          <span class="pagination-bar__info">
+            第 {{ currentPage }} / {{ totalPages }} 页 · {{ total }} 条
+          </span>
+          <span class="pagination-bar__pages" role="group" aria-label="页码">
+            <button
+              type="button"
+              class="pagination-bar__page"
+              :disabled="currentPage <= 1"
+              aria-label="上一页"
+              @click="jumpToPage(currentPage - 1)"
             >
-              {{ readProgressLabelOf(row.item) }}
-            </span>
-          </template>
-        </AppListRow>
-      </div>
-    </ContentLayout>
+              ‹
+            </button>
+            <template v-for="(item, i) in pageWindow" :key="`${item}-${i}`">
+              <button
+                v-if="item !== '…'"
+                type="button"
+                class="pagination-bar__page"
+                :class="{ 'pagination-bar__page--active': item === currentPage }"
+                :aria-current="item === currentPage ? 'page' : undefined"
+                :aria-label="`第 ${item} 页`"
+                @click="jumpToPage(item)"
+              >
+                {{ item }}
+              </button>
+              <span v-else class="pagination-bar__ellipsis" aria-hidden="true">…</span>
+            </template>
+            <button
+              type="button"
+              class="pagination-bar__page"
+              :disabled="currentPage >= totalPages"
+              aria-label="下一页"
+              @click="jumpToPage(currentPage + 1)"
+            >
+              ›
+            </button>
+          </span>
+          <label class="pagination-bar__size">
+            条/页
+            <select
+              v-model.number="pageSize"
+              class="pagination-bar__select"
+              aria-label="每页条数"
+            >
+              <option v-for="size in FAVORITE_PAGE_SIZES" :key="size" :value="size">
+                {{ size }}
+              </option>
+            </select>
+          </label>
+          <!-- 用户定案（2026-09-07）：跳页输入仅下载页保留。条数切换/页码窗口保留。 -->
+        </nav>
 
-    <!-- FabLayout replica: refresh + back-to-top mini FABs
-         (scene_favorites.xml v_refresh / v_go_to cluster) -->
-    <FabLayout
-      v-model:expanded="fabExpanded"
-      primary-icon="reorder"
-      :actions="fabActions"
-      @click-secondary="onFabAction"
-    />
+        <ContentLayout
+          ref="contentRef"
+          class="favorite-view__content"
+          :state="state"
+          v-model:refreshing="refreshing"
+          empty-text="No favorites"
+          :error-text="errorText"
+          @refresh="onRefresh"
+          @retry="onRetry"
+        >
+          <!-- A4 定案（W3-F4）：与下载/历史页同构的全宽单列密信息行——共享
+               AppListRow（缩略图→详情 / 主体→统一阅读器 点击分区 + 角标挂点）。
+               服务端分页（W2-B2 DB 分页）：usePagedList 把 1 起页码直传给
+               /favorite/list（收藏信封 page 1 起，历史是 0 起），整页替换渲染。
+
+               #badge 挂收藏夹角标（F-UX5：♥ + 条目真实 favoriteSlot——tab 0 混合
+               slot -1/0，旧服务器缺字段回落当前页签号；slot -1 只出♥，与 Android
+               徽章无数字一致）。#meta 放 CategoryChip + W6 阅读进度角标。
+
+               KeepAlive（App.vue 按 fullPath 缓存实例）：页码与页内滚动位置随
+               组件实例存续，从阅读器/详情返回即还原——页码还原语义 = 页码 +
+               页内滚动。宽屏双栏下两个点击分区都改为选中右栏（T3）。 -->
+          <div class="favorite-list">
+            <AppListRow
+              v-for="row in rows"
+              :key="row.item.gid"
+              :id="row.item.gid"
+              :gid="row.item.gid"
+              :title="displayTitle(row.item)"
+              :subtitle="displaySubtitle(row.item)"
+              :thumb="row.item.thumb"
+              @open="(gid: number) => openDetail(gid, wide)"
+              @read="(gid: number) => openDetail(gid, wide)"
+            >
+              <!-- Favorite folder badge — heart + folder number, accent
+                   background; absolutely positioned corner badge anchored to the
+                   row (AppListRow badge mount). -->
+              <template #badge>
+                <span class="slot-badge" :title="`In ${slotBadgeName(row.slot)}`">
+                  <AppIcon name="heart" size="12px" />
+                  <template v-if="row.slot >= 0">{{ row.slot }}</template>
+                </span>
+              </template>
+
+              <!-- 元信息行：CategoryChip + W6 阅读进度角标（N+1P，语义同
+                   GalleryCard：showReadProgress 开且进度 > 0 才显示）。 -->
+              <template #meta>
+                <CategoryChip v-if="row.chip" :category="row.chip" />
+                <span
+                  v-if="showReadProgressBadge(row.item)"
+                  class="favorite-item__read-progress"
+                  data-testid="read-progress-badge"
+                >
+                  {{ readProgressLabelOf(row.item) }}
+                </span>
+              </template>
+            </AppListRow>
+          </div>
+        </ContentLayout>
+
+        <!-- FabLayout replica: refresh + back-to-top mini FABs
+             (scene_favorites.xml v_refresh / v_go_to cluster).
+             宽屏双栏下集群锚回左栏右下角（TwoPaneLayout :deep 规则）。 -->
+        <FabLayout
+          v-model:expanded="fabExpanded"
+          primary-icon="reorder"
+          :actions="fabActions"
+          @click-secondary="onFabAction"
+        />
+      </template>
+
+      <!-- 详情右栏：选中即原位加载（不跳路由）；面板返回箭头 = 清除选中。 -->
+      <template #detail>
+        <GalleryDetailPane
+          :gid="selectedGid!"
+          :token="selectedToken"
+          pane
+          @back="clearSelection"
+        />
+      </template>
+    </TwoPaneLayout>
 
     <Teleport to="body">
       <!-- Toast (Android Toast equivalent, F4) -->
@@ -251,8 +275,10 @@ import {
   type GalleryCategory,
 } from '@/types/components'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
+import TwoPaneLayout from '@/components/layout/TwoPaneLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import AppListRow from '@/components/gallery/AppListRow.vue'
+import GalleryDetailPane from '@/components/gallery/GalleryDetailPane.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
 import CategoryChip from '@/components/atoms/CategoryChip.vue'
 import { parseFavoriteSlotNames } from '@/utils/favoriteSlotNames'
@@ -566,9 +592,32 @@ function selectSlot(slot: number, event: MouseEvent): void {
 
 /* --------------------------------------------------- click partitions --- */
 
-/** 缩略图点击 → 详情页；P-A：本地 token 透传（收藏行若无历史/下载背书，
- *  服务端凭 token 上游直取）。 */
-function openDetail(gid: number): void {
+/**
+ * 双栏右栏选中态（T3，内存组件态）：宽屏点选 → 右栏原位加载（不跳路由）；
+ * 跨 960px 阈值选中保留；窄屏跳整页详情（P-A：本地 token 透传，现状行为）。
+ */
+const selectedGid = ref<number | null>(null)
+const selectedToken = ref<string | undefined>(undefined)
+
+function selectGallery(gid: number): void {
+  const item = favorites.value.find((entry) => entry.gid === gid)
+  selectedGid.value = gid
+  selectedToken.value = item?.token || undefined
+}
+
+/** 清除选中（右栏返回箭头 / Esc / 宽屏浏览器返回首次触发）。 */
+function clearSelection(): void {
+  selectedGid.value = null
+  selectedToken.value = undefined
+}
+
+/** 缩略图/主体点击：宽屏双栏 = 选中右栏；窄屏 = 详情页（P-A：本地 token
+ *  透传，收藏行若无历史/下载背书，服务端凭 token 上游直取）。 */
+function openDetail(gid: number, wide: boolean): void {
+  if (wide) {
+    selectGallery(gid)
+    return
+  }
   const item = favorites.value.find((entry) => entry.gid === gid)
   void router.push({
     path: `/gallery/${gid}`,

@@ -13,10 +13,11 @@ import FilterPanel from '@/components/search/FilterPanel.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import ContentLayout from '@/components/layout/ContentLayout.vue'
 import { galleryApi } from '@/api/gallery'
+import { commentApi } from '@/api/comment'
 import { preferencesApi } from '@/api/preferences'
 import type { SearchFilters } from '@/api/gallery'
 import type { Preferences } from '@/api/preferences'
-import type { GalleryInfo } from '@/types'
+import type { GalleryDetail, GalleryInfo } from '@/types'
 import { ADVANCE_SEARCH_BITS } from '@/types/components'
 import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 import { KeepAlive, defineComponent, h, shallowRef, type Component } from 'vue'
@@ -36,7 +37,12 @@ vi.mock('@/api/gallery', () => ({
     getQuickSearches: vi.fn(),
     createQuickSearch: vi.fn(),
     deleteQuickSearch: vi.fn(),
+    getDetail: vi.fn(),
   },
+}))
+
+vi.mock('@/api/comment', () => ({
+  commentApi: { listComments: vi.fn(), postComment: vi.fn(), voteComment: vi.fn() },
 }))
 
 vi.mock('@/api/preferences', () => ({
@@ -78,11 +84,43 @@ function prefsFixture(general: Record<string, unknown> = {}): Preferences {
   } as unknown as Preferences
 }
 
+/* ---------------------- 双栏断点桩（T3，平板对齐） ---------------------- */
+
+type MqlListener = (event: MediaQueryListEvent) => void
+
+/**
+ * happy-dom 的 matchMedia 对 min-width 查询恒 true（默认视口 1024px），会把
+ * 视图直接推进宽屏双栏。断点桩把判定钉死：默认窄屏（现状行为回归保护），
+ * 双栏用例显式 stubMatchMedia(true)。
+ */
+let setWide: (matches: boolean) => void = () => {}
+
+function stubMatchMedia(matches: boolean): void {
+  const listeners = new Set<MqlListener>()
+  vi.stubGlobal(
+    'matchMedia',
+    vi.fn().mockImplementation((query: string) => ({
+      matches,
+      media: query,
+      addEventListener: (_type: string, cb: MqlListener) => {
+        listeners.add(cb)
+      },
+      removeEventListener: (_type: string, cb: MqlListener) => {
+        listeners.delete(cb)
+      },
+    })),
+  )
+  setWide = (next: boolean) => {
+    for (const cb of [...listeners]) cb({ matches: next } as MediaQueryListEvent)
+  }
+}
+
 describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
   let wrapper: VueWrapper
 
   beforeEach(() => {
     setActivePinia(createPinia())
+    stubMatchMedia(false)
     localStorage.clear()
     pushMock.mockClear()
     vi.mocked(galleryApi.search).mockResolvedValue({ success: true, data: [], total: 0 })
@@ -103,6 +141,7 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
 
   afterEach(() => {
     wrapper?.unmount()
+    vi.unstubAllGlobals()
     vi.clearAllMocks()
   })
 
@@ -719,5 +758,133 @@ describe('SearchView — Wave-1 1a search filter wiring (A5)', () => {
       const actions = wrapper.findComponent(FabLayout).props('actions') as Array<{ id: string }>
       expect(actions.map((action) => action.id)).toEqual(['save-quick', 'manage-quick'])
     })
+  })
+})
+
+describe('SearchView — 宽屏双栏（T3 平板对齐，2026-09-20 定案）', () => {
+  let wrapper: VueWrapper
+
+  /** Minimal GalleryInfo row（同上 W3-F2 describe 的 fixture 形状）。 */
+  function galleryFixture(overrides: Partial<GalleryInfo> = {}): GalleryInfo {
+    return {
+      gid: 1,
+      token: 'tok',
+      title: 'Test Gallery',
+      titleJpn: 'テストギャラリー',
+      thumb: 'https://example.com/t.jpg',
+      category: 1,
+      posted: '2026-01-01 00:00',
+      uploader: 'someone',
+      rating: 4.5,
+      rated: false,
+      simpleLanguage: 'Chinese',
+      simpleTags: ['tag one'],
+      thumbWidth: 250,
+      thumbHeight: 354,
+      pages: 20,
+      favoriteSlot: -1,
+      favoriteName: '',
+      ...overrides,
+    }
+  }
+
+  function detailFixture(overrides: Partial<GalleryDetail> = {}): GalleryDetail {
+    return {
+      gid: 1,
+      token: 'tok',
+      title: 'Detail Gallery',
+      titleJpn: '',
+      thumb: '',
+      category: 1,
+      posted: '',
+      uploader: '',
+      rating: 4.5,
+      rated: false,
+      simpleLanguage: '',
+      simpleTags: [],
+      thumbWidth: 0,
+      thumbHeight: 0,
+      pages: 20,
+      favoriteSlot: -2,
+      favoriteName: '',
+      tags: [],
+      imageUrl: '',
+      ...overrides,
+    }
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    stubMatchMedia(true)
+    localStorage.clear()
+    pushMock.mockClear()
+    vi.mocked(galleryApi.search).mockResolvedValue({
+      success: true,
+      data: [galleryFixture()],
+      total: 1,
+    })
+    vi.mocked(galleryApi.getQuickSearches).mockResolvedValue({ success: true, data: [] })
+    vi.mocked(preferencesApi.get).mockResolvedValue(prefsFixture())
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    vi.mocked(commentApi.listComments).mockResolvedValue({ comments: [] })
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    setPrivacyMaskEnabled(false)
+    vi.unstubAllGlobals()
+    vi.clearAllMocks()
+  })
+
+  async function mountWide() {
+    wrapper = mount(SearchView)
+    await flushPromises()
+    await flushPromises()
+    return wrapper
+  }
+
+  it('宽屏：无选中 → 占位符；点选列表项 → 右栏原位加载详情、路由不变', async () => {
+    await mountWide()
+
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(true)
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+
+    expect(pushMock).not.toHaveBeenCalled()
+    expect(wrapper.find('.detail-header__title').text()).toBe('Detail Gallery')
+    expect(galleryApi.getDetail).toHaveBeenCalledWith(1, 'tok')
+  })
+
+  it('宽屏：Esc 先清除选中回到占位符', async () => {
+    await mountWide()
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.detail-header__title').exists()).toBe(true)
+
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    await flushPromises()
+
+    expect(wrapper.find('[data-testid="two-pane-placeholder"]').exists()).toBe(true)
+    expect(pushMock).not.toHaveBeenCalled()
+  })
+
+  it('跨 960px 阈值来回：选中态保留（变窄后回宽，详情不重载）', async () => {
+    await mountWide()
+    await wrapper.find('.app-list-row__thumb').trigger('click')
+    await flushPromises()
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
+
+    setWide(false)
+    await flushPromises()
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(false)
+    expect(wrapper.find('[data-testid="gallery-detail-pane"]').exists()).toBe(true)
+
+    setWide(true)
+    await flushPromises()
+    expect(wrapper.find('.two-pane--wide').exists()).toBe(true)
+    expect(wrapper.find('.detail-header__title').text()).toBe('Detail Gallery')
+    expect(galleryApi.getDetail).toHaveBeenCalledTimes(1)
   })
 })
