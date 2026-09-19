@@ -71,6 +71,46 @@ class DownloadServiceTest {
         mock(com.hippo.anotherviewer.web.config.CurrentUsernameProvider::class.java)
             .apply { `when`(currentUsername()).thenReturn(name) }
 
+    // ── W1: 下载列表 uploader/pages 映射（GalleryInfoBase 列，WebUI 下载页展示） ──
+
+    @Test
+    fun `listDownloads maps uploader and pages from the entity`() {
+        val full = DownloadInfoEntity().apply {
+            id = 1L; gid = 42L; token = "tok"; title = "T"
+            uploader = "someone"; pages = 42
+        }
+        val bare = DownloadInfoEntity().apply {
+            id = 2L; gid = 43L; token = "tok2"; title = "T2"
+        }
+        `when`(downloadRepository.findAllByDeletedFalse(any(org.springframework.data.domain.Pageable::class.java)))
+            .thenReturn(org.springframework.data.domain.PageImpl(listOf(full, bare)))
+        `when`(downloadRepository.countByDeletedFalse()).thenReturn(2L)
+        `when`(historyRepository.findByGidIn(any<Collection<Long>>())).thenReturn(emptyList())
+
+        val response = service.listDownloads()
+
+        val byGid = response.downloads.associateBy { it.gid }
+        assertEquals("someone", byGid[42L]!!.uploader)
+        assertEquals(42, byGid[42L]!!.pages)
+        // 空态：实体列缺省 → uploader=null、pages=0。
+        assertNull(byGid[43L]!!.uploader)
+        assertEquals(0, byGid[43L]!!.pages)
+    }
+
+    @Test
+    fun `getDownloadInfo maps uploader and pages on the single-row path`() {
+        val row = DownloadInfoEntity().apply {
+            id = 5L; gid = 77L; token = "tok"; title = "T"
+            uploader = "uploader-77"; pages = 9
+        }
+        `when`(downloadRepository.findById(5L)).thenReturn(Optional.of(row))
+
+        val item = service.getDownloadInfo(5L)!!
+
+        assertEquals("uploader-77", item.uploader)
+        assertEquals(9, item.pages)
+    }
+
     @Test
     fun `state counts use countByStateAndDeletedFalse instead of loading entities`() {
         // A7-2（D8）: stats 计数不计墓碑（COUNT SQL，不加载实体，语义同前）。

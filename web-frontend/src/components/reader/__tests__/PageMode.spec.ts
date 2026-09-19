@@ -8,7 +8,13 @@ import {
   DEFAULT_PREFERENCES,
   DEFAULT_READER_PREFERENCES,
 } from '@/api/preferences'
-import { firstPageOfSpread, spreadIndexOf } from '../PageMode.vue'
+import {
+  firstPageOfSpread,
+  pageImageUrl,
+  prefetchNeighbors,
+  prefetchSpreadNeighbors,
+  spreadIndexOf,
+} from '../PageMode.vue'
 
 function prefsWithScaling(pageScaling: string): void {
   const store = usePreferencesStore()
@@ -19,7 +25,7 @@ function prefsWithScaling(pageScaling: string): void {
   }
 }
 
-function mountPageMode(zoom = 1) {
+function mountPageMode(zoom = 1, overrides: Record<string, unknown> = {}) {
   return mount(PageMode, {
     props: {
       gid: 123456,
@@ -27,6 +33,7 @@ function mountPageMode(zoom = 1) {
       totalPages: 10,
       direction: 'ltr',
       zoom,
+      ...overrides,
     },
     attachTo: document.body,
   })
@@ -245,6 +252,170 @@ describe('PageMode — EH 熔断：跳过指数退避直接终态（plan-2026-08
     const wrapper = mountPageMode()
     await fireImageError(wrapper)
     expect(wrapper.find('.page-mode__overlay--error').exists()).toBe(false)
+    wrapper.unmount()
+  })
+})
+
+/* ------------------------------------------------------------------------ */
+/* V5：相邻页预取                                                             */
+/* ------------------------------------------------------------------------ */
+
+/** 捕获 new Image() 的预取目标（stub 掉 happy-dom 的原生 Image）。 */
+class FakeImage {
+  static instances: FakeImage[] = []
+  src = ''
+  decoding = ''
+  constructor() {
+    FakeImage.instances.push(this)
+  }
+}
+
+/** 与组件 baseSrcFor 同式的期望 URL（happy-dom: clientWidth=0 → innerWidth 兜底）。 */
+function expectedUrl(gid: number, page: number, cssWidth: number): string {
+  const dpr =
+    typeof window.devicePixelRatio === 'number' && window.devicePixelRatio > 0
+      ? window.devicePixelRatio
+      : 1
+  return pageImageUrl(gid, page, Math.max(1, Math.round(cssWidth * dpr)))
+}
+
+function stageWidth(): number {
+  const el = document.querySelector('.page-mode')
+  const measured = el instanceof HTMLElement ? el.clientWidth : 0
+  return measured || window.innerWidth
+}
+
+describe('PageMode — 相邻页预取（V5）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    prefsWithScaling('fit')
+    FakeImage.instances = []
+    vi.stubGlobal('Image', FakeImage)
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    document.body.innerHTML = ''
+  })
+
+  it('翻页时后台预取前/后一页（prev 在前），挂载本身不预取', async () => {
+    const wrapper = mountPageMode()
+    expect(FakeImage.instances).toHaveLength(0)
+
+    await wrapper.setProps({ page: 5 })
+
+    const w = stageWidth()
+    expect(FakeImage.instances.map((img) => img.src)).toEqual([
+      expectedUrl(123456, 4, w),
+      expectedUrl(123456, 6, w),
+    ])
+    // 不预取当前页自身（真实 <img> 已在请求它）。
+    expect(FakeImage.instances.map((img) => img.src)).not.toContain(expectedUrl(123456, 5, w))
+    wrapper.unmount()
+  })
+
+  it('末页不预取 next（越界即不发请求）', async () => {
+    const wrapper = mountPageMode(1, { page: 8 })
+    expect(FakeImage.instances).toHaveLength(0)
+
+    await wrapper.setProps({ page: 9 })
+
+    expect(FakeImage.instances.map((img) => img.src)).toEqual([
+      expectedUrl(123456, 8, stageWidth()),
+    ])
+    wrapper.unmount()
+  })
+
+  it('首页不预取 prev', async () => {
+    // 翻回第 0 页：只预取 next（1），绝无 page -1 的请求。
+    const wrapper = mountPageMode(1, { page: 1 })
+    expect(FakeImage.instances).toHaveLength(0)
+
+    await wrapper.setProps({ page: 0 })
+
+    expect(FakeImage.instances.map((img) => img.src)).toEqual([
+      expectedUrl(123456, 1, stageWidth()),
+    ])
+    wrapper.unmount()
+  })
+})
+
+describe('PageMode — 预取边界纯函数（V5）', () => {
+  it('prefetchNeighbors：钳到 [0, total)，两端都不越界', () => {
+    expect(prefetchNeighbors(5, 10)).toEqual([4, 6])
+    expect(prefetchNeighbors(0, 10)).toEqual([1])
+    expect(prefetchNeighbors(9, 10)).toEqual([8])
+    expect(prefetchNeighbors(0, 1)).toEqual([])
+    expect(prefetchNeighbors(0, 0)).toEqual([])
+  })
+
+  it('prefetchSpreadNeighbors：封面独页语义下取前/后铺摊主页面', () => {
+    // 铺摊 0 | (1,2) | (3,4) | 5（total=6）
+    expect(prefetchSpreadNeighbors(0, 6, true)).toEqual([1])
+    expect(prefetchSpreadNeighbors(1, 6, true)).toEqual([0, 3])
+    expect(prefetchSpreadNeighbors(3, 6, true)).toEqual([1, 5])
+    // 末铺摊（独页 5）：只有 prev。
+    expect(prefetchSpreadNeighbors(5, 6, true)).toEqual([3])
+    expect(prefetchSpreadNeighbors(0, 1, true)).toEqual([])
+  })
+
+  it('prefetchSpreadNeighbors：firstPageCover=false 时边界整体前移', () => {
+    // 铺摊 (0,1) | (2,3) | (4,5)（total=6）
+    expect(prefetchSpreadNeighbors(0, 6, false)).toEqual([2])
+    expect(prefetchSpreadNeighbors(2, 6, false)).toEqual([0, 4])
+    expect(prefetchSpreadNeighbors(4, 6, false)).toEqual([2])
+  })
+})
+
+/* ------------------------------------------------------------------------ */
+/* T1a 对照：单页模式的方案消费点（共享 composable 的 provider 契约）          */
+/* ------------------------------------------------------------------------ */
+
+describe('PageMode — tapZoneScheme 方案消费（T1a 对照）', () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+  })
+
+  afterEach(() => {
+    document.body.innerHTML = ''
+  })
+
+  function pinStageGeometry(wrapper: ReturnType<typeof mountPageMode>, width: number): HTMLElement {
+    const el = wrapper.get('.page-mode').element as HTMLElement
+    Object.defineProperty(el, 'clientWidth', { value: width, configurable: true })
+    vi.spyOn(el, 'getBoundingClientRect').mockReturnValue({
+      left: 0,
+      top: 0,
+      right: width,
+      bottom: 600,
+      width,
+      height: 600,
+      x: 0,
+      y: 0,
+      toJSON: () => ({}),
+    } as DOMRect)
+    return el
+  }
+
+  function clickAt(el: HTMLElement, clientX: number): void {
+    const event = new MouseEvent('click', { bubbles: true, clientX, clientY: 300 })
+    Object.defineProperty(event, 'pointerType', { value: 'mouse' })
+    el.dispatchEvent(event)
+  }
+
+  it('disabled：点击不翻页，一律 toggle-chrome（provider 契约不回归）', () => {
+    prefsWithScaling('fit')
+    const store = usePreferencesStore()
+    store.prefs!.reader.tapZoneScheme = 'disabled'
+    const wrapper = mountPageMode()
+    const el = pinStageGeometry(wrapper, 1000)
+
+    clickAt(el, 100)
+    clickAt(el, 900)
+
+    expect(wrapper.emitted('prev')).toBeUndefined()
+    expect(wrapper.emitted('next')).toBeUndefined()
+    expect(wrapper.emitted('toggle-chrome')).toHaveLength(2)
     wrapper.unmount()
   })
 })

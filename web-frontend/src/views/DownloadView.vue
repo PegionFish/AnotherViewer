@@ -213,7 +213,9 @@
             :id="row.item.id"
             :gid="row.item.gid"
             :title="displayTitle(row.item)"
+            :subtitle="displaySubtitle(row.item)"
             :thumb="row.item.thumb"
+            :thumb-width="240"
             :aria-label="`${displayTitle(row.item)} — ${stateLabelOf(row.item)}`"
             :selectable="selectMode"
             :selected="selectedIds.has(row.item.id)"
@@ -225,6 +227,15 @@
           >
             <template #meta>
               <CategoryChip v-if="row.chip" :category="row.chip" />
+              <!-- W1b 偏好接线（SearchView 同一门控）：上传者（showUploader，
+                   打码开启一律不渲染——敏感字段）+ 画廊页数（showGalleryPages，
+                   服务器下发 >0 才显示）。 -->
+              <span v-if="showUploader(row.item)" class="download-item__uploader">
+                {{ row.item.uploader }}
+              </span>
+              <span v-if="showGalleryPages(row.item)" class="download-item__gallery-pages">
+                {{ row.item.pages }}P
+              </span>
               <span v-if="row.item.total > 0" class="download-item__pages">
                 {{ row.item.done }}/{{ row.item.total }} pages
               </span>
@@ -496,7 +507,8 @@ import { usePcInput } from '@/composables/usePcInput'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import type { FabAction } from '@/types/components'
 import { CATEGORY_BY_BIT } from '@/types/components'
-import { maskedTitle } from '@/utils/privacyMask'
+import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
+import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
 import { usePreferencesStore } from '@/stores/preferences'
 import {
   DEFAULT_DOWNLOAD_LIST_PREFS,
@@ -793,6 +805,44 @@ function onRetry(): void {
 /** 行展示标题——脱敏在本视图完成（与原 DownloadItem 同一表达式，逻辑不变）。 */
 function displayTitle(item: DownloadItem): string {
   return maskedTitle(item.title || item.titleJpn || 'Untitled', item.gid)
+}
+
+/**
+ * General 偏好快捷视图（W1b：showJpnTitle / showUploader / showGalleryPages，
+ * SearchView 同源读取）。prefs 未加载时为 undefined——上传者/页数按防御默认
+ * 隐藏；日文副题的未加载防闪失兜底在 isJpnSubtitleVisible 内部处理。
+ */
+const generalPrefs = computed(() => preferencesStore.prefs?.general)
+
+/**
+ * 行副题（日文标题）：打码开启或 showJpnTitle 关闭时隐藏（SearchView
+ * displaySubtitle 同一门控；prefs 未加载按显示渲染防闪失——T2 定案）。
+ */
+function displaySubtitle(item: DownloadItem): string | null {
+  if (privacyMaskEnabled.value) return null
+  if (!item.titleJpn) return null
+  if (!isJpnSubtitleVisible(generalPrefs.value)) return null
+  return item.titleJpn
+}
+
+/**
+ * 上传者（B-2 信息开关的下载页接线）：严格 `=== true` 才显示；隐私打码
+ * 开启时属敏感内容一律隐藏（SearchView/GalleryCard 同语义）。
+ */
+function showUploader(item: DownloadItem): boolean {
+  return (
+    generalPrefs.value?.showUploader === true &&
+    !privacyMaskEnabled.value &&
+    Boolean(item.uploader)
+  )
+}
+
+/**
+ * 画廊页数（`{{ pages }}P`）：偏好开启且服务器下发了 >0 的页数才显示
+ * （`pages` 可能为 0 / 旧服务器缺省 undefined → 隐藏）。
+ */
+function showGalleryPages(item: DownloadItem): boolean {
+  return generalPrefs.value?.showGalleryPages === true && (item.pages ?? 0) > 0
 }
 
 /* W5/W7 (plan-2026-09-02): 阅读进度角标——showReadProgress 开且进度 > 0 才
@@ -1802,6 +1852,25 @@ onUnmounted(() => {
 
 /* W5/W7: 阅读进度角标 — 12sp secondary，跟在下载进度文案之后。 */
 .download-item__read-progress {
+  flex-shrink: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* W1b: 上传者（showUploader）— 12sp secondary，超长省略；打码开启不渲染。 */
+.download-item__uploader {
+  min-width: 0;
+  font-size: var(--text-super-small); /* 12sp */
+  color: var(--text-color-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* W1b: 画廊页数（showGalleryPages）— 12sp secondary，`N P` 计数稳定对齐。 */
+.download-item__gallery-pages {
   flex-shrink: 0;
   font-size: var(--text-super-small); /* 12sp */
   color: var(--text-color-secondary);

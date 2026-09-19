@@ -2,6 +2,7 @@ package com.hippo.anotherviewer.web.api
 
 import com.hippo.anotherviewer.web.any
 import com.hippo.anotherviewer.web.argThatK
+import com.hippo.anotherviewer.web.captureK
 import com.hippo.anotherviewer.web.config.GlobalExceptionHandler
 import com.hippo.anotherviewer.web.config.SiteCoreConfigProperties
 import com.hippo.anotherviewer.web.eq
@@ -14,6 +15,7 @@ import com.hippo.anotherviewer.web.service.InMemoryJobStore
 import com.hippo.anotherviewer.web.service.JobService
 import com.hippo.anotherviewer.web.service.PrefetchService
 import com.hippo.anotherviewer.web.service.SiteSessionManager
+import com.hippo.anotherviewer.web.util.ThumbnailScaler
 import org.springframework.context.ApplicationEventPublisher
 import okhttp3.Interceptor
 import okhttp3.MediaType.Companion.toMediaType
@@ -24,11 +26,13 @@ import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import org.mockito.ArgumentCaptor
 import org.mockito.ArgumentMatchers.anyInt
 import org.mockito.ArgumentMatchers.anyLong
 import org.mockito.Mockito.`when`
 import org.mockito.Mockito.mock
 import org.mockito.Mockito.never
+import org.mockito.Mockito.times
 import org.mockito.Mockito.verify
 import org.springframework.test.web.servlet.MockMvc
 import org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get
@@ -37,8 +41,14 @@ import org.springframework.test.web.servlet.result.MockMvcResultMatchers.header
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath
 import org.springframework.test.web.servlet.result.MockMvcResultMatchers.status
 import org.springframework.test.web.servlet.setup.MockMvcBuilders
+import java.awt.Color
+import java.awt.Graphics2D
+import java.awt.image.BufferedImage
+import java.io.ByteArrayInputStream
+import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicReference
+import javax.imageio.ImageIO
 
 class ImageProxyControllerTest {
 
@@ -69,6 +79,29 @@ class ImageProxyControllerTest {
             .header("Content-Type", contentType)
             .body(body.toResponseBody(contentType.toMediaType()))
             .build()
+
+    /** V4 W1: 二进制上游响应（真实图片字节）。 */
+    private fun cannedBytes(request: Request, code: Int, contentType: String, body: ByteArray): Response =
+        Response.Builder()
+            .request(request)
+            .protocol(Protocol.HTTP_1_1)
+            .code(code)
+            .message("OK")
+            .header("Content-Type", contentType)
+            .body(body.toResponseBody(contentType.toMediaType()))
+            .build()
+
+    /** V4 W1: 生成纯色测试图并按格式编码（AWT headless 可用）。 */
+    private fun solidImageBytes(format: String, width: Int, height: Int): ByteArray {
+        val image = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        val graphics: Graphics2D = image.createGraphics()
+        graphics.color = Color.WHITE
+        graphics.fillRect(0, 0, width, height)
+        graphics.dispose()
+        val out = ByteArrayOutputStream()
+        ImageIO.write(image, format, out)
+        return out.toByteArray()
+    }
 
     private lateinit var imageCacheService: ImageCacheService
     private lateinit var sessionManager: SiteSessionManager
@@ -362,5 +395,125 @@ class ImageProxyControllerTest {
             10, seen.tag(Int::class.javaObjectType),
             "thumbnail fetch must carry the 10s per-request max-time tag"
         )
+    }
+
+    // ------------------------------------------------------------------
+    // V4 W1: `w` 缩略图宽度（契约见 ThumbnailScaler；纯函数级断言在
+    // ThumbnailScalerTest，此处覆盖控制器级行为：缓存键、回退、上游共享）。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `proxyImage w scales the fetched cover down and caches it under the w-derived key`() {
+        val url = "https://e-hentai.org/t/1001/cover.jpg"
+        val full = solidImageBytes("jpeg", 400, 200)
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(null)
+        site = FakeSite { cannedBytes(it, 200, "image/jpeg", full) }
+        setUpClient(site)
+
+        val result = mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "100"))
+            .andExpect(status().isOk)
+            .andExpect(header().string("Content-Type", "image/jpeg"))
+            .andReturn()
+
+        val decoded = ImageIO.read(ByteArrayInputStream(result.response.contentAsByteArray))
+        org.junit.jupiter.api.Assertions.assertEquals(100, decoded.width)
+        org.junit.jupiter.api.Assertions.assertEquals(50, decoded.height, "高度按比例缩放")
+
+        // 全尺寸回填行为不变 + 缩放产物写入独立 w 键（不同宽度互不污染）。
+        verify(imageCacheService).cacheImage(eq(url), argThatK<ByteArray> { it.contentEquals(full) })
+        verify(imageCacheService).cacheImage(
+            eq(ThumbnailScaler.thumbnailCacheKey(url, 100)),
+            argThatK<ByteArray> {
+                val img = ImageIO.read(ByteArrayInputStream(it))
+                img.width == 100 && img.height == 50
+            }
+        )
+    }
+
+    @Test
+    fun `proxyImage w serves a scaled cache hit without consulting the upstream or the full entry`() {
+        val url = "https://e-hentai.org/t/1001/cover.jpg"
+        val scaled = solidImageBytes("jpeg", 80, 60)
+        `when`(imageCacheService.getCachedImage(ThumbnailScaler.thumbnailCacheKey(url, 80))).thenReturn(scaled)
+        site = FakeSite { cannedBytes(it, 200, "image/jpeg", ByteArray(0)) }
+        setUpClient(site)
+
+        val result = mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "80"))
+            .andExpect(status().isOk)
+            .andReturn()
+
+        val decoded = ImageIO.read(ByteArrayInputStream(result.response.contentAsByteArray))
+        org.junit.jupiter.api.Assertions.assertEquals(80, decoded.width)
+        org.junit.jupiter.api.Assertions.assertEquals(60, decoded.height)
+        org.junit.jupiter.api.Assertions.assertEquals(0, site.callCount, "缩放缓存命中绝不触发上游")
+        verify(imageCacheService, never()).getCachedImage(url)
+        verify(imageCacheService, never()).cacheImage(any(), any())
+    }
+
+    @Test
+    fun `proxyImage invalid w values fall back to the original size and never touch the scaled cache`() {
+        val url = "https://e-hentai.org/t/1001/cover.jpg"
+        val full = solidImageBytes("jpeg", 400, 200)
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(null)
+        site = FakeSite { cannedBytes(it, 200, "image/jpeg", full) }
+        setUpClient(site)
+
+        // 非数字 / 0 / 负数 / 超大 —— 一律 200 原尺寸，绝不 4xx。
+        for (bad in listOf("abc", "0", "-3", "5000")) {
+            val result = mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", bad))
+                .andExpect(status().isOk)
+                .andReturn()
+            val decoded = ImageIO.read(ByteArrayInputStream(result.response.contentAsByteArray))
+            org.junit.jupiter.api.Assertions.assertEquals(400, decoded.width, "w=$bad 必须回退原尺寸")
+            org.junit.jupiter.api.Assertions.assertEquals(200, decoded.height, "w=$bad 必须回退原尺寸")
+        }
+
+        val keyCaptor = ArgumentCaptor.forClass(String::class.java)
+        val bytesCaptor = ArgumentCaptor.forClass(ByteArray::class.java)
+        verify(imageCacheService, times(4)).cacheImage(captureK<String>(keyCaptor), captureK<ByteArray>(bytesCaptor))
+        org.junit.jupiter.api.Assertions.assertTrue(
+            keyCaptor.allValues.all { it == url },
+            "非法 w 绝不写缩放缓存键，全尺寸键保持不变"
+        )
+        org.junit.jupiter.api.Assertions.assertTrue(
+            bytesCaptor.allValues.all { it.contentEquals(full) },
+            "回退路径写入缓存的仍是全尺寸字节"
+        )
+    }
+
+    @Test
+    fun `proxyImage w falls back to the original bytes when the upstream body is not decodable`() {
+        val url = "https://e-hentai.org/t/1001/cover.jpg"
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(null)
+        site = FakeSite { cannedBytes(it, 200, "image/jpeg", "NOT-AN-IMAGE".toByteArray()) }
+        setUpClient(site)
+
+        val result = mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "100"))
+            .andExpect(status().isOk)
+            .andExpect(header().string("Content-Type", "image/jpeg"))
+            .andReturn()
+
+        org.junit.jupiter.api.Assertions.assertTrue(
+            result.response.contentAsByteArray.contentEquals("NOT-AN-IMAGE".toByteArray()),
+            "缩放失败回退原字节，绝不 4xx/5xx"
+        )
+        verify(imageCacheService).cacheImage(eq(url), any())
+        verify(imageCacheService, never()).cacheImage(
+            eq(ThumbnailScaler.thumbnailCacheKey(url, 100)), argThatK<ByteArray> { true }
+        )
+    }
+
+    @Test
+    fun `proxyImage w does not bypass the site whitelist`() {
+        val url = "https://evil.example.com/img.jpg"
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(null)
+        site = FakeSite { cannedBytes(it, 200, "image/jpeg", solidImageBytes("jpeg", 400, 200)) }
+        setUpClient(site)
+
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "100"))
+            .andExpect(status().isNotFound)
+            .andExpect(jsonPath("$.error.code").value("NOT_FOUND"))
+
+        org.junit.jupiter.api.Assertions.assertEquals(0, site.callCount, "w 不得绕过白名单")
     }
 }

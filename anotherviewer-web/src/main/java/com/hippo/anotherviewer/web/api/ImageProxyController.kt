@@ -7,6 +7,7 @@ import com.hippo.anotherviewer.web.config.SiteCoreConfigProperties
 import com.hippo.anotherviewer.web.dto.JobSubmitResponse
 import com.hippo.anotherviewer.web.dto.JobType
 import com.hippo.anotherviewer.web.util.ResponseTooLargeException
+import com.hippo.anotherviewer.web.util.ThumbnailScaler
 import com.hippo.anotherviewer.web.util.bytesBounded
 import com.hippo.anotherviewer.web.service.DownloadDirIndex
 import com.hippo.anotherviewer.web.service.DownloadService
@@ -41,7 +42,10 @@ import java.util.concurrent.Semaphore
  *   variant). See contracts/openapi.yaml `streamGalleryImage`.
  * - `GET /api/v1/image/proxy` — URL-keyed cache lookup; W3 R4-13 added
  *   fetch-on-miss for whitelisted Gallery Site URLs (backfill + content-type
- *   pass-through, unreachable site keeps the 404 envelope).
+ *   pass-through, unreachable site keeps the 404 envelope). V4 W1 adds an
+ *   optional `w` thumbnail-width parameter: scaled variants are cached under
+ *   a `w`-derived key and any invalid/unscaleable case falls back to the
+ *   original bytes (never 4xx). See [ThumbnailScaler] for the contract.
  * - `GET /api/v1/image/cache/status`, `POST /api/v1/image/cache/clear`.
  */
 @RestController
@@ -102,12 +106,33 @@ class ImageProxyController(
     // ── legacy endpoints (kept intact) ───────────────────────────
 
     @GetMapping("/proxy")
-    fun proxyImage(@RequestParam url: String): ResponseEntity<*> {
+    fun proxyImage(
+        @RequestParam url: String,
+        // V4 W1: 缩略图目标宽度（可选整型像素）。绑定用 String? 手动解析——
+        // 与阅读端点不同，/proxy 的契约要求非法值（非数字/≤0/超大）一律回退
+        // 原尺寸，绝不能因参数绑定失败 4xx；Int? 绑定会把非数字直接打成 400。
+        @RequestParam(required = false) w: String?,
+    ): ResponseEntity<*> {
+        // 解析失败 → null → 全程走原尺寸路径（与不带 w 的既有行为逐字节一致）。
+        val thumbWidth = ThumbnailScaler.parseThumbnailWidth(w)
+
+        // 缩放结果缓存命中（w 并入缓存键，不同宽度互不污染，原尺寸条目不动）。
+        if (thumbWidth != null) {
+            imageCacheService.getCachedImage(ThumbnailScaler.thumbnailCacheKey(url, thumbWidth))?.let { scaled ->
+                return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, ThumbnailScaler.sniffMime(scaled) ?: MediaType.IMAGE_JPEG_VALUE)
+                    .body(scaled)
+            }
+        }
+
         val cached = imageCacheService.getCachedImage(url)
         if (cached != null) {
-            return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_TYPE, MediaType.IMAGE_JPEG_VALUE)
-                .body(cached)
+            if (thumbWidth == null) {
+                return ResponseEntity.ok()
+                    .header(HttpHeaders.CONTENT_TYPE, MediaType.IMAGE_JPEG_VALUE)
+                    .body(cached)
+            }
+            return serveScaledOrOriginal(cached, MediaType.IMAGE_JPEG_VALUE, url, thumbWidth)
         }
 
         // W3 R4-13 fetch-on-miss (acceptance addition for the Tier-2 thumbnail
@@ -130,10 +155,12 @@ class ImageProxyController(
 
         // P3: 同 URL 并发请求共享一次上游 fetch。已在途 → 直接等它的结果
         // （失败以 completeExceptionally 收场，等的人统一回落 404 envelope）。
+        // future 恒为全尺寸响应，各 join 方（按各自的 w）join 后再自行缩放，
+        // 所以不同 w 的请求合并同一次上游 fetch 也不会串尺寸。
         val existing = proxyFetchers[url]
         if (existing != null) {
             return try {
-                existing.join()
+                maybeScaleJoined(existing.join(), url, thumbWidth)
             } catch (e: Exception) {
                 logger.warn("In-flight image proxy fetch failed for url={}", url, e)
                 proxyUnavailableEnvelope()
@@ -148,14 +175,14 @@ class ImageProxyController(
         if (raced != null) {
             proxyFetchSemaphore.release()
             return try {
-                raced.join()
+                maybeScaleJoined(raced.join(), url, thumbWidth)
             } catch (e: Exception) {
                 logger.warn("In-flight image proxy fetch failed for url={}", url, e)
                 proxyUnavailableEnvelope()
             }
         }
         try {
-            return future.join()
+            return maybeScaleJoined(future.join(), url, thumbWidth)
         } catch (e: Exception) {
             logger.warn("Image proxy fetch failed for url={}", url, e)
             return proxyUnavailableEnvelope()
@@ -168,6 +195,37 @@ class ImageProxyController(
     /** P3: /proxy 上游失败时等价于旧 catch 路径的 404 envelope。 */
     private fun proxyUnavailableEnvelope(): ResponseEntity<*> =
         errorEnvelope(HttpStatus.NOT_FOUND, "NOT_FOUND", "gallery site unreachable")
+
+    /**
+     * V4 W1: 拿到全尺寸响应（缓存命中或 fetch-on-miss join）后按 [width] 缩放。
+     * `width == null`（不带 w，或非法 w 回退）时原样透传——无 w 的既有行为
+     * 零改动。缩放失败（见 [ThumbnailScaler.scaleToWidth]）回退原尺寸字节，
+     * 绝不 4xx（缩略图是体验优化）。非 2xx envelope（404/502…）也不缩放，
+     * 错误按原样透传（E2E-6 原则：不拿假内容盖错误）。
+     */
+    private fun maybeScaleJoined(joined: ResponseEntity<*>, url: String, width: Int?): ResponseEntity<*> {
+        if (width == null) return joined
+        val body = joined.body
+        if (!joined.statusCode.is2xxSuccessful || body !is ByteArray) return joined
+        val mime = joined.headers.contentType?.toString() ?: MediaType.IMAGE_JPEG_VALUE
+        return serveScaledOrOriginal(body, mime, url, width)
+    }
+
+    /**
+     * V4 W1: 缩放 [source] 并把产物写入 `w` 派生缓存键（原尺寸条目保持不动）。
+     * 缩放不可能时（非 JPEG/PNG、动图 GIF、只放不缩、解码失败）原样返回，
+     * 且不写缩放缓存——后续同 w 请求再试一次，代价只是缓存字节的一次重解码。
+     */
+    private fun serveScaledOrOriginal(source: ByteArray, sourceMime: String, url: String, width: Int): ResponseEntity<*> {
+        val scaled = ThumbnailScaler.scaleToWidth(source, width)
+            ?: return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, sourceMime)
+                .body(source)
+        imageCacheService.cacheImage(ThumbnailScaler.thumbnailCacheKey(url, width), scaled.bytes)
+        return ResponseEntity.ok()
+            .header(HttpHeaders.CONTENT_TYPE, scaled.mimeType)
+            .body(scaled.bytes)
+    }
 
     /**
      * P3: /proxy 的单次上游抓取（自原 proxyImage miss 路径抽出，语义不变）。

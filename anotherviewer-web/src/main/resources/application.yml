@@ -16,6 +16,12 @@ server:
       suffix: .log
       max-days: 30
       pattern: '%t %a "%r" %s %B %D'
+  # WebUI 静态资产（Vite 产物文件名带 hash）允许激进缓存 + 文本类响应 gzip，
+  # 省掉每请求重复下载与明文传输。JSON API 一并压缩（>2KB 才值得）。
+  compression:
+    enabled: true
+    mime-types: text/html, text/css, text/javascript, application/javascript, application/json, image/svg+xml
+    min-response-size: 2048
 
 spring:
   datasource:
@@ -28,6 +34,14 @@ spring:
     hibernate:
       ddl-auto: update
     open-in-view: false
+  web:
+    resources:
+      cache:
+        # 静态资产默认 no-store（每请求全量回源）。Vite 构建产物文件名带内容
+        # hash，内容变更即换名，365d 强缓存安全。注意 index.html/sw.js 也被
+        # 一并缓存，发版后老用户需强刷或等缓存过期——如需发版即时生效，可
+        # 改用 ResourceHandlerCustomizer 仅对 /assets/** 施加长缓存。
+        period: 365d
   servlet:
     multipart:
       max-file-size: 50MB

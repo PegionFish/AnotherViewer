@@ -71,6 +71,34 @@ describe('AppListRow — 缩略图处理（与 DownloadItem/GalleryCard 同语�
   })
 })
 
+describe('AppListRow — 缩略图性能（W1b：decoding async + 代理 w 宽度参数）', () => {
+  it('marks the cover <img> decoding="async"（列表行性能项）', () => {
+    const wrapper = mountRow({ thumb: 'https://ehgt.org/t/9001/cover.jpg' })
+    expect(wrapper.find('.app-list-row__thumb img').attributes('decoding')).toBe('async')
+  })
+
+  it('appends &w=<thumbWidth> to the proxied thumb URL (下载列表行传 240)', () => {
+    const thumb = 'https://ehgt.org/t/9001/cover.jpg'
+    const wrapper = mountRow({ thumb, thumbWidth: 240 })
+    expect(wrapper.find('.app-list-row__thumb img').attributes('src')).toBe(
+      `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}&w=240`,
+    )
+  })
+
+  it('leaves the proxied thumb URL untouched without thumbWidth (其他列表视图不受影响)', () => {
+    const thumb = 'https://ehgt.org/t/9001/cover.jpg'
+    const wrapper = mountRow({ thumb })
+    expect(wrapper.find('.app-list-row__thumb img').attributes('src')).toBe(
+      `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`,
+    )
+  })
+
+  it('ignores thumbWidth for non-proxied (local) thumb paths', () => {
+    const wrapper = mountRow({ thumb: '/thumbs/9001/cover.jpg', thumbWidth: 240 })
+    expect(wrapper.find('.app-list-row__thumb img').attributes('src')).toBe('/thumbs/9001/cover.jpg')
+  })
+})
+
 describe('AppListRow — 点击分区（缩略图→详情 / 主体→阅读）', () => {
   it('thumb click emits open (detail) and not read', async () => {
     const wrapper = mountRow()

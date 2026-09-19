@@ -929,7 +929,9 @@ class DownloadService(
         // The server's absolute download path is never exposed to clients.
         downloadDir = null,
         error = error,
-        readProgress = readProgress
+        readProgress = readProgress,
+        uploader = uploader,
+        pages = pages
     )
 
     override fun destroy() {

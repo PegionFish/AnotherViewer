@@ -7,6 +7,8 @@ import { downloadApi } from '@/api/download'
 import type { DownloadItem } from '@/api/download'
 import { DOWNLOAD_UI_KEY } from '@/utils/downloadListSettings'
 import { filterSlotsApi } from '@/api/filterSlots'
+import { preferencesApi, type Preferences } from '@/api/preferences'
+import { setPrivacyMaskEnabled } from '@/utils/privacyMask'
 
 const { pushMock } = vi.hoisted(() => ({ pushMock: vi.fn() }))
 
@@ -35,6 +37,20 @@ vi.mock('@/api/download', () => ({
 
 vi.mock('@/api/filterSlots', () => ({
   filterSlotsApi: { get: vi.fn(), put: vi.fn() },
+}))
+
+/**
+ * W1b：偏好 API mock——偏好 store（usePreferencesStore.load）走这里。默认
+ * 拒绝（≈旧测试里服务器不可达：prefs 保持空，各展示位按防御默认隐藏）；
+ * 三偏好用例经 mockResolvedValue 注入 prefsFixture。
+ */
+vi.mock('@/api/preferences', () => ({
+  preferencesApi: {
+    get: vi.fn(async () => {
+      throw new Error('preferences offline in tests (mock via preferencesApi.get)')
+    }),
+    update: vi.fn(),
+  },
 }))
 
 /**
@@ -209,7 +225,9 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
 
     const img = wrapper.find('.app-list-row__thumb img')
     expect(img.exists()).toBe(true)
-    expect(img.attributes('src')).toBe(`/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`)
+    // W1b: 下载列表行封面带 w=240（服务端按比例缩放降带宽）+ decoding=async。
+    expect(img.attributes('src')).toBe(`/api/v1/image/proxy?url=${encodeURIComponent(thumb)}&w=240`)
+    expect(img.attributes('decoding')).toBe('async')
   })
 
   it('updates a rendered row from the WebSocket progress feed', async () => {
@@ -840,6 +858,153 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     await mountView()
     await wrapper.find('.app-list-row').trigger('click')
     expect(pushMock).toHaveBeenCalledWith({ path: '/reader/9002', query: { token: 'tok2' } })
+  })
+
+  /* ---------------- W1b: 三偏好与打码接线（日文副题 / 上传者 / 页数） ---------------- */
+
+  describe('DownloadView — 三偏好与打码接线 (W1b: jpn subtitle / uploader / pages)', () => {
+    afterEach(() => {
+      // 打码是模块级单例（localStorage + <html> 类）——逐用例复位。
+      setPrivacyMaskEnabled(false)
+    })
+
+    /** 偏好 fixture（与 SearchView.spec 同构：general 缺省全关）。 */
+    function prefsFixture(general: Record<string, unknown> = {}): Preferences {
+      return {
+        general: {
+          theme: 'dark',
+          themeAutoSwitch: false,
+          launchPage: 'homepage',
+          showReadProgress: true,
+          detailSize: 'medium',
+          thumbSize: 'medium',
+          historyInfoSize: 2,
+          showJpnTitle: false,
+          showGalleryPages: false,
+          showTagTranslations: false,
+          showGalleryComment: false,
+          showGalleryRating: false,
+          showEhEvents: false,
+          showEhLimits: false,
+          ...general,
+        },
+        reader: {
+          readingDirection: 'ltr',
+          pageMode: 'single',
+          firstPageCover: false,
+          pageScaling: 'fit-width',
+          startPosition: 'home',
+          autoPlayIntervalSec: 3,
+          showProgress: true,
+          showPageInterval: true,
+          fullscreen: false,
+          brightness: 100,
+        },
+        privacy: { enableAnalytics: false },
+      } as unknown as Preferences
+    }
+
+    /** 富样本行：日文标题 + 上传者 + 画廊页数齐全（其余同 makeDownload）。 */
+    function richDownload(id: number, overrides: Partial<DownloadItem> = {}): DownloadItem {
+      return makeDownload(id, {
+        titleJpn: '日本語タイトル',
+        uploader: 'artist_x',
+        pages: 24,
+        ...overrides,
+      })
+    }
+
+    function mockRows(items: DownloadItem[]): void {
+      vi.mocked(downloadApi.list).mockImplementation(async () => ({
+        downloads: items,
+        labels: [],
+        total: items.length,
+      }))
+    }
+
+    /** 注入 general 偏好（可选开打码）后挂载。mask 保持开启至断言结束
+        （afterEach 统一复位），保证「开启时」的渲染断言读到的是开启态。 */
+    async function mountWithPrefs(
+      general: Record<string, unknown>,
+      mask = false,
+    ): Promise<VueWrapper> {
+      vi.mocked(preferencesApi.get).mockResolvedValue(prefsFixture(general))
+      if (mask) setPrivacyMaskEnabled(true)
+      return mountView()
+    }
+
+    it('shows the jpn subtitle when showJpnTitle is on (mask off)', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({ showJpnTitle: true })
+      expect(w.find('.app-list-row__subtitle').text()).toBe('日本語タイトル')
+    })
+
+    it('hides the jpn subtitle when showJpnTitle is off (protocol default)', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({})
+      expect(w.find('.app-list-row__subtitle').exists()).toBe(false)
+    })
+
+    it('hides the jpn subtitle and masks the title when privacy mask is on', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({ showJpnTitle: true }, true)
+      expect(w.find('.app-list-row__subtitle').exists()).toBe(false)
+      expect(w.find('.app-list-row__title').text()).toBe('#9001')
+    })
+
+    it('shows the uploader when showUploader is on (mask off)', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({ showUploader: true })
+      expect(w.find('.download-item__uploader').text()).toBe('artist_x')
+    })
+
+    it('hides the uploader when showUploader is off', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({})
+      expect(w.find('.download-item__uploader').exists()).toBe(false)
+    })
+
+    it('never renders the uploader when privacy mask is on (敏感字段)', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({ showUploader: true }, true)
+      expect(w.find('.download-item__uploader').exists()).toBe(false)
+      expect(w.text()).not.toContain('artist_x')
+    })
+
+    it('shows the gallery page count as NP when showGalleryPages is on', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({ showGalleryPages: true })
+      expect(w.find('.download-item__gallery-pages').text()).toBe('24P')
+    })
+
+    it('hides the gallery page count when showGalleryPages is off', async () => {
+      mockRows([richDownload(1)])
+      const w = await mountWithPrefs({})
+      expect(w.find('.download-item__gallery-pages').exists()).toBe(false)
+    })
+
+    it('hides the gallery page count when the server reports 0 pages', async () => {
+      mockRows([richDownload(1, { pages: 0 })])
+      const w = await mountWithPrefs({ showGalleryPages: true })
+      expect(w.find('.download-item__gallery-pages').exists()).toBe(false)
+    })
+
+    it('hides the gallery page count when the server omits the field (旧服务器)', async () => {
+      mockRows([makeDownload(1, { titleJpn: '日本語タイトル', uploader: 'artist_x' })])
+      const w = await mountWithPrefs({ showGalleryPages: true })
+      expect(w.find('.download-item__gallery-pages').exists()).toBe(false)
+    })
+
+    it('renders the w=240 proxied cover with decoding=async on download rows', async () => {
+      const thumb = 'https://ehgt.org/t/1/cover.jpg'
+      mockRows([makeDownload(1, { thumb })])
+      const w = await mountWithPrefs({})
+      const img = w.find('.app-list-row__thumb img')
+      expect(img.attributes('src')).toBe(
+        `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}&w=240`,
+      )
+      expect(img.attributes('decoding')).toBe('async')
+    })
   })
 
   /* ---------------- KeepAlive 停用守卫（audit P2） ---------------- */

@@ -33,7 +33,13 @@ data class DownloadItem(
     // maps the column into the DTO.
     val error: String? = null,
     /** 阅读进度（0 起页索引，来自 history 行 page）；无对应历史行为 0，卡片角标据此隐藏。 */
-    val readProgress: Int? = null
+    val readProgress: Int? = null,
+    // Gallery meta from GalleryInfoBase columns, mapped by DownloadService.toItem.
+    // privacy.mask_enabled 时 PrivacyMaskFilter 在 JSON 树层把 uploader 清成 ""
+    //（/api/v1/download 在脱敏作用域内），DTO 层不做二次处理。
+    val uploader: String? = null,
+    /** 画廊总页数（GalleryInfoBase.pages 列），WebUI 下载卡片展示用。 */
+    val pages: Int = 0
 )
 
 data class DownloadLabel(

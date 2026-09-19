@@ -209,6 +209,8 @@ import {
   firstPageOfSpread,
   pageImageSrcset,
   pageImageUrl,
+  prefetchImage,
+  prefetchSpreadNeighbors,
   spreadIndexOf,
   useReaderGestures,
 } from './PageMode.vue'
@@ -382,6 +384,7 @@ watch(
 
 /* ------------------------------------------------------------------ */
 /* Gestures — same tap zones / swipe rules as single-page mode         */
+/* （tap zone 方案跟随 reader.tapZoneScheme 偏好，见 T1a）              */
 /* ------------------------------------------------------------------ */
 
 useReaderGestures({
@@ -391,7 +394,39 @@ useReaderGestures({
   onPrev: () => emit('prev'),
   onNext: () => emit('next'),
   onToggleChrome: () => emit('toggle-chrome'),
+  // T1a（缺陷修复）：三分区/边缘/禁用方案跟随 reader.tapZoneScheme 偏好——
+  // 与 PageMode 同一消费点（provider 在点击时现读，改动即时生效）。此前
+  // 未传，恒为三分区，横屏平板默认双页模式下用户偏好等于被无视。
+  tapZoneScheme: () => preferencesStore.prefs?.reader.tapZoneScheme ?? 'threeZone',
 })
+
+/* ------------------------------------------------------------------ */
+/* V5: 相邻铺摊预取——以当前主页面为基准预热前/后一个 spread 的主页面     */
+/*                                                                     */
+/* 双页模式导航按整铺摊移动，"相邻页"取前/后铺摊的阅读顺序首页（封面    */
+/* 独页语义经 prefetchSpreadNeighbors 处理；当前铺摊另一槽位已在屏上）。 */
+/* URL 复用 srcFor（半宽 × DPR），与槽位 <img> 的请求同一缓存条目；      */
+/* 不 immediate（挂载前 rootWidth 还是默认值）、同 URL 只发一次，        */
+/* prefetchImage 无回调——预取失败静默。                                  */
+/* ------------------------------------------------------------------ */
+
+const preloadedUrls = new Set<string>()
+
+watch(
+  () => [props.gid, props.page, props.totalPages] as const,
+  () => {
+    for (const p of prefetchSpreadNeighbors(
+      spread.value.first,
+      props.totalPages,
+      firstPageCover.value,
+    )) {
+      const url = srcFor(p)
+      if (preloadedUrls.has(url)) continue
+      preloadedUrls.add(url)
+      prefetchImage(url)
+    }
+  },
+)
 </script>
 
 <style scoped>

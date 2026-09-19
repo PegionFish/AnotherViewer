@@ -193,6 +193,61 @@ export function firstPageOfSpread(spread: number, firstPageCover = true): number
 }
 
 /* ------------------------------------------------------------------------ */
+/* V5: adjacent-page prefetch (browser-cache warm-up)                        */
+/*                                                                           */
+/* Every turn used to cold-fetch the next page through a spinner. Turning    */
+/* now also fires detached `new Image()` requests for the neighbouring       */
+/* pages so the real <img> hits the HTTP cache. Pure scheduling helpers are  */
+/* exported so the boundary rules stay unit-testable; the requests themselves*/
+/* are deliberately plain — no retry, no handlers, failure stays silent.     */
+/* ------------------------------------------------------------------------ */
+
+/**
+ * Reading-order neighbours of `page` worth prefetching in single-page mode:
+ * the page before and after, clipped to [0, total) — the last page never
+ * yields a "next", page 0 never a "prev".
+ */
+export function prefetchNeighbors(page: number, total: number): number[] {
+  const pages: number[] = []
+  if (page - 1 >= 0) pages.push(page - 1)
+  if (total > 0 && page + 1 < total) pages.push(page + 1)
+  return pages
+}
+
+/**
+ * Dual-page variant: navigation moves by whole spreads, so "adjacent" is the
+ * reading-order FIRST page of the previous / next spread (cover-alone
+ * convention included via `firstPageCover` — the second slot of the current
+ * spread is already on screen, and the far slot of a neighbouring spread
+ * resolves once that spread's primary is warm).
+ */
+export function prefetchSpreadNeighbors(
+  firstPage: number,
+  total: number,
+  firstPageCover: boolean,
+): number[] {
+  const pages: number[] = []
+  const spread = spreadIndexOf(firstPage, firstPageCover)
+  if (spread > 0) pages.push(firstPageOfSpread(spread - 1, firstPageCover))
+  const nextFirst = firstPageOfSpread(spread + 1, firstPageCover)
+  if (total > 0 && nextFirst > firstPage && nextFirst < total) pages.push(nextFirst)
+  return pages
+}
+
+/**
+ * Warm the browser cache with one page image URL — a detached `<img>` whose
+ * only job is to populate the HTTP cache. No load/error handlers on purpose:
+ * a failed prefetch is silent (the real `<img>` renders its own error state
+ * when the user actually turns there).
+ */
+export function prefetchImage(url: string): void {
+  if (typeof Image === 'undefined') return
+  const img = new Image()
+  img.decoding = 'async'
+  img.src = url
+}
+
+/* ------------------------------------------------------------------------ */
 /* Shared tap / swipe / wheel gesture handling                               */
 /* ------------------------------------------------------------------------ */
 
@@ -411,10 +466,16 @@ function devicePixelRatio(): number {
     : 1
 }
 
-const src = computed(() => {
-  const enhanced = props.enhancedUrls?.get(props.page)
+/** 本页 <img> 的基础 src（增强 hot-swap URL 优先）——V5 相邻页预取复用
+ *  同一构造，保证预取的 URL 与真实 <img> 要请求的完全一致（同一缓存条目）。 */
+function baseSrcFor(page: number): string {
+  const enhanced = props.enhancedUrls?.get(page)
   if (enhanced) return enhanced
-  const base = pageImageUrl(props.gid, props.page, stageSize.width * devicePixelRatio())
+  return pageImageUrl(props.gid, page, stageSize.width * devicePixelRatio())
+}
+
+const src = computed(() => {
+  const base = baseSrcFor(props.page)
   return retryTick.value > 0 ? `${base}&_r=${retryTick.value}` : base
 })
 
@@ -444,6 +505,33 @@ onMounted(() => {
 onBeforeUnmount(() => {
   stageObserver?.disconnect()
 })
+
+/* ------------------------------------------------------------------ */
+/* V5: 相邻页预取——翻到某页时后台 new Image() 预热浏览器缓存            */
+/*                                                                     */
+/* 只在翻页/换画廊时调度（不 immediate：挂载前 stageSize 还是默认值，   */
+/* 预取的 URL 宽度会与真实请求错开），同 URL 只发一次（组件实例内去重， */
+/* 往返翻页不再重复建 Image）。prefetchImage 不挂任何回调，预取失败     */
+/* 静默——真翻到那页时 <img> 有自己的错误态与退避重试。                  */
+/* ------------------------------------------------------------------ */
+
+const preloadedUrls = new Set<string>()
+
+function prefetchAdjacent(pages: number[]): void {
+  for (const p of pages) {
+    const url = baseSrcFor(p)
+    if (preloadedUrls.has(url)) continue
+    preloadedUrls.add(url)
+    prefetchImage(url)
+  }
+}
+
+watch(
+  () => [props.gid, props.page, props.totalPages] as const,
+  ([, page, total]) => {
+    prefetchAdjacent(prefetchNeighbors(page, total))
+  },
+)
 
 /* ------------------------------------------------------------------ */
 /* Load / error                                                        */

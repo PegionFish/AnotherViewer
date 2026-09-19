@@ -58,8 +58,9 @@ vi.mock('@/components/reader/ImageReader.vue', () => ({
       'direction',
       'brightness',
       'zoom',
+      'wakeLock',
     ],
-    emits: ['update:current-page', 'back'],
+    emits: ['update:current-page', 'update:wake-lock', 'back'],
     setup(
       _props: unknown,
       { emit }: { emit: (event: 'back', ...args: unknown[]) => void },
@@ -74,7 +75,7 @@ vi.mock('@/components/reader/ImageReader.vue', () => ({
       toggleChrome() {},
     },
     template:
-      '<div class="image-reader-stub" :data-enabled="autoPlay && autoPlay.enabled ? \'on\' : \'off\'" :data-progress="String(autoPlayProgress ?? 0)" :data-total="String(totalPages ?? 0)" :data-page-mode="String(pageMode ?? \'\')" :data-direction="String(direction ?? \'\')" :data-brightness="String(brightness ?? 0)" :data-zoom="String(zoom ?? 1)">{{ currentPage }}</div>',
+      '<div class="image-reader-stub" :data-enabled="autoPlay && autoPlay.enabled ? \'on\' : \'off\'" :data-progress="String(autoPlayProgress ?? 0)" :data-total="String(totalPages ?? 0)" :data-page-mode="String(pageMode ?? \'\')" :data-direction="String(direction ?? \'\')" :data-brightness="String(brightness ?? 0)" :data-zoom="String(zoom ?? 1)" :data-wake-lock="String(wakeLock ?? true)">{{ currentPage }}</div>',
   },
 }))
 
@@ -1210,5 +1211,188 @@ describe("ReaderView W1-F1 — 空串页参守卫（可选参数缺省 = ''）",
     setRoutePage('7')
     await flushPromises()
     expect(wrapper.find('.image-reader-stub').text()).toBe('7')
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * T1d — visibilitychange→hidden 立即 flush 阅读进度：浏览器可能长时间冻结
+ * 后台标签，30s 节流的那一次写入会丢。hidden 时复用 leave-flush（旁路节流、
+ * 无变化跳过）；翻页节流 stride（10 页 / 30s）保持不变。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+describe('ReaderView T1d — visibilitychange→hidden 立即 flush', () => {
+  let wrapper: VueWrapper | undefined
+
+  function setHidden(hidden: boolean): void {
+    Object.defineProperty(document, 'hidden', { configurable: true, value: hidden })
+  }
+
+  async function mountReader(): Promise<VueWrapper> {
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    const mounted = mount(ReaderView)
+    await flushPromises()
+    return mounted
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    routeParams.gid = '123456'
+    routeParams.page = ''
+    replaceMock.mockReset().mockResolvedValue(undefined)
+    vi.mocked(galleryApi.getDetail).mockReset()
+    vi.mocked(galleryApi.addHistory).mockReset()
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    localStorage.clear()
+    setHidden(false)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    localStorage.clear()
+    setHidden(false)
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
+
+  it('flushes the throttled tail position immediately when the tab is hidden', async () => {
+    vi.useFakeTimers()
+    wrapper = await mountReader()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(1)
+    flipTo(wrapper, 2)
+    await flushPromises()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(1) // 仍在节流窗口内
+
+    setHidden(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(2)
+    expect(galleryApi.addHistory).toHaveBeenLastCalledWith(123456, {
+      token: 'a1b2c3d4e5',
+      title: 'Sample Gallery',
+      page: 2,
+    })
+  })
+
+  it('is a no-op when nothing changed since the last write', async () => {
+    wrapper = await mountReader()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(1)
+
+    setHidden(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(1)
+  })
+
+  it('re-arms the throttle after a hidden flush (stride stays 10 pages / 30s)', async () => {
+    vi.useFakeTimers()
+    wrapper = await mountReader()
+    flipTo(wrapper, 2)
+    await flushPromises()
+
+    // hidden flush 落在 page 2 → 之后 30s 内翻页 <10 页仍被节流。
+    setHidden(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(2)
+
+    setHidden(false)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+
+    vi.advanceTimersByTime(29_999)
+    flipTo(wrapper, 3)
+    await flushPromises()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(2) // 1 页 + 29.999s → 节流
+
+    vi.advanceTimersByTime(1)
+    flipTo(wrapper, 4)
+    await flushPromises()
+    expect(galleryApi.addHistory).toHaveBeenCalledTimes(3) // ≥30s → interval path
+    expect(galleryApi.addHistory).toHaveBeenLastCalledWith(123456, {
+      token: 'a1b2c3d4e5',
+      title: 'Sample Gallery',
+      page: 4,
+    })
+  })
+
+  it('degraded shell: hidden flush writes the localStorage fallback (W4④)', async () => {
+    vi.mocked(galleryApi.getDetail).mockRejectedValue(new Error('site unreachable'))
+    wrapper = mount(ReaderView)
+    await flushPromises()
+    // 降级壳 totalPages=1 假值——翻页信号被钳回 0。
+    flipTo(wrapper, 5)
+    await flushPromises()
+
+    setHidden(true)
+    document.dispatchEvent(new Event('visibilitychange'))
+    await flushPromises()
+    expect(localStorage.getItem('readProgress:123456')).toBe('0')
+    // 降级态（无 token）不碰服务器。
+    expect(galleryApi.addHistory).not.toHaveBeenCalled()
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * T1b — 屏幕常亮开关：设备本地偏好。沿既有本地阅读器设置机制（reader-settings
+ * localStorage v2 载荷），明确不进服务器 ReaderPreferences（不跨端同步）。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+describe('ReaderView T1b — 屏幕常亮（设备本地偏好，不进服务器同步）', () => {
+  let wrapper: VueWrapper | undefined
+
+  async function mountReady(): Promise<VueWrapper> {
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    const mounted = mount(ReaderView)
+    await flushPromises()
+    return mounted
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    routeParams.gid = '123456'
+    routeParams.page = ''
+    replaceMock.mockReset().mockResolvedValue(undefined)
+    vi.mocked(galleryApi.getDetail).mockReset()
+    vi.mocked(galleryApi.addHistory).mockReset()
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    localStorage.clear()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    localStorage.removeItem(READER_SETTINGS_KEY)
+    vi.restoreAllMocks()
+  })
+
+  it('defaults to on (Android keep-screen-on parity) and passes the prop down', async () => {
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-wake-lock')).toBe('true')
+  })
+
+  it('restores a device-local off value from the v2 local payload', async () => {
+    setReaderSettings({ direction: 'ltr', pageMode: 'auto', brightness: 0, wakeLock: false })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-wake-lock')).toBe('false')
+  })
+
+  it('persists a toggle to localStorage but never into server reader prefs', async () => {
+    prefsWithReader({ pageMode: 'auto' })
+    wrapper = await mountReady()
+
+    emitReader(wrapper, 'update:wake-lock', false)
+    await flushPromises()
+
+    // 设备本地层已落盘。
+    const stored = JSON.parse(localStorage.getItem(READER_SETTINGS_KEY)!)
+    expect(stored.wakeLock).toBe(false)
+    // 服务器镜像（跨端同步层）不携带该键。
+    const store = usePreferencesStore()
+    expect(store.prefs).not.toBeNull()
+    expect('wakeLock' in store.prefs!.reader).toBe(false)
   })
 })

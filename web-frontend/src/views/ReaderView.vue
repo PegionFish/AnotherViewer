@@ -24,6 +24,7 @@
       :brightness="brightness"
       :auto-play="autoPlay"
       :auto-play-progress="autoPlayProgress"
+      :wake-lock="wakeLock"
       :enhanced-urls="enhancedUrls"
       @update:current-page="onPageChange"
       @update:direction="direction = $event"
@@ -31,6 +32,7 @@
       @update:zoom="zoom = $event"
       @update:brightness="brightness = $event"
       @update:auto-play="autoPlay = $event"
+      @update:wake-lock="wakeLock = $event"
       @prev="prevPage"
       @next="nextPage"
       @back="goBack"
@@ -75,9 +77,9 @@
  * - The current page is synced back to the route (debounced) so refresh /
  *   back-navigation restore the reading position.
  * - F1: the visit is written to server history on entry, throttled mid-reading
- *   (≥10 pages or ≥30 s since the last write), and flushed once on
- *   leave/pagehide — so web reading lands in History and syncs back to the
- *   app. Failures degrade to console.warn. W4 (plan-2026-09-02): the payload
+ *   (≥10 pages or ≥30 s since the last write), and flushed on tab-hide
+ *   (T1d), leave or pagehide — so web reading lands in History and syncs
+ *   back to the app. Failures degrade to console.warn. W4 (plan-2026-09-02): the payload
  *   carries `page: currentPage`; the initial page restores 深链 >
  *   `detail.readProgress` > localStorage `readProgress:{gid}` > 0 (the
  *   localStorage layer only backs the degraded / tokenless state, where the
@@ -190,11 +192,18 @@ interface PersistedReaderSettings {
   direction: ReadingDirection
   pageMode: PageModePref
   brightness: number
+  /**
+   * T1b: 屏幕常亮开关——设备本地偏好，明确不进服务器 ReaderPreferences、
+   * 不跨端同步（Android 端阅读器默认常亮，Web 对齐）。可选：v1 载荷无此键。
+   */
+  wakeLock?: boolean
 }
 
 const direction = ref<ReadingDirection>('ltr')
 const pageModePref = ref<PageModePref>('auto')
 const brightness = ref(0)
+/** T1b: 默认开——对齐 Android 阅读器的 keep-screen-on 语义。 */
+const wakeLock = ref(true)
 
 /** Clamp helper for the persisted brightness (0–100). */
 function clampBrightness(value: number): number {
@@ -239,6 +248,9 @@ function applyStoredSettings(): void {
     if (typeof stored.brightness === 'number' && Number.isFinite(stored.brightness)) {
       brightness.value = clampBrightness(stored.brightness)
     }
+    if (typeof stored.wakeLock === 'boolean') {
+      wakeLock.value = stored.wakeLock
+    }
   } catch {
     // Corrupted storage — fall back to server prefs / defaults.
   }
@@ -265,10 +277,13 @@ let settingsTouched = false
 let appliedSnapshot = ''
 
 function settingsSnapshot(): string {
-  return JSON.stringify([direction.value, pageModePref.value, brightness.value])
+  return JSON.stringify([direction.value, pageModePref.value, brightness.value, wakeLock.value])
 }
 
-/** 把当前生效值写入 localStorage（v2）并镜像到服务器偏好。 */
+/**
+ * 把当前生效值写入 localStorage（v2）并镜像到服务器偏好。wakeLock 是设备
+ * 本地键（T1b）：只落 localStorage，绝不进 updateReader 的服务器镜像。
+ */
 function writeSettings(): void {
   try {
     const payload: PersistedReaderSettings = {
@@ -276,6 +291,7 @@ function writeSettings(): void {
       direction: direction.value,
       pageMode: pageModePref.value,
       brightness: brightness.value,
+      wakeLock: wakeLock.value,
     }
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(payload))
   } catch {
@@ -518,7 +534,8 @@ watch(currentPage, () => {
  * - Afterwards a page change triggers a writeback only when EITHER
  *   ≥ {@link HISTORY_WRITE_PAGE_STRIDE} pages flipped since the last write,
  *   OR ≥ {@link HISTORY_WRITE_MIN_INTERVAL_MS} elapsed since it.
- * - `pagehide` / unmount flush the tail once (best effort, fire-and-forget).
+ * - `visibilitychange` → hidden / `pagehide` / unmount flush the tail once
+ *   (best effort, fire-and-forget; T1d adds the hidden-tab checkpoint).
  *
  * Rationale: fast flippers keep the synced position within ~10 pages of
  * reality without per-flip spam; slow readers still checkpoint every ~30 s.
@@ -669,6 +686,15 @@ function flushHistoryOnLeave(): void {
 watch(currentPage, () => {
   syncReadingProgress()
 })
+
+/**
+ * T1d: 切到后台（visibilitychange → hidden）立即 flush 尾部进度——浏览器
+ * 可能长时间冻结/丢弃后台标签，30s 节流的一次性写入会丢，复用 leave-flush
+ * 语义（旁路节流、无变化跳过）。翻页节流 stride（10 页 / 30s）保持不变。
+ */
+function onReaderViewVisibilityChange(): void {
+  if (document.hidden) flushHistoryOnLeave()
+}
 
 /* ------------------------------------------------------------------ */
 /* WebSocket — AI enhancement hot-swap (websocket-protocol §3.3/§6.3)  */
@@ -839,11 +865,14 @@ onMounted(() => {
   }
   // F1: tab close / refresh — one best-effort writeback of the tail position.
   window.addEventListener('pagehide', flushHistoryOnLeave)
+  // T1d: tab hidden — checkpoint the tail position immediately.
+  document.addEventListener('visibilitychange', onReaderViewVisibilityChange)
 })
 
 onBeforeUnmount(() => {
   landscapeQuery?.removeEventListener('change', onLandscapeChange)
   window.removeEventListener('pagehide', flushHistoryOnLeave)
+  document.removeEventListener('visibilitychange', onReaderViewVisibilityChange)
   // Leaving the reader (router navigation) ends the session — flush the tail.
   flushHistoryOnLeave()
   if (autoPlayTimer !== null) clearInterval(autoPlayTimer)

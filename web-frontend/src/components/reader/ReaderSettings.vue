@@ -165,6 +165,27 @@
             </span>
           </div>
         </section>
+
+        <!-- Wake Lock — 屏幕常亮：设备本地偏好，只落本机 reader-settings
+             localStorage，明确不进服务器同步（无对应服务器键）。 -->
+        <section class="reader-settings__section">
+          <div class="reader-settings__wakelock">
+            <span id="reader-settings-wakelock" class="reader-settings__wakelock-label">
+              屏幕常亮
+            </span>
+            <button
+              type="button"
+              role="switch"
+              :aria-checked="wakeLock"
+              aria-labelledby="reader-settings-wakelock"
+              class="reader-settings__switch"
+              :class="{ 'reader-settings__switch--on': wakeLock }"
+              @click="emit('update:wakeLock', !wakeLock)"
+            >
+              <span class="reader-settings__switch-knob" />
+            </button>
+          </div>
+        </section>
       </div>
     </div>
   </Transition>
@@ -183,6 +204,8 @@
  * - Auto-play: toggle + interval (Android `auto_transfer`)；间隔选中即写回偏好
  * - Brightness: 0 = follow system, 1–100 dims the page via a black mask
  *   (the `ColorView` mask in `activity_gallery.xml`)
+ * - Wake Lock (T1b): 屏幕常亮 toggle — a device-local preference (never
+ *   synced; no server-side key)
  *
  * Every value is v-model'd upward; persistence is the parent's concern.
  */
@@ -204,6 +227,8 @@ interface ReaderSettingsProps {
   autoPlay: AutoPlayState
   /** 0 = follow system brightness; 1–100 = reader dim mask. */
   brightness: number
+  /** T1b: 设备本地屏幕常亮开关（不进服务器同步）。 */
+  wakeLock: boolean
 }
 
 interface ReaderSettingsEmits {
@@ -213,6 +238,7 @@ interface ReaderSettingsEmits {
   (e: 'update:zoom', zoom: number): void
   (e: 'update:autoPlay', state: AutoPlayState): void
   (e: 'update:brightness', brightness: number): void
+  (e: 'update:wakeLock', enabled: boolean): void
 }
 
 const props = defineProps<ReaderSettingsProps>()
@@ -572,6 +598,20 @@ function onBrightnessInput(event: Event) {
 .reader-settings__chip:focus-visible {
   outline: 2px solid var(--color-primary);
   outline-offset: 2px;
+}
+
+/* --- Wake Lock --------------------------------------------------------- */
+
+.reader-settings__wakelock {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.reader-settings__wakelock-label {
+  color: var(--grey-300);
+  font-size: var(--text-small); /* 14sp */
 }
 
 /* --- Brightness -------------------------------------------------------- */

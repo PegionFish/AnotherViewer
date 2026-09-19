@@ -110,12 +110,14 @@
       :zoom="zoom"
       :auto-play="autoPlay"
       :brightness="brightness"
+      :wake-lock="wakeLock"
       @close="closeSettings"
       @update:direction="(value) => emit('update:direction', value)"
       @update:page-mode="(value) => emit('update:pageMode', value)"
       @update:zoom="(value) => emit('update:zoom', value)"
       @update:auto-play="(value) => emit('update:autoPlay', value)"
       @update:brightness="(value) => emit('update:brightness', value)"
+      @update:wake-lock="(value) => emit('update:wakeLock', value)"
     />
 
     <!-- Brightness mask — the activity_gallery.xml `mask` ColorView -->
@@ -150,6 +152,13 @@
  * - Auto-play mirrors `auto_transfer`: a countdown chip above the seek bar.
  * - Adjacent pages are preloaded (next 2 / prev 1) for zero-wait turns, at
  *   the same responsive `?w=` width the page components request.
+ * - Wake Lock (T1b): while reading, a `screen` wake lock keeps the display on
+ *   (Android keep-screen-on parity); the device-local switch lives in the
+ *   settings sheet, unsupported platforms degrade silently.
+ * - Real fullscreen (T1c): `reader.fullscreen` upgrades from "pre-hide the
+ *   chrome" to the Fullscreen API on this root element, synced via
+ *   `fullscreenchange` (user Esc keeps state consistent); rejection falls
+ *   back to the pre-hide behavior.
  *
  * Page navigation itself is owned by the parent (ReaderView): this component
  * re-emits semantic `prev` / `next` (spread-awareness included) and direct
@@ -196,6 +205,11 @@ interface ImageReaderProps {
   autoPlay: AutoPlayState
   /** Countdown progress of the current auto-play tick, 0–1. */
   autoPlayProgress: number
+  /**
+   * T1b: 设备本地的屏幕常亮开关（ReaderView 的 reader-settings localStorage，
+   * 不进服务器同步）。v-model:wakeLock。
+   */
+  wakeLock: boolean
   /** AI-enhanced hot-swap URLs keyed by 0-based page. */
   enhancedUrls?: ReadonlyMap<number, string>
 }
@@ -207,6 +221,7 @@ interface ImageReaderEmits {
   (e: 'update:zoom', zoom: number): void
   (e: 'update:brightness', brightness: number): void
   (e: 'update:autoPlay', state: AutoPlayState): void
+  (e: 'update:wakeLock', enabled: boolean): void
   /** Semantic navigation — the parent maps to page indices (spread-aware). */
   (e: 'prev'): void
   (e: 'next'): void
@@ -226,7 +241,8 @@ const statusBarRef = ref<InstanceType<typeof ReaderStatusBar> | null>(null)
 /**
  * Chrome (status bar + toolbar + seek bar) visibility — tap to toggle.
  * 初值接 reader.fullscreen 偏好（true = 进阅读器即全屏、chrome 藏起）；
- * 默认 false 维持既有行为（进入时 chrome 可见）。不接 Fullscreen API，
+ * 默认 false 维持既有行为（进入时 chrome 可见）。T1c：偏好同时驱动真全屏
+ * （Fullscreen API，见下方 T1c 段）；请求被拒时本预隐藏行为即回退态，
  * 退出/切页/tap 切换语义不变。
  */
 const chromeVisible = ref(!(preferencesStore.prefs?.reader.fullscreen ?? false))
@@ -386,6 +402,104 @@ const maskOpacity = computed(() =>
 )
 
 /* ------------------------------------------------------------------ */
+/* T1b — Wake Lock：阅读期间屏幕常亮（Android keep-screen-on 对齐）      */
+/* ------------------------------------------------------------------ */
+
+/**
+ * 设备本地开关（props.wakeLock，落 ReaderView 的 reader-settings
+ * localStorage，不进服务器同步）。阅读器挂载即获取 `screen` wake lock；
+ * 页面隐藏时浏览器会自动释放（这里主动 release 同步本地引用，幂等），
+ * 回到可见重新获取；卸载释放。不支持的平台（iOS Safari 等）静默降级。
+ */
+const wakeLockSentinel = ref<WakeLockSentinel | null>(null)
+
+async function acquireWakeLock(): Promise<void> {
+  if (!props.wakeLock || wakeLockSentinel.value) return
+  // 隐藏文档里 request('screen') 必被拒——跳过，等 visibilitychange→visible 再取。
+  if (typeof document !== 'undefined' && document.hidden) return
+  // 特性检测：lib.dom 类型视其为必有，不支持运行时上是 undefined。
+  if (typeof navigator === 'undefined' || !navigator.wakeLock) return
+  try {
+    wakeLockSentinel.value = await navigator.wakeLock.request('screen')
+  } catch {
+    // 被拒（无手势/低电量模式/不支持）——静默降级，阅读不受影响。
+  }
+}
+
+async function releaseWakeLock(): Promise<void> {
+  const sentinel = wakeLockSentinel.value
+  wakeLockSentinel.value = null
+  if (!sentinel || sentinel.released) return
+  try {
+    await sentinel.release()
+  } catch {
+    // 浏览器已随文档隐藏释放——幂等清理。
+  }
+}
+
+function onReaderVisibilityChange(): void {
+  if (document.hidden) {
+    void releaseWakeLock()
+  } else {
+    void acquireWakeLock()
+  }
+}
+
+watch(
+  () => props.wakeLock,
+  (enabled) => {
+    if (enabled) void acquireWakeLock()
+    else void releaseWakeLock()
+  },
+)
+
+/* ------------------------------------------------------------------ */
+/* T1c — 真全屏：Fullscreen API 接管 reader.fullscreen 偏好              */
+/* ------------------------------------------------------------------ */
+
+/**
+ * `fullscreenchange` 是唯一事实源：请求成功、用户 Esc 退出、浏览器强制退出
+ * 都经它同步，内部状态不会漂移（Esc 退出后 UI 照常：chrome 仍按预隐藏语义
+ * 由 tap/鼠标唤醒切换）。`requestFullscreen()` 在进入阅读器的挂载流程中调用
+ * ——源自打开阅读器的用户手势（瞬态激活窗口内；极慢的加载会过期失活），
+ * 被拒则静默回退现状「预隐藏 chrome」行为（chromeVisible 初值已生效）。
+ */
+const isFullscreen = ref(false)
+
+function onFullscreenChange(): void {
+  isFullscreen.value = document.fullscreenElement != null
+}
+
+/** 进入阅读器流程中对阅读器根元素请求全屏（用户手势调用链内）。 */
+async function enterFullscreen(): Promise<void> {
+  const el = rootRef.value
+  if (!el || isFullscreen.value || document.fullscreenElement != null) return
+  if (typeof el.requestFullscreen !== 'function') return // iOS Safari 等
+  try {
+    await el.requestFullscreen()
+  } catch {
+    // 无手势 / 不支持 —— 静默回退预隐藏 chrome（现状行为）。
+  }
+}
+
+/** 只退出自己进入的全屏（本组件根元素），不碰他处或用户手动的全屏状态。 */
+function exitReaderFullscreen(): void {
+  if (rootRef.value && document.fullscreenElement === rootRef.value) {
+    void document.exitFullscreen().catch(() => {
+      // 已不在全屏（如浏览器先行退出）——无可还原状态，忽略。
+    })
+  }
+}
+
+// 关偏好（设置页 toggle reader.fullscreen）→ 立即退出真全屏，回到预隐藏语义。
+watch(
+  () => preferencesStore.prefs?.reader.fullscreen,
+  (enabled) => {
+    if (!enabled) exitReaderFullscreen()
+  },
+)
+
+/* ------------------------------------------------------------------ */
 /* Preload adjacent pages (next 2 / prev 1) for zero-wait turns        */
 /* ------------------------------------------------------------------ */
 
@@ -431,6 +545,11 @@ watch(
 )
 
 onMounted(() => {
+  // T1b/T1c：文档级监听与根元素无关，先于 rootRef 早退守卫挂上。
+  document.addEventListener('visibilitychange', onReaderVisibilityChange)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  // 进入时若已在全屏（浏览器级恢复/用户手动），先同步一次状态。
+  isFullscreen.value = document.fullscreenElement != null
   const el = rootRef.value
   if (!el) return
   rootWidth.value = el.clientWidth || window.innerWidth
@@ -441,9 +560,18 @@ onMounted(() => {
     })
     rootObserver.observe(el)
   }
+  // T1c：进入阅读器流程（打开阅读器的用户手势调用链）内请求真全屏。
+  if (preferencesStore.prefs?.reader.fullscreen) void enterFullscreen()
+  // T1b：阅读器激活即点亮屏幕常亮。
+  void acquireWakeLock()
 })
 
 onBeforeUnmount(() => {
+  document.removeEventListener('visibilitychange', onReaderVisibilityChange)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  // 退出阅读器路由 → 还原全屏（只还原自己进入的）。
+  exitReaderFullscreen()
+  void releaseWakeLock()
   rootObserver?.disconnect()
 })
 
@@ -458,7 +586,7 @@ watch(
   },
 )
 
-defineExpose({ toggleChrome, handleBack })
+defineExpose({ toggleChrome, handleBack, isFullscreen })
 </script>
 
 <style scoped>

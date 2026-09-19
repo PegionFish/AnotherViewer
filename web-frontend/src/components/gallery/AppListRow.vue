@@ -41,6 +41,7 @@
         :src="thumbSrc ?? undefined"
         :alt="title"
         loading="lazy"
+        decoding="async"
         @error="onThumbError"
       />
       <div v-else class="app-list-row__thumb-placeholder" aria-hidden="true">
@@ -99,12 +100,19 @@ const props = withDefaults(
     subtitle?: string | null
     /** 缩略图原始地址；空/加载失败渲染图标占位。 */
     thumb?: string | null
+    /**
+     * 代理缩略图的请求像素宽（/api/v1/image/proxy 的 `w` 参数：整型像素宽，
+     * 服务端按比例缩放）。行封面固定 80×120 CSS 像素，列表视图传 240（≈3x
+     * 视网膜密度）显著降带宽；未设置时代理地址保持原样（其他列表视图不受
+     * 影响）。仅对走代理的外部 http(s) 缩略图生效，本地路径原样透传。
+     */
+    thumbWidth?: number
     /** 多选模式（Android custom choice mode）：行可点选并显示勾选态。 */
     selectable?: boolean
     /** 多选选中态（驱动勾选圈与选中描边）。 */
     selected?: boolean
   }>(),
-  { subtitle: null, thumb: null, selectable: false, selected: false },
+  { subtitle: null, thumb: null, thumbWidth: undefined, selectable: false, selected: false },
 )
 
 const emit = defineEmits<{
@@ -130,12 +138,16 @@ const hasThumb = computed(() => Boolean(props.thumb) && !thumbFailed.value)
  * Rewritten thumbnail URL (plan-2026-08-06 A7): external `http(s)` thumbnails
  * go through the WebUI image proxy (`/api/v1/image/proxy`), because the site
  * CSP only allows `img-src 'self'`; local paths pass through unchanged.
+ * `thumbWidth` 有值时在代理地址上附加 `&w=<px>`（服务端按比例缩放，W1b 列表
+ * 行降带宽项）；本地路径不受影响。
  */
 const thumbSrc = computed<string | null>(() => {
   const thumb = props.thumb
   if (!thumb) return null
   // 隐私打码不改 src——真实请求照发，像素由全局遮蔽样式隐藏。
-  return /^https?:\/\//i.test(thumb) ? `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}` : thumb
+  if (!/^https?:\/\//i.test(thumb)) return thumb
+  const proxied = `/api/v1/image/proxy?url=${encodeURIComponent(thumb)}`
+  return props.thumbWidth ? `${proxied}&w=${props.thumbWidth}` : proxied
 })
 
 function onThumbError(): void {

@@ -53,6 +53,7 @@ import com.hippo.anotherviewer.dao.HistoryDao;
 import com.hippo.anotherviewer.dao.HistoryInfo;
 import com.hippo.anotherviewer.dao.LocalFavoriteInfo;
 import com.hippo.anotherviewer.dao.LocalFavoritesDao;
+import com.hippo.anotherviewer.dao.PageHashStore;
 import com.hippo.anotherviewer.dao.QuickSearch;
 import com.hippo.anotherviewer.dao.QuickSearchDao;
 import com.hippo.anotherviewer.download.DownloadManager;
@@ -63,6 +64,7 @@ import com.hippo.lib.yorozuya.ObjectUtils;
 import com.hippo.lib.yorozuya.collect.SparseJLArray;
 
 import org.greenrobot.greendao.AbstractDao;
+import org.greenrobot.greendao.database.StandardDatabase;
 import org.greenrobot.greendao.query.CloseableListIterator;
 import org.greenrobot.greendao.query.LazyList;
 import org.greenrobot.greendao.query.QueryBuilder;
@@ -89,15 +91,30 @@ public class SiteDB {
     private static boolean sHasOldDB;
     private static boolean sNewDB;
 
-    private static class DBOpenHelper extends DaoMaster.OpenHelper {
+    /**
+     * SiteDB's own schema version. The greenDAO tables track
+     * {@link DaoMaster#SCHEMA_VERSION} (generated code, not to be edited), so
+     * the raw side tables ({@code page_file_hash}, plan 2026-09-19 A1) ride
+     * one version above it: {@link DBOpenHelper} declares this version and
+     * {@link #upgradeDB} migrates any older database. When greenDAO's schema
+     * eventually regenerates at 10, this becomes 11 and the new greenDAO
+     * migration is added as the next case — {@code upgradeDB} stays the single
+     * migration funnel.
+     */
+    static final int DB_VERSION = DaoMaster.SCHEMA_VERSION + 1;
+
+    private static class DBOpenHelper extends SQLiteOpenHelper {
 
         public DBOpenHelper(Context context, String name, SQLiteDatabase.CursorFactory factory) {
-            super(context, name, factory);
+            super(context, name, factory, DB_VERSION);
         }
 
         @Override
         public void onCreate(SQLiteDatabase db) {
-            super.onCreate(db);
+            // Same table creation DaoMaster.OpenHelper used to do, plus the
+            // side tables (fresh installs never pass through upgradeDB).
+            DaoMaster.createAllTables(new StandardDatabase(db), false);
+            createPageFileHash(db);
             sNewDB = true;
         }
 
@@ -242,7 +259,35 @@ public class SiteDB {
                 addColumn(db, "BOOKMARKS", "FAVORITE_NAME", "TEXT");
             case 8: // 8 to 9, add reading-progress PAGE column to HISTORY
                 addColumn(db, "HISTORY", "PAGE", "INTEGER NOT NULL DEFAULT 0");
+            case 9: // 9 to 10, add page_file_hash side table (file-integrity baseline, plan 2026-09-19 A1)
+                createPageFileHash(db);
         }
+    }
+
+    /**
+     * DDL of the {@code page_file_hash} side table (download file-integrity
+     * baseline, plan 2026-09-19 A1): PK(gid, page), columns aligned with the
+     * server entity {@code PageFileHashEntity} — algo defaults to
+     * {@code sha256}, origin defaults to {@code downloader}, timestamps are
+     * epoch millis, and last_verified_at/verdict stay nullable (never
+     * scanned). Intentionally outside greenDAO: created on fresh installs by
+     * {@code DBOpenHelper.onCreate} and on upgrades/imports by
+     * {@code upgradeDB} case 9. IF NOT EXISTS keeps re-runs (a re-import of
+     * an already-migrated database) harmless.
+     */
+    private static void createPageFileHash(SQLiteDatabase db) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS \"page_file_hash\" (" +
+                "\"gid\" INTEGER NOT NULL ," +
+                "\"page\" INTEGER NOT NULL ," +
+                "\"ext\" TEXT NOT NULL DEFAULT '' ," +
+                "\"size\" INTEGER NOT NULL DEFAULT 0 ," +
+                "\"hash\" TEXT NOT NULL DEFAULT '' ," +
+                "\"algo\" TEXT NOT NULL DEFAULT 'sha256' ," +
+                "\"origin\" TEXT NOT NULL DEFAULT 'downloader' ," +
+                "\"created_at\" INTEGER NOT NULL DEFAULT 0 ," +
+                "\"last_verified_at\" INTEGER ," +
+                "\"verdict\" TEXT," +
+                "PRIMARY KEY (\"gid\", \"page\"));");
     }
 
     private static class OldDBHelper extends SQLiteOpenHelper {
@@ -276,6 +321,9 @@ public class SiteDB {
                 context.getApplicationContext(), "eh.db", null);
 
         SQLiteDatabase db = helper.getWritableDatabase();
+        // Side-table stores share this one connection (the greenDAO session
+        // keeps its own wrapper view of the same database).
+        PageHashStore.init(db);
         DaoMaster daoMaster = new DaoMaster(db);
 
         sDaoSession = daoMaster.newSession();
@@ -1203,7 +1251,11 @@ public class SiteDB {
         try {
             SQLiteDatabase db = SQLiteDatabase.openDatabase(
                     file.getPath(), null, SQLiteDatabase.NO_LOCALIZED_COLLATORS);
-            int newVersion = DaoMaster.SCHEMA_VERSION;
+            // SiteDB's own version (side tables included), not
+            // DaoMaster.SCHEMA_VERSION: a pre-side-table import upgrades, a
+            // current export (carrying DB_VERSION) imports unchanged, and a
+            // newer export still fails loudly.
+            int newVersion = DB_VERSION;
             int oldVersion = db.getVersion();
             if (oldVersion < newVersion) {
                 upgradeDB(db, oldVersion);

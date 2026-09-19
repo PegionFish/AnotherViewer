@@ -21,6 +21,17 @@ export interface DownloadItem {
    * （S10）；旧服务器不下发 → undefined，运行时按缺失容错（角标隐藏）。
    */
   readProgress?: number
+  /**
+   * 上传者（W1b：服务器端同波下发）。可空字符串/null；旧服务器不下发 →
+   * undefined。敏感字段——展示受 general.showUploader 门控，隐私打码开启时
+   * 一律不渲染（DownloadView 与 SearchView 同语义）。
+   */
+  uploader?: string | null
+  /**
+   * 画廊页数（元数据，区别于下载进度的 `total`）：整型、可能为 0；旧服务器
+   * 不下发 → undefined。展示受 general.showGalleryPages 门控且 >0 才渲染。
+   */
+  pages?: number
 }
 
 export interface DownloadLabel {

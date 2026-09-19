@@ -6,6 +6,7 @@ import com.hippo.anotherviewer.web.repository.ServerConfigRepository
 import jakarta.annotation.PostConstruct
 import org.springframework.stereotype.Service
 import java.io.File
+import java.util.Optional
 
 @Service
 class ServerConfigService(
@@ -14,8 +15,16 @@ class ServerConfigService(
     private val config: SiteCoreConfigProperties,
 ) {
 
+    // 60s 单键缓存（性能快赢）：AuthTokenFilter 与 PrivacyMaskFilter 每个请求各
+    // 读一次 server_config，直接打到 SQLite 是明显的请求放大。读路径仍按原形
+    // 态 findById（测试替身按此打桩），命中过的键在 TTL 内走内存（含键不存在
+    // 的负缓存）；写操作清空缓存，下次读重新查库。
+    private val cacheLock = Any()
+    private val cache = HashMap<String, Optional<String>>()
+    private var cacheResetAtMs = 0L
+
     fun get(key: String, default: String = ""): String {
-        val raw = repo.findById(key).map { it.value }.orElse(default)
+        val raw = readCached(key).orElse(default)
         if (isSecretKey(key) && raw.startsWith(ENC_PREFIX)) {
             // Encrypted at rest; decrypt transparently so consumers keep reading plaintext.
             return runCatching { encryptionService.decrypt(raw.removePrefix(ENC_PREFIX), encryptionKey()) }
@@ -46,6 +55,7 @@ class ServerConfigService(
         val entity = repo.findById(key).orElse(ServerConfigEntity().apply { this.key = key })
         entity.value = stored
         repo.save(entity)
+        invalidate()
     }
 
     fun setBoolean(key: String, value: Boolean) = set(key, value.toString())
@@ -56,6 +66,7 @@ class ServerConfigService(
 
     fun delete(entity: ServerConfigEntity) {
         repo.delete(entity)
+        invalidate()
     }
 
     /** 启动时将 SiteCoreConfigProperties 的默认值写入 DB（仅首次） */
@@ -63,6 +74,26 @@ class ServerConfigService(
     fun initDefaults() {
         defaults.forEach { (k, v) ->
             if (!repo.existsById(k)) repo.save(ServerConfigEntity().apply { key = k; value = v })
+        }
+        invalidate()
+    }
+
+    /** TTL 内命中缓存直接返回；过期或未命中则 findById 回源。synchronized：读多写少，简单为上。 */
+    private fun readCached(key: String): Optional<String> {
+        synchronized(cacheLock) {
+            val now = System.currentTimeMillis()
+            if (now - cacheResetAtMs >= CACHE_TTL_MS) {
+                cache.clear()
+                cacheResetAtMs = now
+            }
+            return cache.computeIfAbsent(key) { k -> repo.findById(k).map { it.value } }
+        }
+    }
+
+    private fun invalidate() {
+        synchronized(cacheLock) {
+            cache.clear()
+            cacheResetAtMs = System.currentTimeMillis()
         }
     }
 
@@ -76,6 +107,9 @@ class ServerConfigService(
     }
 
     companion object {
+        /** 单键缓存有效期：过期后各键的下一个读请求触发回源。 */
+        const val CACHE_TTL_MS = 60_000L
+
         const val KEY_REQUIRE_AUTH = "security.require_auth"
         const val KEY_SESSION_TIMEOUT = "security.session_timeout"
         // 免码配对（task/4-auto-pair）：LAN 单用户默认开启；配置 setup key 后
