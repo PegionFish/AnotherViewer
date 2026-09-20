@@ -28,6 +28,17 @@
           </button>
         </header>
 
+        <!-- A5: 跳页——快速动作入口；ImageReader 收到 jump 后收起本面板、
+             打开 PageJumpDialog（未知页数 total=0 时无跳页语义，隐藏入口） -->
+        <section v-if="totalPages > 0" class="reader-settings__section">
+          <button type="button" class="reader-settings__jump" @click="emit('jump')">
+            <span class="reader-settings__jump-label">跳页</span>
+            <span class="reader-settings__jump-meta">
+              第 {{ jumpCurrent }} / {{ totalPages }} 页 · 快捷键 G
+            </span>
+          </button>
+        </section>
+
         <!-- Reading direction — Android READING_DIRECTION_LTR/RTL/VERTICAL -->
         <section class="reader-settings__section">
           <h3 class="reader-settings__label" id="reader-settings-direction">
@@ -145,7 +156,9 @@
           </div>
         </section>
 
-        <!-- Brightness — 0 follows the system; >0 dims via the reader mask -->
+        <!-- Brightness (A6) — 设备本地 0–200：0 跟随系统；1–100 遮罩压暗
+             （一期语义不变）；101–200 提亮（App 端真背光增强，Web 以页面
+             容器 CSS filter 近似，同步值恒写 clamp 0–100） -->
         <section class="reader-settings__section">
           <h3 class="reader-settings__label" id="reader-settings-brightness">亮度</h3>
           <div class="reader-settings__brightness">
@@ -153,17 +166,20 @@
               type="range"
               class="reader-settings__slider"
               min="0"
-              max="100"
+              max="200"
               step="1"
-              :value="brightness"
+              :value="brightnessLevel"
               aria-labelledby="reader-settings-brightness"
-              :style="{ '--brightness-fill': `${brightness}%` }"
+              :style="{ '--brightness-fill': brightnessFill }"
               @input="onBrightnessInput"
             />
             <span class="reader-settings__brightness-value">
-              {{ brightness === 0 ? '系统' : `${brightness}%` }}
+              {{ brightnessLabel }}
             </span>
           </div>
+          <p class="reader-settings__hint">
+            压暗 0–100 · 提亮 101–200（仅本机生效，不跨端同步）
+          </p>
         </section>
 
         <!-- Wake Lock — 屏幕常亮：设备本地偏好，只落本机 reader-settings
@@ -186,26 +202,75 @@
             </button>
           </div>
         </section>
+
+        <!-- Orientation lock (A7) — 屏幕方向三态：设备本地偏好，不进服务器
+             同步（Android 对应阅读菜单 Screen rotation）。全屏时由
+             ImageReader 落到 screen.orientation.lock；不支持的平台静默降级。 -->
+        <section class="reader-settings__section">
+          <h3 class="reader-settings__label" id="reader-settings-orientation">屏幕方向</h3>
+          <div
+            class="reader-settings__segments"
+            role="radiogroup"
+            aria-labelledby="reader-settings-orientation"
+          >
+            <button
+              v-for="option in orientationOptions"
+              :key="option.value"
+              type="button"
+              role="radio"
+              :aria-checked="orientationLock === option.value"
+              class="reader-settings__segment"
+              :class="{ 'reader-settings__segment--active': orientationLock === option.value }"
+              @click="emit('update:orientationLock', option.value)"
+            >
+              {{ option.label }}
+            </button>
+          </div>
+          <p class="reader-settings__hint">全屏阅读时锁定方向；不支持的平台自动降级</p>
+        </section>
       </div>
     </div>
   </Transition>
 </template>
+
+<script lang="ts">
+/**
+ * A7: 屏幕方向锁定偏好——设备本地（reader-settings localStorage），明确不进
+ * 服务器 ReaderPreferences、不跨端同步（Android 端对应阅读菜单的 Screen
+ * rotation：Default/Portrait/Landscape，GalleryMenuHelper.mScreenRotation）。
+ * 定义/导出在本文件（面板是偏好入口），ImageReader/ReaderView 经既有依赖
+ * 引入，避免组件间反向 import 环。
+ */
+export type OrientationLockPref = 'none' | 'portrait' | 'landscape'
+
+export const ORIENTATION_LOCK_PREFS: readonly OrientationLockPref[] = [
+  'none',
+  'portrait',
+  'landscape',
+]
+</script>
 
 <script setup lang="ts">
 /**
  * ReaderSettings.vue — bottom sheet with the reader's runtime preferences,
  * mirroring the Android reader's long-press / settings surface:
  *
+ * - Page jump (A5): 跳页快速入口（菜单项）——点击上抛 `jump`，由 ImageReader
+ *   收起本面板并打开 PageJumpDialog（本面板只展示入口，不持有跳页逻辑）
  * - Reading direction: `READING_DIRECTION_LTR / RTL / VERTICAL`
  * - Page mode: auto (landscape → dual per responsive-strategy §6 rule 3),
  *   single, dual, scroll
  * - Zoom: 加法步进（reader.zoomStep 偏好，默认 0.25），上限 reader.maxZoom
  *   （默认 3）；捏合 / 双击 / 键盘同一套单位
  * - Auto-play: toggle + interval (Android `auto_transfer`)；间隔选中即写回偏好
- * - Brightness: 0 = follow system, 1–100 dims the page via a black mask
- *   (the `ColorView` mask in `activity_gallery.xml`)
+ * - Brightness (A6): 设备本地 0–200——0 = follow system；1–100 压暗页面
+ *   (the `ColorView` mask in `activity_gallery.xml`)；101–200 提亮（App 端
+ *   真背光增强 GalleryActivity.setScreenLightness，Web 以 CSS filter 近似；
+ *   跨端同步值恒写 clamp(v, 0, 100)，>100 不进 synced store）
  * - Wake Lock (T1b): 屏幕常亮 toggle — a device-local preference (never
  *   synced; no server-side key)
+ * - Orientation lock (A7): 屏幕方向三态（跟随系统/竖屏/横屏）— 同为设备
+ *   本地偏好；全屏时由 ImageReader 落到 screen.orientation.lock
  *
  * Every value is v-model'd upward; persistence is the parent's concern.
  */
@@ -225,23 +290,36 @@ interface ReaderSettingsProps {
   pageMode: PageModePref
   zoom: number
   autoPlay: AutoPlayState
-  /** 0 = follow system brightness; 1–100 = reader dim mask. */
-  brightness: number
+  /**
+   * A6: 设备本地亮度 0–200（reader-settings 键 `brightnessLevel`，不进服务
+   * 器同步）。1–100 压暗 / 101–200 提亮，两段行为见 ImageReader。
+   */
+  brightnessLevel: number
   /** T1b: 设备本地屏幕常亮开关（不进服务器同步）。 */
   wakeLock: boolean
+  /** A7: 屏幕方向锁定（设备本地）。 */
+  orientationLock: OrientationLockPref
+  /** 跳页入口的上下文展示（1-based 当前页）；≤0 视为未知页数，隐藏入口。 */
+  currentPage?: number
+  totalPages?: number
 }
 
 interface ReaderSettingsEmits {
   (e: 'close'): void
+  (e: 'jump'): void
   (e: 'update:direction', direction: ReadingDirection): void
   (e: 'update:pageMode', mode: PageModePref): void
   (e: 'update:zoom', zoom: number): void
   (e: 'update:autoPlay', state: AutoPlayState): void
-  (e: 'update:brightness', brightness: number): void
+  (e: 'update:brightnessLevel', brightnessLevel: number): void
   (e: 'update:wakeLock', enabled: boolean): void
+  (e: 'update:orientationLock', lock: OrientationLockPref): void
 }
 
-const props = defineProps<ReaderSettingsProps>()
+const props = withDefaults(defineProps<ReaderSettingsProps>(), {
+  currentPage: 1,
+  totalPages: 0,
+})
 const emit = defineEmits<ReaderSettingsEmits>()
 
 const preferencesStore = usePreferencesStore()
@@ -303,8 +381,38 @@ function toggleAutoPlay() {
 }
 
 function onBrightnessInput(event: Event) {
-  emit('update:brightness', Number((event.target as HTMLInputElement).value))
+  emit('update:brightnessLevel', Number((event.target as HTMLInputElement).value))
 }
+
+/* ------------------------------------------------------------------ */
+/* A6 — 亮度 0–200：滑杆绑定本地扩展值，文案区分两段                     */
+/* ------------------------------------------------------------------ */
+
+/** 轨道填充比例：0–200 值域映射到 0–100% 的轨道宽度。 */
+const brightnessFill = computed(() => `${props.brightnessLevel / 2}%`)
+
+/** 数值标签：0 = 系统；1–100 压暗 xx%；101–200 提亮 +xx%。 */
+const brightnessLabel = computed(() => {
+  const v = props.brightnessLevel
+  if (v <= 0) return '系统'
+  if (v <= 100) return `${v}%`
+  return `+${v - 100}%`
+})
+
+/* ------------------------------------------------------------------ */
+/* A7 — 屏幕方向三态（跟随系统 / 竖屏 / 横屏）                          */
+/* ------------------------------------------------------------------ */
+
+const orientationOptions: ReadonlyArray<{ value: OrientationLockPref; label: string }> = [
+  { value: 'none', label: '跟随系统' },
+  { value: 'portrait', label: '竖屏' },
+  { value: 'landscape', label: '横屏' },
+]
+
+/** 跳页入口的位置展示（1-based 当前页钳入 [1, totalPages]）。 */
+const jumpCurrent = computed(() =>
+  props.totalPages > 0 ? Math.min(Math.max(1, props.currentPage), props.totalPages) : 1,
+)
 </script>
 
 <style scoped>
@@ -612,6 +720,47 @@ function onBrightnessInput(event: Event) {
 .reader-settings__wakelock-label {
   color: var(--grey-300);
   font-size: var(--text-small); /* 14sp */
+}
+
+/* --- Page jump entry (A5) ----------------------------------------------- */
+
+.reader-settings__jump {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  text-align: start;
+}
+
+.reader-settings__jump-label {
+  color: var(--color-primary);
+  font-size: var(--text-small); /* 14sp */
+  font-weight: 500;
+}
+
+.reader-settings__jump-meta {
+  color: var(--grey-500);
+  font-size: var(--text-super-small); /* 12sp */
+  font-variant-numeric: tabular-nums;
+}
+
+.reader-settings__jump:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 4px;
+  border-radius: var(--card-radius);
+}
+
+/* --- 两段说明行（亮度 / 屏幕方向共用） ----------------------------------- */
+
+.reader-settings__hint {
+  margin: 8px 0 0;
+  color: var(--grey-600);
+  font-size: var(--text-super-small); /* 12sp */
 }
 
 /* --- Brightness -------------------------------------------------------- */

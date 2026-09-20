@@ -75,6 +75,11 @@ class DownloadService(
     // 文件完整性 Wave 3（S7）：修复日志（遥测，只追加）。默认 null 仅为既有直构
     // 测试的源兼容保留；Spring 装配按类型注入。
     private val repairLogService: RepairLogService? = null,
+    // P-S8 进度批量+节流：页级进度内存累计 + 1s 合并落库（批量件见
+    // DownloadProgressPersister）。默认直构（绑定本仓库）仅为既有直构测试的源兼容
+    // 保留——那些用例不触达后台调度（afterPropertiesSet 才启动）；Spring 装配按
+    // 类型注入容器级单例。
+    private val progressPersister: DownloadProgressPersister = DownloadProgressPersister(downloadRepository),
 ) : DisposableBean {
     private val logger = LoggerFactory.getLogger(DownloadService::class.java)
 
@@ -386,8 +391,10 @@ class DownloadService(
 
         // Cooperative stop: the worker checks the flag between page downloads
         // and stops writing; the row transitions to state 0 (WAIT/paused).
+        // P-S8 批量：暂停态写包进 flush 锁——在途批量 flush（加载的是暂停前状态）
+        // 先完成，暂停写随后落地，行状态绝不被旧进度帧复活。
         tasks[id]?.requestStop()
-        updateEntity(id) { it.state = 0 }
+        progressPersister.locked { updateEntity(id) { it.state = 0 } }
         return true
     }
 
@@ -398,6 +405,9 @@ class DownloadService(
         // Wait for the worker to exit before marking the row cancelled so a
         // late worker save cannot resurrect it as finished.
         task?.awaitFinished(90_000)
+        // P-S8 批量：worker 已退出，先强制 flush 待写进度再写终态（取消的 done
+        // 必须是最后上报值，flush 后该 id 再无批量写、终态写无竞争）。
+        progressPersister.flush(id)
         if (downloadRepository.existsById(id)) {
             updateEntity(id) {
                 it.state = 4
@@ -425,6 +435,9 @@ class DownloadService(
         // on the old machine's path (which can never exist here).
         val dirFile = DownloadDirs.resolve(config.download.path, entity.gid, entity.downloadDir)
         if (dirFile.exists()) dirFile.deleteRecursively()
+        // P-S8 批量：墓碑化前丢弃待写进度（行将删除，进度无意义；批量守卫本也
+        // 跳过墓碑，这里只是把内存累计一并清掉）。
+        progressPersister.discard(id)
         if (downloadRepository.existsById(id)) {
             entity.deleted = true
             entity.lastModified = System.currentTimeMillis()
@@ -499,6 +512,9 @@ class DownloadService(
         val total = entity.total
         if (total <= 0) return
         if (isVerifiedOnDisk(gid, entity.downloadDir, total)) {
+            // P-S8 批量：完成化前强制 flush 对应任务的待写进度（完成化是终态写，
+            // flush 后该 id 的内存累计清空，后续再无旧帧可写）。
+            progressPersister.flush(entity.id)
             updateEntity(entity.id) {
                 it.state = 3
                 it.done = total
@@ -674,6 +690,8 @@ class DownloadService(
             runDownload(task)
         } catch (e: Exception) {
             logger.error("Download failed for gid=${task.gid}", e)
+            // P-S8 批量：异常兜底终态写前强制 flush 待写进度。
+            progressPersister.flush(task.id)
             updateEntity(task.id) {
                 it.state = 4
                 it.error = e.message ?: "Download failed"
@@ -736,7 +754,11 @@ class DownloadService(
         }
 
         // Final state decision — only after every page worker has exited.
+        // P-S8 批量：三个终态分支都先 flush 待写进度再写终态行——页 worker 此刻
+        // 已全部退出，flush 是该 id「此后再无批量写」的屏障，终态 updateEntity
+        // 绝无并发 flush 竞争。
         if (task.stopRequested.get()) {
+            progressPersister.flush(task.id)
             updateEntity(task.id) {
                 it.state = 0
                 it.done = done.get()
@@ -746,6 +768,7 @@ class DownloadService(
 
         val completed = done.get()
         if (completed >= totalPages) {
+            progressPersister.flush(task.id)
             updateEntity(task.id) {
                 it.state = 3
                 it.done = completed
@@ -753,6 +776,7 @@ class DownloadService(
             }
             publishProgress(task, 3, completed, totalPages)
         } else {
+            progressPersister.flush(task.id)
             updateEntity(task.id) {
                 it.state = 4
                 it.done = completed
@@ -1175,26 +1199,17 @@ class DownloadService(
     }
 
     /**
-     * Persist progress periodically (not only at completion) so restarts
-     * resume from the last persisted `done`. Never resurrects a paused (0) or
-     * cancelled/failed (4) row.
+     * P-S8 进度批量：页级进度只做内存累计（taskId → 最新 done），由
+     * [DownloadProgressPersister] 每 1s 合并落库（每任务 findById+save 一次，
+     * 守卫语义与旧逐页落库逐字一致：墓碑行跳过、暂停(0)/失败(4) 行跳过）。
+     * 终态（完成/失败/取消/暂停收尾）、画廊完成化、删除、关停等路径在
+     * [DownloadService] 各写盘点显式 flush/discard——进度绝不滞留内存跨终态。
      *
-     * A7-1 worker 规则（§3.4）：池线程无 SecurityContext——只 bump lastModified
-     * （done 是同步可见字段，不 bump 则 App 增量 pull 看不到 WebUI 下载进展），
-     * 绝不写 username；墓碑行（deleted=true）跳过，进度写不得复活删除。
+     * 断点续传/重启恢复语义不变：重启后从最近一次落库的 done 续跑，崩溃至多
+     * 丢 1s 窗口的内存进度（受磁盘页文件断点续传兜底，无正确性影响）。
      */
     private fun persistProgress(task: DownloadTask, done: Int) {
-        try {
-            downloadRepository.findById(task.id).ifPresent { e ->
-                if (!e.deleted && e.state != 0 && e.state != 4) {
-                    e.done = done
-                    e.lastModified = System.currentTimeMillis()
-                    downloadRepository.save(e)
-                }
-            }
-        } catch (e: Exception) {
-            logger.warn("Failed to persist download progress for id={}", task.id, e)
-        }
+        progressPersister.record(task.id, done)
     }
 
     /**
@@ -1330,6 +1345,9 @@ class DownloadService(
         tasks.values.forEach { it.requestStop() }
         workerPool.shutdownNow()
         tasks.values.forEach { it.pageExecutor.shutdownNow() }
+        // P-S8 批量：关停兜底——把全部在途内存进度立即落库（批量件自身 destroy
+        // 亦会 flushAll，双保险幂等）。
+        progressPersister.flushAll()
     }
 
     private companion object {

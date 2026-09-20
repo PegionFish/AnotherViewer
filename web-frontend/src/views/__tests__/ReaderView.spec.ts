@@ -56,11 +56,12 @@ vi.mock('@/components/reader/ImageReader.vue', () => ({
       'autoPlayProgress',
       'pageMode',
       'direction',
-      'brightness',
+      'brightnessLevel',
       'zoom',
       'wakeLock',
+      'orientationLock',
     ],
-    emits: ['update:current-page', 'update:wake-lock', 'back'],
+    emits: ['update:current-page', 'update:wake-lock', 'update:brightness-level', 'update:orientation-lock', 'back'],
     setup(
       _props: unknown,
       { emit }: { emit: (event: 'back', ...args: unknown[]) => void },
@@ -75,7 +76,7 @@ vi.mock('@/components/reader/ImageReader.vue', () => ({
       toggleChrome() {},
     },
     template:
-      '<div class="image-reader-stub" :data-enabled="autoPlay && autoPlay.enabled ? \'on\' : \'off\'" :data-progress="String(autoPlayProgress ?? 0)" :data-total="String(totalPages ?? 0)" :data-page-mode="String(pageMode ?? \'\')" :data-direction="String(direction ?? \'\')" :data-brightness="String(brightness ?? 0)" :data-zoom="String(zoom ?? 1)" :data-wake-lock="String(wakeLock ?? true)">{{ currentPage }}</div>',
+      '<div class="image-reader-stub" :data-enabled="autoPlay && autoPlay.enabled ? \'on\' : \'off\'" :data-progress="String(autoPlayProgress ?? 0)" :data-total="String(totalPages ?? 0)" :data-page-mode="String(pageMode ?? \'\')" :data-direction="String(direction ?? \'\')" :data-brightness-level="String(brightnessLevel ?? 0)" :data-zoom="String(zoom ?? 1)" :data-wake-lock="String(wakeLock ?? true)" :data-orientation-lock="String(orientationLock ?? \'none\')">{{ currentPage }}</div>',
   },
 }))
 
@@ -893,7 +894,7 @@ describe('ReaderView — 阅读设置统一（服务器基底 + 本地覆盖 + v
     await flushPromises()
 
     expect(stub().attributes('data-page-mode')).toBe('dual')
-    expect(stub().attributes('data-brightness')).toBe('30')
+    expect(stub().attributes('data-brightness-level')).toBe('30')
   })
 
   it('阅读器内改动回写服务器偏好状态', async () => {
@@ -1394,5 +1395,195 @@ describe('ReaderView T1b — 屏幕常亮（设备本地偏好，不进服务器
     const store = usePreferencesStore()
     expect(store.prefs).not.toBeNull()
     expect('wakeLock' in store.prefs!.reader).toBe(false)
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * R1-A6 — 亮度 0–200 设备本地扩展值：滑杆绑定 brightnessLevel（本地键），
+ * synced 偏好 prefs.reader.brightness 只写 clamp(v, 0, 100)（跨端同步红线：
+ * >100 提亮段是本机 CSS filter 近似 App 端真背光增强，同步值停在 100，
+ * App 端把 100 解释为「无压暗」，正确）。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+describe('ReaderView R1-A6 — 亮度 0–200 本地扩展（同步红线 clamp 0–100）', () => {
+  let wrapper: VueWrapper | undefined
+
+  async function mountReady(): Promise<VueWrapper> {
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    const mounted = mount(ReaderView)
+    await flushPromises()
+    return mounted
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    routeParams.gid = '123456'
+    routeParams.page = ''
+    replaceMock.mockReset().mockResolvedValue(undefined)
+    vi.mocked(galleryApi.getDetail).mockReset()
+    vi.mocked(galleryApi.addHistory).mockReset()
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    localStorage.clear()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    localStorage.removeItem(READER_SETTINGS_KEY)
+    vi.restoreAllMocks()
+  })
+
+  it('defaults to 0 (follow system) and passes the level down', async () => {
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-brightness-level')).toBe('0')
+  })
+
+  it('seeds the level from server synced brightness when no local value exists', async () => {
+    prefsWithReader({ brightness: 40 })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-brightness-level')).toBe('40')
+  })
+
+  it('migrates the legacy payload brightness key into the extended level', async () => {
+    setReaderSettings({ direction: 'ltr', pageMode: 'auto', brightness: 30 })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-brightness-level')).toBe('30')
+  })
+
+  it('restores a device-local extended level (>100) over the server value', async () => {
+    setReaderSettings({ direction: 'ltr', pageMode: 'auto', brightness: 100, brightnessLevel: 150 })
+    prefsWithReader({ brightness: 0 })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-brightness-level')).toBe('150')
+  })
+
+  it('clamps an out-of-range stored level into [0, 200]', async () => {
+    setReaderSettings({ direction: 'ltr', pageMode: 'auto', brightness: 0, brightnessLevel: 999 })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-brightness-level')).toBe('200')
+  })
+
+  it('red line: synced store receives clamp(v, 0, 100) while the local payload keeps the raw value', async () => {
+    prefsWithReader({ pageMode: 'auto' })
+    wrapper = await mountReady()
+
+    emitReader(wrapper, 'update:brightness-level', 150)
+    await flushPromises()
+
+    const stored = JSON.parse(localStorage.getItem(READER_SETTINGS_KEY)!)
+    expect(stored.brightnessLevel).toBe(150) // 本地载荷存原值
+    expect(stored.brightness).toBe(100) // 降级兼容键 = clamp 镜像
+
+    const store = usePreferencesStore()
+    expect(store.prefs?.reader.brightness).toBe(100) // 同步值停在 100
+    expect('brightnessLevel' in store.prefs!.reader).toBe(false) // 扩展键不进 synced store
+  })
+
+  it('mirrors 1:1 inside the dimming range (50 → synced 50)', async () => {
+    prefsWithReader({ pageMode: 'auto' })
+    wrapper = await mountReady()
+
+    emitReader(wrapper, 'update:brightness-level', 50)
+    await flushPromises()
+
+    const stored = JSON.parse(localStorage.getItem(READER_SETTINGS_KEY)!)
+    expect(stored.brightnessLevel).toBe(50)
+    expect(stored.brightness).toBe(50)
+    expect(usePreferencesStore().prefs?.reader.brightness).toBe(50)
+  })
+
+  it('red line at the ceiling: 200 still syncs as 100 (never >100 into the store)', async () => {
+    prefsWithReader({ pageMode: 'auto' })
+    wrapper = await mountReady()
+
+    emitReader(wrapper, 'update:brightness-level', 200)
+    await flushPromises()
+
+    const stored = JSON.parse(localStorage.getItem(READER_SETTINGS_KEY)!)
+    expect(stored.brightnessLevel).toBe(200)
+    const store = usePreferencesStore()
+    expect(store.prefs?.reader.brightness).toBe(100)
+    expect(store.prefs?.reader.brightness).toBeLessThanOrEqual(100)
+  })
+})
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * R1-A7 — 屏幕方向锁定：设备本地偏好（跟随系统/竖屏/横屏），只落
+ * reader-settings localStorage，明确不进服务器 ReaderPreferences。
+ * lock/unlock 生命周期在 ImageReader 侧（其 spec 覆盖），这里守载荷与接线。
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+describe('ReaderView R1-A7 — 屏幕方向锁定（设备本地偏好，不进服务器同步）', () => {
+  let wrapper: VueWrapper | undefined
+
+  async function mountReady(): Promise<VueWrapper> {
+    vi.mocked(galleryApi.getDetail).mockResolvedValue(detailFixture())
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    const mounted = mount(ReaderView)
+    await flushPromises()
+    return mounted
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    routeParams.gid = '123456'
+    routeParams.page = ''
+    replaceMock.mockReset().mockResolvedValue(undefined)
+    vi.mocked(galleryApi.getDetail).mockReset()
+    vi.mocked(galleryApi.addHistory).mockReset()
+    vi.mocked(galleryApi.addHistory).mockResolvedValue({ success: true })
+    localStorage.clear()
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    localStorage.removeItem(READER_SETTINGS_KEY)
+    vi.restoreAllMocks()
+  })
+
+  it('defaults to none (follow system) and passes the pref down', async () => {
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-orientation-lock')).toBe('none')
+  })
+
+  it('restores a device-local lock value from the v2 local payload', async () => {
+    setReaderSettings({
+      direction: 'ltr',
+      pageMode: 'auto',
+      brightness: 0,
+      orientationLock: 'landscape',
+    })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-orientation-lock')).toBe('landscape')
+  })
+
+  it('falls back to none for an invalid stored value', async () => {
+    setReaderSettings({
+      direction: 'ltr',
+      pageMode: 'auto',
+      brightness: 0,
+      orientationLock: 'upside-down',
+    })
+    wrapper = await mountReady()
+    expect(wrapper.find('.image-reader-stub').attributes('data-orientation-lock')).toBe('none')
+  })
+
+  it('persists a change to localStorage but never into server reader prefs', async () => {
+    prefsWithReader({ pageMode: 'auto' })
+    wrapper = await mountReady()
+
+    emitReader(wrapper, 'update:orientation-lock', 'portrait')
+    await flushPromises()
+
+    const stored = JSON.parse(localStorage.getItem(READER_SETTINGS_KEY)!)
+    expect(stored.orientationLock).toBe('portrait')
+
+    const store = usePreferencesStore()
+    expect(store.prefs).not.toBeNull()
+    expect('orientationLock' in store.prefs!.reader).toBe(false)
   })
 })

@@ -6,9 +6,21 @@ import { usePreferencesStore } from '@/stores/preferences'
 import { DEFAULT_PREFERENCES, DEFAULT_READER_PREFERENCES } from '@/api/preferences'
 
 /**
- * T1b/T1c 的组件级 spec：Wake Lock 屏幕常亮生命周期 + Fullscreen API 接管
- * reader.fullscreen。chrome 子组件全部 stub——这里只关心 ImageReader 自身的
- * 文档级监听（visibilitychange / fullscreenchange）与挂载/卸载行为。
+ * ImageReader 组件级 spec：
+ * - T1b：Wake Lock 屏幕常亮生命周期（visibilitychange / 挂载卸载）。
+ * - T1c：真全屏（Fullscreen API 接管 reader.fullscreen，fullscreenchange
+ *   是唯一事实源）。
+ * - R1-A6：亮度 0–200——0–100 遮罩压暗一期语义不变，101–200 页面容器
+ *   CSS filter 提亮且无遮罩。
+ * - R1-A5：跳页——G 键/设置面板菜单入口、SeekBarPanel 同一 seek 通路、
+ *   Esc（handleBack 兜底）先关对话框。
+ * - R1-A7：屏幕方向锁定——全屏联动 lock/unlock、被拒静默降级、卸载必解锁
+ *   （含在途请求迟到兑现的幽灵锁兜底）。
+ *
+ * chrome 子组件全部 stub——这里只关心 ImageReader 自身的文档级监听与
+ * 挂载/卸载行为。happy-dom 坑（沿用既有手法）：document 实例不走全局
+ * prototype，fullscreen/hidden 需打实例自有属性；focus 只对已接入文档的
+ * 元素生效。
  */
 
 /* ------------------------------------------------------------------ */
@@ -121,10 +133,11 @@ function mountReader(props: Record<string, unknown> = {}) {
       pageMode: 'single',
       mode: 'page',
       zoom: 1,
-      brightness: 0,
+      brightnessLevel: 0,
       autoPlay: { enabled: false, intervalMs: 3000 },
       autoPlayProgress: 0,
       wakeLock: true,
+      orientationLock: 'none',
       ...props,
     },
     global: {
@@ -136,6 +149,7 @@ function mountReader(props: Record<string, unknown> = {}) {
         SeekBarPanel: true,
         ReaderToolbar: true,
         ReaderSettings: true,
+        PageJumpDialog: true,
         ProgressSpinner: true,
       },
     },
@@ -404,7 +418,7 @@ describe('ImageReader T1c — 真全屏（Fullscreen API 接管 reader.fullscree
   })
 })
 
-describe('ImageReader Wave-2 T2 — brightness 压暗遮罩（系数三端统一 0.87）', () => {
+describe('ImageReader R1-A6 — 亮度 0–200（0–100 遮罩压暗不变 + 101–200 filter 提亮）', () => {
   let wrapper: VueWrapper | undefined
 
   beforeEach(() => {
@@ -422,25 +436,341 @@ describe('ImageReader Wave-2 T2 — brightness 压暗遮罩（系数三端统一
     return (wrapper!.find('.image-reader__mask').element as HTMLElement).style.opacity
   }
 
+  function pagesFilter(): string {
+    return (wrapper!.find('.image-reader__pages').element as HTMLElement).style.filter
+  }
+
   it('shows no mask at 0 (follow system)', async () => {
-    wrapper = mountReader({ brightness: 0 })
+    wrapper = mountReader({ brightnessLevel: 0 })
     await flushPromises()
     expect(maskOpacity()).toBe('0')
+    expect(pagesFilter()).toBe('')
   })
 
-  it('applies (1 - v/100) * 0.87 inside the dimming range', async () => {
-    wrapper = mountReader({ brightness: 50 })
+  it('applies (1 - v/100) * 0.87 inside the dimming range — 一期语义不变', async () => {
+    wrapper = mountReader({ brightnessLevel: 50 })
     await flushPromises()
     expect(maskOpacity()).toBe(String((1 - 50 / 100) * 0.87))
+    expect(pagesFilter()).toBe('')
 
-    await wrapper.setProps({ brightness: 30 })
+    await wrapper.setProps({ brightnessLevel: 30 })
     await flushPromises()
     expect(maskOpacity()).toBe(String((1 - 30 / 100) * 0.87))
   })
 
-  it('is mask-free again at the brightest end (100)', async () => {
-    wrapper = mountReader({ brightness: 100 })
+  it('is mask-free again at the dimming ceiling (100), still no filter', async () => {
+    wrapper = mountReader({ brightnessLevel: 100 })
     await flushPromises()
     expect(maskOpacity()).toBe('0')
+    expect(pagesFilter()).toBe('')
+  })
+
+  it('boosts page content via CSS filter and drops the mask in 101–200', async () => {
+    wrapper = mountReader({ brightnessLevel: 150 })
+    await flushPromises()
+    // 提亮段：filter 生效（150 → 1.5×）且遮罩恒为 0。
+    expect(pagesFilter()).toBe('brightness(1.5)')
+    expect(maskOpacity()).toBe('0')
+
+    await wrapper.setProps({ brightnessLevel: 200 })
+    await flushPromises()
+    expect(pagesFilter()).toBe('brightness(2)')
+    expect(maskOpacity()).toBe('0')
+
+    // 回到 0–100 段：filter 撤除、遮罩回归一期语义。
+    await wrapper.setProps({ brightnessLevel: 40 })
+    await flushPromises()
+    expect(pagesFilter()).toBe('')
+    expect(maskOpacity()).toBe(String((1 - 40 / 100) * 0.87))
+  })
+})
+
+describe('ImageReader R1-A5 — 跳页（G 键 + 菜单入口 + SeekBarPanel 同一 seek 通路）', () => {
+  let wrapper: VueWrapper | undefined
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    prefsWithReader()
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    propRestores.splice(0).reverse().forEach((restore) => restore())
+    document.body.innerHTML = ''
+  })
+
+  /** window 级合成按键（target 为 window，非表单控件）。 */
+  function pressKey(key: string): void {
+    window.dispatchEvent(new KeyboardEvent('keydown', { key }))
+  }
+
+  /**
+   * 对话框是否处于打开态。不能用 DOM 存活判断关闭：happy-dom 不派发
+   * transitionend，Transition 的 leave 元素会滞留——改看组件 visible prop。
+   */
+  function jumpDialogOpen(wrapper: VueWrapper): boolean {
+    const dialog = wrapper.findComponent({ name: 'PageJumpDialog' })
+    return dialog.exists() && (dialog.props('visible') as boolean)
+  }
+
+  it('opens the jump dialog on the G key and closes it via handleBack (Esc 兜底路径)', async () => {
+    wrapper = mountReader()
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(false)
+
+    pressKey('g')
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(true)
+
+    // Esc（焦点在对话框外时经 useKeyboardNav → handleBack）先关对话框，
+    // 不退出阅读器（不向上抛 back）。
+    const exposed = wrapper.vm as unknown as { handleBack: () => void }
+    exposed.handleBack()
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(false)
+    expect(wrapper.emitted('back')).toBeUndefined()
+  })
+
+  it('accepts the uppercase G alias', async () => {
+    wrapper = mountReader()
+    await flushPromises()
+    pressKey('G')
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(true)
+  })
+
+  it('does not hijack G typed into form controls (dialog inputs stay usable)', async () => {
+    wrapper = mountReader()
+    await flushPromises()
+    const input = document.createElement('input')
+    document.body.appendChild(input)
+    input.dispatchEvent(new KeyboardEvent('keydown', { key: 'g', bubbles: true }))
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(false)
+  })
+
+  it('does not offer jumping with unknown page counts (totalPages=0)', async () => {
+    wrapper = mountReader({ totalPages: 0 })
+    await flushPromises()
+    pressKey('g')
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(false)
+  })
+
+  it('opens from the settings-sheet menu entry (jump event from the sheet)', async () => {
+    wrapper = mountReader()
+    await flushPromises()
+    const sheet = wrapper.findComponent({ name: 'ReaderSettings' })
+    expect(sheet.exists()).toBe(true)
+    ;(sheet.vm as unknown as { $emit: (e: string) => void }).$emit('jump')
+    await flushPromises()
+    expect(jumpDialogOpen(wrapper)).toBe(true)
+    // 菜单进入跳页时设置面板先收起。
+    expect(
+      (wrapper.findComponent({ name: 'ReaderSettings' }).props() as { visible: boolean }).visible,
+    ).toBe(false)
+  })
+
+  it('commits the jump through the same seek pathway as the seek bar (1-based)', async () => {
+    wrapper = mountReader({ currentPage: 4 })
+    await flushPromises()
+    pressKey('g')
+    await flushPromises()
+
+    const dialog = wrapper.findComponent({ name: 'PageJumpDialog' })
+    expect(dialog.exists()).toBe(true)
+    // 对话框收到 0-based currentPage（对话框内部负责 +1 展示）。
+    expect(dialog.props('currentPage')).toBe(4)
+    expect(dialog.props('totalPages')).toBe(10)
+
+    ;(dialog.vm as unknown as { $emit: (e: string, v: number) => void }).$emit('jump', 7)
+    await flushPromises()
+    expect(wrapper.emitted('update:currentPage')).toEqual([[6]]) // page - 1
+    expect(jumpDialogOpen(wrapper)).toBe(false)
+  })
+
+  it('closing the dialog without a jump does not touch the current page', async () => {
+    wrapper = mountReader({ currentPage: 4 })
+    await flushPromises()
+    pressKey('g')
+    await flushPromises()
+    const dialog = wrapper.findComponent({ name: 'PageJumpDialog' })
+    ;(dialog.vm as unknown as { $emit: (e: string) => void }).$emit('close')
+    await flushPromises()
+    expect(wrapper.emitted('update:currentPage')).toBeUndefined()
+    expect(jumpDialogOpen(wrapper)).toBe(false)
+  })
+})
+
+describe('ImageReader R1-A7 — 屏幕方向锁定（全屏联动 / 退全屏解锁 / 卸载必解锁）', () => {
+  let wrapper: VueWrapper | undefined
+  let fs: ReturnType<typeof installFullscreen>
+
+  interface FakeOrientation {
+    lock: ReturnType<typeof vi.fn>
+    unlock: ReturnType<typeof vi.fn>
+  }
+
+  function installScreenOrientation(): FakeOrientation {
+    const orientation: FakeOrientation = {
+      lock: vi.fn(async () => {}),
+      unlock: vi.fn(() => {}),
+    }
+    overrideProp(globalThis, 'screen', {
+      configurable: true,
+      value: { orientation },
+    })
+    return orientation
+  }
+
+  /** lock 迟迟不兑现的挂起句柄（在途请求 + 卸载竞态用）。 */
+  function deferredLock(orientation: FakeOrientation): Array<() => void> {
+    const resolvers: Array<() => void> = []
+    orientation.lock.mockImplementation(
+      () => new Promise<void>((resolve) => resolvers.push(resolve)),
+    )
+    return resolvers
+  }
+
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    fs = installFullscreen()
+    prefsWithReader({ fullscreen: true })
+  })
+
+  afterEach(() => {
+    wrapper?.unmount()
+    wrapper = undefined
+    propRestores.splice(0).reverse().forEach((restore) => restore())
+  })
+
+  it('locks portrait when entering fullscreen with the portrait pref', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(fs.requestFullscreen).toHaveBeenCalledTimes(1)
+    expect(orientation.lock).toHaveBeenCalledTimes(1)
+    expect(orientation.lock).toHaveBeenCalledWith('portrait')
+    expect(orientation.unlock).not.toHaveBeenCalled()
+  })
+
+  it('locks landscape when entering fullscreen with the landscape pref', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'landscape' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledWith('landscape')
+  })
+
+  it('never locks with the default follow-system pref (none)', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'none' })
+    await flushPromises()
+    expect(orientation.lock).not.toHaveBeenCalled()
+    expect(orientation.unlock).not.toHaveBeenCalled()
+  })
+
+  it('does not lock outside fullscreen even with a lock pref', async () => {
+    const orientation = installScreenOrientation()
+    prefsWithReader({ fullscreen: false })
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(fs.requestFullscreen).not.toHaveBeenCalled()
+    expect(orientation.lock).not.toHaveBeenCalled()
+  })
+
+  it('re-locks with the new value when the pref switches mid-reading', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledWith('portrait')
+
+    await wrapper.setProps({ orientationLock: 'landscape' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(2)
+    expect(orientation.lock).toHaveBeenLastCalledWith('landscape')
+  })
+
+  it('unlocks when the pref returns to none mid-reading', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.unlock).not.toHaveBeenCalled()
+
+    await wrapper.setProps({ orientationLock: 'none' })
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+  })
+
+  it('unlocks when fullscreen exits (fullscreenchange 联动)', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(1)
+
+    // 用户 Esc 退出全屏：浏览器清空 fullscreenElement 并派发 fullscreenchange。
+    fs.clear()
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+
+    // 重新进全屏 → 重锁。
+    await rootEl(wrapper).requestFullscreen()
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(2)
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+  })
+
+  it('degrades silently when the lock is rejected (iOS Safari / 非全屏环境)', async () => {
+    const orientation = installScreenOrientation()
+    orientation.lock.mockRejectedValueOnce(new Error('NotSupportedError'))
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(1)
+    // 被拒不记账：卸载时不会去解一把从未持有的锁。
+    wrapper.unmount()
+    wrapper = undefined
+    await flushPromises()
+    expect(orientation.unlock).not.toHaveBeenCalled()
+  })
+
+  it('unlocks on unmount — 方向锁绝不越过阅读器会话泄漏', async () => {
+    const orientation = installScreenOrientation()
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(1)
+
+    wrapper.unmount()
+    wrapper = undefined
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+  })
+
+  it('unlocks an in-flight lock request that settles after unmount (幽灵锁兜底)', async () => {
+    const orientation = installScreenOrientation()
+    const resolvers = deferredLock(orientation)
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(1)
+    expect(orientation.unlock).not.toHaveBeenCalled() // 仍在途
+
+    // 卸载：先对在途请求兜底 unlock。
+    wrapper.unmount()
+    wrapper = undefined
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+
+    // 迟到兑现：post-await 守卫再补一次 unlock，锁不落袋。
+    resolvers[0]?.()
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(2)
+  })
+
+  it('stays silent on platforms without screen.orientation (特性检测降级)', async () => {
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(wrapper.find('.image-reader').exists()).toBe(true)
+    wrapper.unmount()
+    wrapper = undefined
+    await flushPromises()
   })
 })

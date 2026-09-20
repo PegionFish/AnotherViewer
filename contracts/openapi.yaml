@@ -1748,9 +1748,32 @@ paths:
           schema:
             type: string
           description: Original image URL to proxy
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Conditional request header (RFC 7232, weak comparison). Evaluated
+            on the cache-hit paths (scaled `w=` hit or original hit) — a hit
+            returns 304 without any upstream request. A cache miss always
+            fetches upstream (the fresh response still carries the headers
+            for later revalidation).
       responses:
         '200':
           description: Image binary data (cache hit, or fetch-on-miss with the site content-type)
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: "Always 'public, max-age=86400'"
+            ETag:
+              schema:
+                type: string
+              description: >-
+                Weak validator derived from the ImageCacheService cache key:
+                `W/"<sha256(url)>"` for the original bytes, `W/"thumb:w{n}:<url>"`
+                for `w=` scaled variants (each variant has its own ETag).
           content:
             image/jpeg:
               schema:
@@ -1760,6 +1783,19 @@ paths:
               schema:
                 type: string
                 format: binary
+        '304':
+          description: >-
+            Not Modified — the request's If-None-Match matched the current
+            ETag on a cache-hit path. Empty body; carries the current `ETag`
+            and `Cache-Control` headers. Never triggers an upstream request.
+          headers:
+            ETag:
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+                description: "Always 'public, max-age=86400'"
         '404':
           description: >-
             Not in cache and not fetchable (non-whitelisted host, site
@@ -1856,6 +1892,18 @@ paths:
           schema:
             type: string
           description: HTTP Range header for partial content (e.g. "bytes=0-1023")
+        - name: If-None-Match
+          in: header
+          required: false
+          schema:
+            type: string
+          description: |
+            Conditional request header (RFC 7232, weak comparison: `*`,
+            comma lists, `W/` prefix are handled). Evaluated BEFORE the Range
+            header and only when the page is served from the storage pool
+            (App-pushed download): a hit returns 304 without reading the file,
+            acquiring the pool-read gate, or triggering page prefetch.
+            Takes precedence over Range.
       responses:
         '200':
           description: Full image
@@ -1872,6 +1920,16 @@ paths:
               schema:
                 type: string
               description: "max-age=86400"
+            ETag:
+              schema:
+                type: string
+              description: >-
+                Present only when the page is served from the storage pool
+                (App-pushed download). Strong validator `"sha256:<hash>"`
+                when a page_file_hash baseline exists (a baseline refresh /
+                heal naturally invalidates old client validators), otherwise
+                weak `W/"<size>-<mtime>"` of the pool file. Other serve paths
+                (cache hit, enhanced variant, upstream fetch) currently omit it.
           content:
             image/jpeg:
               schema:
@@ -1907,6 +1965,10 @@ paths:
               schema:
                 type: string
               description: "max-age=86400"
+            ETag:
+              schema:
+                type: string
+              description: Same conditional semantics as the 200 response (storage-pool serve path only).
           content:
             image/jpeg:
               schema:
@@ -1924,6 +1986,24 @@ paths:
               schema:
                 type: string
                 format: binary
+        '304':
+          description: >-
+            Not Modified — the request's If-None-Match matched the current
+            pool-page ETag (evaluated before the Range header; an unsatisfied
+            If-None-Match falls through to the normal 200/206 handling).
+            Empty body; the file is not read, the storage-pool read gate is
+            not acquired, and no page prefetch is scheduled. A baseline
+            refresh (heal) changes the hash and naturally invalidates old
+            client validators (subsequent conditional requests get 200).
+          headers:
+            ETag:
+              schema:
+                type: string
+              description: "Strong '\"sha256:<hash>\"' (baseline exists) or weak 'W/\"<size>-<mtime>\"'"
+            Cache-Control:
+              schema:
+                type: string
+                description: "max-age=86400"
         '401':
           description: Gallery Site session expired or invalid
           content:

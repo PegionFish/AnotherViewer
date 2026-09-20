@@ -21,18 +21,20 @@
       :page-mode="pageModePref"
       :mode="resolvedMode"
       :zoom="zoom"
-      :brightness="brightness"
+      :brightness-level="brightnessLevel"
       :auto-play="autoPlay"
       :auto-play-progress="autoPlayProgress"
       :wake-lock="wakeLock"
+      :orientation-lock="orientationLock"
       :enhanced-urls="enhancedUrls"
       @update:current-page="onPageChange"
       @update:direction="direction = $event"
       @update:page-mode="pageModePref = $event"
       @update:zoom="zoom = $event"
-      @update:brightness="brightness = $event"
+      @update:brightness-level="brightnessLevel = $event"
       @update:auto-play="autoPlay = $event"
       @update:wake-lock="wakeLock = $event"
+      @update:orientation-lock="orientationLock = $event"
       @prev="prevPage"
       @next="nextPage"
       @back="goBack"
@@ -58,8 +60,10 @@
  *   page from the `/reader/:gid/:page?` route (0-based, deep-linkable).
  * - Owns the reader state the chrome components bind to: current page,
  *   reading direction (LTR/RTL/vertical), page-mode preference, zoom,
- *   brightness and auto-play. Direction / page mode / brightness persist to
- *   localStorage (the web equivalent of `Settings.PutReadingDirection`…).
+ *   brightness level (A6: 0–200 device-local extended; the synced mirror is
+ *   always clamp(v, 0, 100)), orientation lock (A7, device-local) and
+ *   auto-play. Direction / page mode / brightness persist to localStorage
+ *   (the web equivalent of `Settings.PutReadingDirection`…).
  * - Resolves the effective mode: vertical direction forces scroll; `auto`
  *   page mode follows the viewport — dual at `min-aspect-ratio: 1/1`
  *   (responsive-strategy §6 rules 1–3), single otherwise.
@@ -109,6 +113,10 @@ import { DEFAULT_READER_PREFERENCES } from '@/api/preferences'
 import { maskedTitle } from '@/utils/privacyMask'
 import ProgressSpinner from '@/components/atoms/ProgressSpinner.vue'
 import ImageReader from '@/components/reader/ImageReader.vue'
+import {
+  ORIENTATION_LOCK_PREFS,
+} from '@/components/reader/ReaderSettings.vue'
+import type { OrientationLockPref } from '@/components/reader/ReaderSettings.vue'
 import {
   PAGE_MODE_PREFS,
   READING_DIRECTIONS,
@@ -191,23 +199,50 @@ interface PersistedReaderSettings {
   v?: number
   direction: ReadingDirection
   pageMode: PageModePref
+  /**
+   * 同步镜像键（0–100）：恒写 clamp(brightnessLevel, 0, 100)——旧版本代码
+   * 与降级场景读到的是正确的压暗语义；>100 的提亮段绝不落这里。
+   */
   brightness: number
+  /**
+   * A6: 设备本地亮度扩展值 0–200（>100 提亮段，CSS filter 近似 App 端真
+   * 背光增强）——设备本地键，明确不进服务器 ReaderPreferences、不跨端同步。
+   * 可选：A6 之前的 v2 载荷无此键（回落 brightness）。
+   */
+  brightnessLevel?: number
   /**
    * T1b: 屏幕常亮开关——设备本地偏好，明确不进服务器 ReaderPreferences、
    * 不跨端同步（Android 端阅读器默认常亮，Web 对齐）。可选：v1 载荷无此键。
    */
   wakeLock?: boolean
+  /**
+   * A7: 屏幕方向锁定（跟随系统/竖屏/横屏）——设备本地偏好，不进服务器
+   * 同步。可选：A7 之前的 v2 载荷无此键。
+   */
+  orientationLock?: OrientationLockPref
 }
 
 const direction = ref<ReadingDirection>('ltr')
 const pageModePref = ref<PageModePref>('auto')
-const brightness = ref(0)
+/**
+ * A6: 亮度滑杆绑定的本地扩展值 0–200。0–100 段与既有 synced brightness
+ * 同义（遮罩压暗）；101–200 提亮段是设备本地近似（App 端真背光增强），
+ * 只落本地载荷，同步值恒写 clamp(v, 0, 100)。缺省取 synced brightness 初值。
+ */
+const brightnessLevel = ref(0)
 /** T1b: 默认开——对齐 Android 阅读器的 keep-screen-on 语义。 */
 const wakeLock = ref(true)
+/** A7: 屏幕方向锁定，默认跟随系统。 */
+const orientationLock = ref<OrientationLockPref>('none')
 
-/** Clamp helper for the persisted brightness (0–100). */
+/** Clamp helper for the synced brightness mirror (0–100，跨端同步红线)。 */
 function clampBrightness(value: number): number {
   return Math.min(100, Math.max(0, Math.round(value)))
+}
+
+/** Clamp helper for the device-local extended level (0–200)。 */
+function clampBrightnessLevel(value: number): number {
+  return Math.min(200, Math.max(0, Math.round(value)))
 }
 
 /**
@@ -225,8 +260,10 @@ function applyStoredSettings(): void {
     if (PAGE_MODE_PREFS.includes(r.pageMode as PageModePref)) {
       pageModePref.value = r.pageMode as PageModePref
     }
+    // synced brightness 是 0–100 压暗语义——初值直接成为本地扩展值的基底
+    // （A6 定案：brightnessLevel 缺省取 synced brightness 初值）。
     if (typeof r.brightness === 'number' && Number.isFinite(r.brightness)) {
-      brightness.value = clampBrightness(r.brightness)
+      brightnessLevel.value = clampBrightness(r.brightness)
     }
   }
 
@@ -245,11 +282,24 @@ function applyStoredSettings(): void {
     ) {
       pageModePref.value = stored.pageMode
     }
-    if (typeof stored.brightness === 'number' && Number.isFinite(stored.brightness)) {
-      brightness.value = clampBrightness(stored.brightness)
+    // A6: 本地扩展值优先（0–200）；旧载荷只有 brightness（0–100）时回落
+    // 继承——两键本就同源，迁移无感。
+    if (
+      typeof stored.brightnessLevel === 'number' &&
+      Number.isFinite(stored.brightnessLevel)
+    ) {
+      brightnessLevel.value = clampBrightnessLevel(stored.brightnessLevel)
+    } else if (typeof stored.brightness === 'number' && Number.isFinite(stored.brightness)) {
+      brightnessLevel.value = clampBrightness(stored.brightness)
     }
     if (typeof stored.wakeLock === 'boolean') {
       wakeLock.value = stored.wakeLock
+    }
+    if (
+      stored.orientationLock != null &&
+      ORIENTATION_LOCK_PREFS.includes(stored.orientationLock)
+    ) {
+      orientationLock.value = stored.orientationLock
     }
   } catch {
     // Corrupted storage — fall back to server prefs / defaults.
@@ -277,12 +327,25 @@ let settingsTouched = false
 let appliedSnapshot = ''
 
 function settingsSnapshot(): string {
-  return JSON.stringify([direction.value, pageModePref.value, brightness.value, wakeLock.value])
+  return JSON.stringify([
+    direction.value,
+    pageModePref.value,
+    brightnessLevel.value,
+    wakeLock.value,
+    orientationLock.value,
+  ])
 }
 
 /**
- * 把当前生效值写入 localStorage（v2）并镜像到服务器偏好。wakeLock 是设备
- * 本地键（T1b）：只落 localStorage，绝不进 updateReader 的服务器镜像。
+ * 把当前生效值写入 localStorage（v2）并镜像到服务器偏好。
+ *
+ * 设备本地键（不进 updateReader 的服务器镜像）：wakeLock（T1b）、
+ * brightnessLevel（A6，0–200 提亮段是本机 CSS filter 近似）、
+ * orientationLock（A7）。
+ *
+ * 跨端同步红线（A6）：synced 偏好 prefs.reader.brightness 只写
+ * clamp(brightnessLevel, 0, 100)——用户拉到 >100 时同步值停在 100（App 端
+ * 把 100 解释为「无压暗」，正确），从不把 >100 写进 synced store。
  */
 function writeSettings(): void {
   try {
@@ -290,19 +353,21 @@ function writeSettings(): void {
       v: SETTINGS_VERSION,
       direction: direction.value,
       pageMode: pageModePref.value,
-      brightness: brightness.value,
+      brightness: clampBrightness(brightnessLevel.value),
+      brightnessLevel: brightnessLevel.value,
       wakeLock: wakeLock.value,
+      orientationLock: orientationLock.value,
     }
     localStorage.setItem(SETTINGS_STORAGE_KEY, JSON.stringify(payload))
   } catch {
     // Storage unavailable / full — reading continues unimpaired.
   }
   // 回写服务器偏好：主设置页与阅读器快捷设置自此保持同一份状态
-  // （updateReader 内部有防抖合并保存）。
+  // （updateReader 内部有防抖合并保存）。brightness 只镜像 clamp 值。
   preferencesStore.updateReader({
     readingDirection: direction.value,
     pageMode: pageModePref.value,
-    brightness: brightness.value,
+    brightness: clampBrightness(brightnessLevel.value),
   })
 }
 

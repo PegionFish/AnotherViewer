@@ -20,6 +20,9 @@ import com.hippo.anotherviewer.web.service.storage.PoolReadGate
 import com.hippo.anotherviewer.web.service.storage.PoolReadPermit
 import com.hippo.anotherviewer.web.service.storage.StorageProfileService
 import com.hippo.anotherviewer.web.service.storage.StorageTuning
+import com.hippo.anotherviewer.web.entity.PageFileHashEntity
+import com.hippo.anotherviewer.web.repository.PageFileHashRepository
+import com.hippo.anotherviewer.web.util.HttpCacheSupport
 import com.hippo.anotherviewer.web.util.ThumbnailScaler
 import org.springframework.context.ApplicationEventPublisher
 import okhttp3.Interceptor
@@ -30,6 +33,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.ResponseBody.Companion.toResponseBody
 import org.junit.jupiter.api.BeforeEach
+import org.junit.jupiter.api.Assertions.assertFalse
 import org.junit.jupiter.api.Assertions.assertTrue
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -121,6 +125,7 @@ class ImageProxyControllerTest {
     private lateinit var site: FakeSite
     private val config = SiteCoreConfigProperties()
     private lateinit var availability: EhAvailabilityService
+    private lateinit var pageFileHashRepository: PageFileHashRepository
 
     private fun setUpClient(interceptor: FakeSite) {
         `when`(sessionManager.okHttpClient)
@@ -151,6 +156,7 @@ class ImageProxyControllerTest {
                 JobService(InMemoryJobStore(), ApplicationEventPublisher {}),
                 availability,
                 dirIndex,
+                pageFileHashRepository,
                 tuning,
                 gate,
             )
@@ -164,6 +170,7 @@ class ImageProxyControllerTest {
         imageCacheService = mock(ImageCacheService::class.java)
         galleryLookupService = mock(GalleryLookupService::class.java)
         sessionManager = mock(SiteSessionManager::class.java)
+        pageFileHashRepository = mock(PageFileHashRepository::class.java)
         availability = probeFalseService().apply { recordSuccess() }
         mockMvc = buildMvc()
     }
@@ -184,6 +191,29 @@ class ImageProxyControllerTest {
         java.io.File(dir, "0001.jpg").writeBytes(byteArrayOf(1, 2, 3, 4))
         java.io.File(dir, "0002.jpg").writeBytes(byteArrayOf(9, 9, 9))
         return dir
+    }
+
+    /** P-S2: 建池目录 `{root}/{gid}/NNNN.jpg`（文件名 1-based = apiPage+1），返回目录。 */
+    private fun poolDirWithPageBytes(@TempDir root: Path, gid: Long, apiPage: Int, bytes: ByteArray): java.io.File {
+        val dir = java.io.File(root.toFile(), gid.toString()).apply { mkdirs() }
+        java.io.File(dir, "%04d.jpg".format(apiPage + 1)).writeBytes(bytes)
+        return dir
+    }
+
+    /** P-S2: 镜像 ImageCacheService.urlKey / HttpCacheSupport.sha256Hex（断言 /proxy ETag 用）。 */
+    private fun sha256Hex(value: String): String =
+        java.security.MessageDigest.getInstance("SHA-256")
+            .digest(value.toByteArray())
+            .joinToString("") { "%02x".format(it) }
+
+    /** P-S2: 造一行 sha256 基线（page 0-based，与 API 页号同口径）。 */
+    private fun baselineRow(gid: Long, apiPage: Int, hash: String): PageFileHashEntity {
+        val row = PageFileHashEntity()
+        row.gid = gid
+        row.page = apiPage
+        row.hash = hash
+        row.algo = "sha256"
+        return row
     }
 
     private fun ssdTuning(): StorageTuning {
@@ -714,5 +744,243 @@ class ImageProxyControllerTest {
             maxObserved.get() in 1..3,
             "real gate limit 3 must cap upstream concurrency (legacy semaphore allows 6), observed ${maxObserved.get()}"
         )
+    }
+
+    // ------------------------------------------------------------------
+    // P-S2: serveFile 流式化（Range 逐字节对拍）+ ETag / If-None-Match / 304
+    // ------------------------------------------------------------------
+
+    /**
+     * 流式 serve 对拍（验收「先测现状」的格式基线，期望值取自旧 readBytes 实现）：
+     * 200 全量、206 中段/1 字节/后缀 Range、416——头格式与字节逐项断言。
+     */
+    @Test
+    fun `pool page streaming serves byte-exact range responses in the legacy header format`(@TempDir root: Path) {
+        val gid = 700L
+        val bytes = ByteArray(1000) { (it % 251).toByte() }
+        poolDirWithPageBytes(root, gid, 0, bytes)
+        config.download.path = root.toString()
+        mockMvc = buildMvc(dirIndex = DownloadDirIndex(config))
+
+        // 全量 200：字节与文件逐字节一致 + 既有头格式（Content-Length 由实现补齐）。
+        mockMvc.perform(get("/api/v1/image/$gid/0"))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(bytes))
+            .andExpect(header().string("Content-Type", "image/jpeg"))
+            .andExpect(header().string("Accept-Ranges", "bytes"))
+            .andExpect(header().string("Cache-Control", "max-age=86400"))
+            .andExpect(header().string("Content-Length", "1000"))
+
+        // 中段 Range：206 + 既有头格式，字节 = 文件[100..299]。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("Range", "bytes=100-299"))
+            .andExpect(status().isPartialContent)
+            .andExpect(content().bytes(bytes.copyOfRange(100, 300)))
+            .andExpect(header().string("Content-Range", "bytes 100-299/1000"))
+            .andExpect(header().string("Content-Length", "200"))
+            .andExpect(header().string("Content-Type", "image/jpeg"))
+            .andExpect(header().string("Accept-Ranges", "bytes"))
+            .andExpect(header().string("Cache-Control", "max-age=86400"))
+
+        // 1 字节 Range：响应恰好 1 字节（流式实现必须流上定位，绝不整文件读后截取）。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("Range", "bytes=42-42"))
+            .andExpect(status().isPartialContent)
+            .andExpect(content().bytes(byteArrayOf(bytes[42])))
+            .andExpect(header().string("Content-Range", "bytes 42-42/1000"))
+            .andExpect(header().string("Content-Length", "1"))
+
+        // 后缀 Range：bytes=-3 → 末 3 字节。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("Range", "bytes=-3"))
+            .andExpect(status().isPartialContent)
+            .andExpect(content().bytes(bytes.copyOfRange(997, 1000)))
+            .andExpect(header().string("Content-Range", "bytes 997-999/1000"))
+
+        // 越界 → 416（既有格式：只带 Content-Range）。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("Range", "bytes=1000-2000"))
+            .andExpect(status().isRequestedRangeNotSatisfiable)
+            .andExpect(header().string("Content-Range", "bytes */1000"))
+    }
+
+    @Test
+    fun `pool page serve carries weak etag and if-none-match hit returns 304 before the gate`(@TempDir root: Path) {
+        val gid = 701L
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        val dir = poolDirWithPageBytes(root, gid, 0, bytes)
+        val file = java.io.File(dir, "0001.jpg")
+        config.download.path = root.toString()
+        val gate = RecordingGate(Int.MAX_VALUE)
+        val probe = DownloadDirIndex(config)
+        mockMvc = buildMvc(gate = gate, dirIndex = probe)
+
+        // 首取：200 + ETag（无基线 → 弱 W/"<size>-<mtime>"）+ Cache-Control。
+        val first = mockMvc.perform(get("/api/v1/image/$gid/0"))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(bytes))
+            .andExpect(header().string("Cache-Control", "max-age=86400"))
+            .andReturn()
+        val etag = first.response.getHeader("ETag")
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "W/\"${file.length()}-${file.lastModified()}\"",
+            etag,
+            "无基线 → 弱 ETag W/\"<size>-<mtime>\""
+        )
+
+        // 二次 If-None-Match → 304 空体（带 ETag/Cache-Control）。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("If-None-Match", etag))
+            .andExpect(status().isNotModified)
+            .andExpect(content().string(""))
+            .andExpect(header().string("ETag", etag))
+            .andExpect(header().string("Cache-Control", "max-age=86400"))
+
+        // 304 判定在闸门之前：只有首取 200 acquire 一次，304 请求不过闸。
+        org.junit.jupiter.api.Assertions.assertEquals(
+            1, gate.acquired.count { it.first == gid.toString() && it.second == 0 },
+            "304 请求不得过池读闸门，got ${gate.acquired}"
+        )
+        // 304 不产生预读/缓存副作用。
+        verify(imageCacheService, never()).cacheImageByKey(anyLong(), anyInt(), any(), anyString())
+    }
+
+    @Test
+    fun `pool page serve prefers strong sha256 etag from baseline and heal refresh invalidates it`(@TempDir root: Path) {
+        val gid = 702L
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        poolDirWithPageBytes(root, gid, 0, bytes)
+        config.download.path = root.toString()
+        val gate = RecordingGate(Int.MAX_VALUE)
+        mockMvc = buildMvc(gate = gate, dirIndex = DownloadDirIndex(config))
+
+        // 页号口径：API 0-based == 基线表 0-based（gid, page 直查，无换算）。
+        val baselineHash = "ab".repeat(32)
+        `when`(pageFileHashRepository.findByGidAndPage(gid, 0)).thenReturn(baselineRow(gid, 0, baselineHash))
+
+        val first = mockMvc.perform(get("/api/v1/image/$gid/0"))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(bytes))
+            .andReturn()
+        val etag = first.response.getHeader("ETag")
+        org.junit.jupiter.api.Assertions.assertEquals(
+            "\"sha256:$baselineHash\"", etag, "有基线 → 强 ETag \"sha256:<hash>\""
+        )
+
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("If-None-Match", etag))
+            .andExpect(status().isNotModified)
+            .andExpect(content().string(""))
+
+        // heal 换 hash（基线刷新）→ 旧 ETag 自然失效：拿到 200 新字节 + 新 ETag。
+        val healedHash = "cd".repeat(32)
+        `when`(pageFileHashRepository.findByGidAndPage(gid, 0)).thenReturn(baselineRow(gid, 0, healedHash))
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("If-None-Match", etag))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(bytes))
+            .andExpect(header().string("ETag", "\"sha256:$healedHash\""))
+
+        // gate：首取 + 失效后的 200 各一次；304 不占票。
+        org.junit.jupiter.api.Assertions.assertEquals(2, gate.acquired.count { it.first == gid.toString() && it.second == 0 })
+        verify(pageFileHashRepository, times(3)).findByGidAndPage(gid, 0)
+    }
+
+    @Test
+    fun `if-none-match takes precedence over range and a miss falls through to 206`(@TempDir root: Path) {
+        val gid = 703L
+        val bytes = ByteArray(10) { it.toByte() }
+        poolDirWithPageBytes(root, gid, 0, bytes)
+        config.download.path = root.toString()
+        mockMvc = buildMvc(dirIndex = DownloadDirIndex(config))
+
+        val etag = mockMvc.perform(get("/api/v1/image/$gid/0"))
+            .andExpect(status().isOk)
+            .andReturn().response.getHeader("ETag")
+
+        // 命中 + Range → 304 优先（RFC 7232：条件评估先于范围处理）。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("If-None-Match", etag).header("Range", "bytes=0-1"))
+            .andExpect(status().isNotModified)
+            .andExpect(content().string(""))
+
+        // 不命中 + Range → 206 照常。
+        mockMvc.perform(get("/api/v1/image/$gid/0").header("If-None-Match", "\"nope\"").header("Range", "bytes=0-1"))
+            .andExpect(status().isPartialContent)
+            .andExpect(content().bytes(bytes.copyOfRange(0, 2)))
+            .andExpect(header().string("Content-Range", "bytes 0-1/10"))
+    }
+
+    @Test
+    fun `proxy adds public cache-control and cache-key etag with 304 on hit paths`() {
+        val url = "https://e-hentai.org/t/5001/cover.jpg"
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(byteArrayOf(1, 2, 3))
+        site = FakeSite { canned(it, 200, "image/jpeg", "") }
+        setUpClient(site)
+
+        // 原尺寸命中：Cache-Control public + ETag = W/"<sha256(url)>"。
+        val etag = "W/\"${sha256Hex(url)}\""
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url))
+            .andExpect(status().isOk)
+            .andExpect(header().string("Cache-Control", "public, max-age=86400"))
+            .andExpect(header().string("ETag", etag))
+
+        // 304：缓存命中路径判定，不触发上游请求。
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url).header("If-None-Match", etag))
+            .andExpect(status().isNotModified)
+            .andExpect(content().string(""))
+
+        // w= 变体各自 ETag（thumb 键派生，与原尺寸互不命中）。
+        val scaledKey = ThumbnailScaler.thumbnailCacheKey(url, 80)
+        `when`(imageCacheService.getCachedImage(scaledKey)).thenReturn(solidImageBytes("jpeg", 80, 60))
+        val scaledEtag = "W/\"$scaledKey\""
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "80"))
+            .andExpect(status().isOk)
+            .andExpect(header().string("Cache-Control", "public, max-age=86400"))
+            .andExpect(header().string("ETag", scaledEtag))
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "80").header("If-None-Match", scaledEtag))
+            .andExpect(status().isNotModified)
+            .andExpect(content().string(""))
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url).param("w", "80").header("If-None-Match", etag))
+            .andExpect(status().isOk)
+
+        org.junit.jupiter.api.Assertions.assertEquals(0, site.callCount, "头/304 断言全程不触发上游")
+    }
+
+    @Test
+    fun `proxy fetch-on-miss response carries cache-control and etag for later revalidation`() {
+        val url = "https://e-hentai.org/t/5002/cover.jpg"
+        `when`(imageCacheService.getCachedImage(url)).thenReturn(null)
+        site = FakeSite { canned(it, 200, "image/png", "PNGBYTES") }
+        setUpClient(site)
+
+        mockMvc.perform(get("/api/v1/image/proxy").param("url", url))
+            .andExpect(status().isOk)
+            .andExpect(content().string("PNGBYTES"))
+            .andExpect(header().string("Cache-Control", "public, max-age=86400"))
+            .andExpect(header().string("ETag", "W/\"${sha256Hex(url)}\""))
+    }
+
+    /** If-None-Match 解析（RFC 7232：`*` / 逗号列表 / W/ 弱比较 / 容错）纯单测。 */
+    @Test
+    fun `if-none-match parsing handles star lists weak prefixes and malformed input`() {
+        val etag = "\"sha256:abc\""
+        val weak = "W/\"555-123\""
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches("*", etag), "星号匹配任意当前表示")
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches("*", null))
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches(etag, etag))
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches("W/$etag", etag), "弱比较：W/ 前缀等价")
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches(etag, "W/$etag"), "弱比较双向")
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches(weak, weak))
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches("\"a\", W/\"b\" ,\"sha256:abc\"", etag), "逗号列表")
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches("\"x, y\"", "\"x, y\""), "quoted 内逗号不打断解析")
+        assertFalse(HttpCacheSupport.ifNoneMatchMatches(null, etag))
+        assertFalse(HttpCacheSupport.ifNoneMatchMatches("", etag))
+        assertFalse(HttpCacheSupport.ifNoneMatchMatches("\"zzz\"", etag))
+        assertFalse(HttpCacheSupport.ifNoneMatchMatches("\"sha256:abc", etag), "残缺片断不抛且不命中")
+        assertTrue(HttpCacheSupport.ifNoneMatchMatches("\"zzz\",\"sha256:abc\"", etag), "残缺后继续解析后续 tag")
+
+        org.junit.jupiter.api.Assertions.assertEquals("\"sha256:ff\"", HttpCacheSupport.strongEtag("sha256", "ff"))
+        org.junit.jupiter.api.Assertions.assertEquals("W/\"12-34\"", HttpCacheSupport.weakEtag(12, 34))
+        org.junit.jupiter.api.Assertions.assertEquals("W/\"k\"", HttpCacheSupport.weakEtagForKey("k"))
+        org.junit.jupiter.api.Assertions.assertEquals(64, HttpCacheSupport.sha256Hex("abc").length)
+
+        val notModified = HttpCacheSupport.notModified(etag, "max-age=60")
+        org.junit.jupiter.api.Assertions.assertEquals(304, notModified.statusCode.value())
+        org.junit.jupiter.api.Assertions.assertNull(notModified.body)
+        org.junit.jupiter.api.Assertions.assertEquals(etag, notModified.headers.getFirst("ETag"))
+        org.junit.jupiter.api.Assertions.assertEquals("max-age=60", notModified.headers.getFirst("Cache-Control"))
     }
 }

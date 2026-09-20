@@ -6,6 +6,10 @@ import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
 import java.io.File
+import java.util.Collections
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 
 class ImageCacheServiceTest {
 
@@ -250,6 +254,179 @@ class ImageCacheServiceTest {
         // Total written = 1.5 MB > 1 MB limit, so eviction should have occurred
         val stats = service.getCacheStats()
         assertTrue(stats.diskCacheSizeBytes <= 1L * 1024 * 1024)
+    }
+
+    // ── P-S9 逐出计数化（写入序队列 + 漂移对账） ────────────────
+
+    @Test
+    fun `P-S9 normal over-limit eviction performs zero full-tree scans`() {
+        val scansBefore = service.fullScanCount.get() // setUp init 的 1 次清点
+        val bigData = ByteArray(300 * 1024)
+        for (i in 1..5) {
+            service.cacheImageByKey(900L, i, bigData, "jpg")
+        }
+
+        assertEquals(scansBefore, service.fullScanCount.get(), "常规超限驱逐不得触发 collectFiles 全树扫描")
+        assertTrue(service.getCacheStats().diskCacheSizeBytes <= 1L * 1024 * 1024)
+        assertEquals(3L, service.getDiskEntryCount())
+    }
+
+    @Test
+    fun `P-S9 eviction follows write order`() {
+        val big = ByteArray(300 * 1024)
+        for (i in 1..5) {
+            service.cacheImageByKey(910L, i, big, "jpg")
+        }
+
+        // 1.5MB > 1MB：按写入序最早写的 page1/page2 先被逐出，page3-5 存活
+        assertFalse(File(tempDir, "910/1.jpg").exists(), "最早写入的 page1 应先被驱逐")
+        assertFalse(File(tempDir, "910/2.jpg").exists(), "次早写入的 page2 应随后被驱逐")
+        assertTrue(File(tempDir, "910/3.jpg").exists())
+        assertTrue(File(tempDir, "910/4.jpg").exists())
+        assertTrue(File(tempDir, "910/5.jpg").exists())
+        assertEquals(3L, service.getDiskEntryCount())
+    }
+
+    @Test
+    fun `P-S9 eviction skips stale entries left by evictPage and keeps counters correct`() {
+        val data = ByteArray(300 * 1024)
+        service.cacheImageByKey(920L, 1, data, "jpg")
+        service.cacheImageByKey(920L, 2, data, "jpg")
+        service.cacheImageByKey(920L, 3, data, "jpg") // 900KB < 1MB，未触发驱逐
+        assertTrue(service.evictPage(920L, 1)) // p1 文件被删、计数同步递减，队列残留陈旧条目
+        assertEquals(2L, service.getDiskEntryCount())
+
+        val scansBefore = service.fullScanCount.get()
+        // 人为把计数推过上限（>1MB），触发驱逐：队头是已被 evictPage 删除的 p1 → 应跳过
+        service.debugInflateDiskSizeBytes(500 * 1024L)
+        service.cacheImageByKey(920L, 4, ByteArray(1024), "jpg")
+
+        assertEquals(scansBefore, service.fullScanCount.get(), "陈旧条目跳过应在队列内完成，不得全树扫描/对账")
+        assertFalse(File(tempDir, "920/2.jpg").exists(), "跳过 p1 后应按写入序驱逐 p2")
+        assertTrue(File(tempDir, "920/3.jpg").exists())
+        assertTrue(File(tempDir, "920/4.jpg").exists())
+        assertEquals(2L, service.getDiskEntryCount(), "跳过陈旧条目不得扣减计数")
+    }
+
+    @Test
+    fun `P-S9 init rebuilds write-order queue sorted by lastModified`() {
+        val a = File(tempDir, "950/1.jpg")
+        val b = File(tempDir, "950/2.jpg")
+        a.parentFile.mkdirs()
+        a.writeBytes(ByteArray(400 * 1024))
+        b.writeBytes(ByteArray(400 * 1024))
+        a.setLastModified(1_000_000L) // 人为最旧
+        b.setLastModified(2_000_000L) // 人为最新
+
+        // 重启：init 全量清点并按 lastModified 重建队列
+        service = ImageCacheService(config).apply { init() }
+        assertEquals(2L, service.getDiskEntryCount())
+
+        val scansBefore = service.fullScanCount.get()
+        // 抬高计数触发一次驱逐（800KB + 300KB > 1MB）：队头应是 lastModified 最旧的 a
+        service.debugInflateDiskSizeBytes(300 * 1024L)
+        service.cacheImageByKey(950L, 3, ByteArray(10), "jpg")
+
+        assertEquals(scansBefore, service.fullScanCount.get(), "init 重建的队列驱逐不得全树扫描")
+        assertFalse(a.exists(), "lastModified 最旧的文件应先被驱逐")
+        assertTrue(b.exists(), "较新的文件应存活")
+        assertTrue(File(tempDir, "950/3.jpg").exists())
+        assertEquals(2L, service.getDiskEntryCount())
+    }
+
+    @Test
+    fun `P-S9 counter drift triggers reconciliation exactly once under rate limit`() {
+        val data = ByteArray(1024)
+        service.cacheImageByKey(930L, 1, data, "jpg")
+        val scansAfterInit = service.fullScanCount.get()
+
+        // 人为漂移：计数推过上限，同时删掉真实文件（模拟漏减/外部删除导致的漂移）
+        service.debugInflateDiskSizeBytes(2L * 1024 * 1024)
+        File(tempDir, "930").deleteRecursively()
+
+        // 触发驱逐：队列条目指向不存在的文件被跳过 → 队列耗尽仍超限 → 对账
+        service.cacheImageByKey(930L, 2, data, "jpg")
+        assertEquals(1L, service.reconcileCount.get(), "漂移应触发一次对账")
+        assertEquals(scansAfterInit + 2, service.fullScanCount.get(), "对账 = 两次全量扫描（删除 + 归一）")
+        assertEquals(0L, service.getCacheStats().diskCacheSizeBytes, "对账应重置字节计数器")
+        assertEquals(0L, service.getDiskEntryCount(), "对账应重置条目计数器")
+        assertTrue(tempDir.listFiles()!!.none { it.isFile }, "对账应清空目录内文件")
+        assertFalse(File(tempDir, "930").exists(), "空目录清理应随对账完成")
+
+        // 频控：60s 窗口内再次漂移不得重复对账
+        service.debugInflateDiskSizeBytes(2L * 1024 * 1024)
+        service.cacheImageByKey(930L, 3, data, "jpg")
+        assertEquals(1L, service.reconcileCount.get(), "频控窗口内不得重复对账")
+        assertFalse(File(tempDir, "930/3.jpg").exists())
+
+        // 窗口过期（此处以调小间隔模拟）后允许再次对账
+        service.reconcileMinIntervalMs = 0L
+        service.cacheImageByKey(930L, 4, data, "jpg")
+        assertEquals(2L, service.reconcileCount.get(), "频控窗口过期后应允许再次对账")
+        assertEquals(0L, service.getDiskEntryCount())
+    }
+
+    @Test
+    fun `P-S9 concurrent writes and eviction keep counters exact with no double-deduction`() {
+        // 禁用对账（drift 对账会重置计数器，干扰精确等值断言）；本用例验证
+        // 纯队列驱逐路径下"每笔写入恰有一个队列条目、delete 失败不扣"的守卫。
+        service.reconcileMinIntervalMs = Long.MAX_VALUE
+
+        val threads = 8
+        val pagesPerThread = 25
+        val payload = ByteArray(64 * 1024) // 8×25×64KB = 12.8MB 灌入 1MB 上限
+        val pool = Executors.newFixedThreadPool(threads)
+        val startGate = CountDownLatch(1)
+        val done = CountDownLatch(threads)
+        val errors = Collections.synchronizedList(mutableListOf<Exception>())
+
+        repeat(threads) { t ->
+            pool.submit {
+                try {
+                    startGate.await()
+                    for (p in 0 until pagesPerThread) {
+                        service.cacheImageByKey(940L + t, p, payload, "jpg")
+                    }
+                } catch (e: Exception) {
+                    errors += e
+                } finally {
+                    done.countDown()
+                }
+            }
+        }
+        startGate.countDown()
+        assertTrue(done.await(60, TimeUnit.SECONDS), "并发压测超时")
+        pool.shutdown()
+        assertTrue(errors.isEmpty(), "并发写+驱逐不应抛异常: ${errors.take(3)}")
+
+        // 无负计数、无双扣：计数与磁盘真实状态精确一致
+        val actualFiles = tempDir.walkTopDown().filter { it.isFile }.toList()
+        assertEquals(actualFiles.size.toLong(), service.getDiskEntryCount(), "条目计数与磁盘实际不符（双扣/漏扣）")
+        assertEquals(actualFiles.sumOf { it.length() }, service.getCacheStats().diskCacheSizeBytes, "字节计数与磁盘实际不符")
+        assertTrue(service.getDiskEntryCount() >= 0)
+        assertTrue(service.getCacheStats().diskCacheSizeBytes >= 0)
+        val maxDisk = 1L * 1024 * 1024
+        assertTrue(service.getCacheStats().diskCacheSizeBytes <= maxDisk + payload.size, "驱逐后应回到上限附近")
+        assertEquals(0L, service.reconcileCount.get(), "禁用对账时不得触发对账")
+    }
+
+    @Test
+    fun `P-S9 overwrite re-enqueues to tail and stale duplicate entries are skipped`() {
+        val url = "https://example.com/rewrite.jpg"
+        service.cacheImage(url, ByteArray(100)) // 条目 #1
+        service.cacheImage(url, ByteArray(200)) // 覆写：重新入队到队尾，队列有两个同路径条目
+
+        val scansBefore = service.fullScanCount.get()
+        // 漂移量落在"队列内可删字节（100+200 覆写前值与 1024）恰好够降回上限"的
+        // 窗口内（1047352 < 1048000 ≤ 1048576），确保不触发对账、纯队列驱逐。
+        service.debugInflateDiskSizeBytes(1_048_000L) // 推过上限触发驱逐
+
+        service.cacheImageByKey(960L, 1, ByteArray(1024), "jpg")
+
+        assertEquals(scansBefore, service.fullScanCount.get(), "同路径重复条目应被队内跳过，不得全树扫描")
+        assertFalse(File(tempDir, "_url").isDirectory && File(tempDir, "_url").listFiles()!!.isNotEmpty())
+        assertTrue(service.getDiskEntryCount() >= 0)
+        assertTrue(service.getCacheStats().diskCacheSizeBytes >= 0)
     }
 
     // ── getCacheSize (backward compat) ─────────────────────────

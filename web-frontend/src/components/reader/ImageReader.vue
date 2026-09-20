@@ -4,41 +4,48 @@
     (plan-2026-09-05 A6); throttled, and touch never synthesizes it here.
   -->
   <div ref="rootRef" class="image-reader" @pointermove="onChromePointerMove">
-    <!-- Page area — fills the viewport behind the overlaid chrome -->
-    <PageMode
-      v-if="mode === 'page'"
-      :gid="gid"
-      :page="currentPage"
-      :total-pages="totalPages"
-      :direction="direction === 'rtl' ? 'rtl' : 'ltr'"
-      :zoom="zoom"
-      :enhanced-urls="enhancedUrls"
-      @update:zoom="(value) => emit('update:zoom', value)"
-      @prev="emit('prev')"
-      @next="emit('next')"
-      @toggle-chrome="toggleChrome"
-    />
-    <DualPageMode
-      v-else-if="mode === 'dual'"
-      :gid="gid"
-      :page="currentPage"
-      :total-pages="totalPages"
-      :direction="direction === 'rtl' ? 'rtl' : 'ltr'"
-      :enhanced-urls="enhancedUrls"
-      @prev="emit('prev')"
-      @next="emit('next')"
-      @toggle-chrome="toggleChrome"
-    />
-    <ScrollMode
-      v-else
-      :gid="gid"
-      :total-pages="totalPages"
-      :current-page="currentPage"
-      :scrubbing="seeking"
-      :enhanced-urls="enhancedUrls"
-      @update:current-page="(page) => emit('update:currentPage', page)"
-      @toggle-chrome="toggleChrome"
-    />
+    <!--
+      Page area — fills the viewport behind the overlaid chrome.
+      A6: 亮度 101–200 的提亮段以 CSS filter 施加于此容器（只作用于页面
+      内容，chrome 与遮罩不参与；App 端该段是真背光增强，Web 以 filter
+      近似）。容器恒为 absolute inset 0，filter 的有无不改变子组件几何。
+    -->
+    <div class="image-reader__pages" :style="pagesFilterStyle">
+      <PageMode
+        v-if="mode === 'page'"
+        :gid="gid"
+        :page="currentPage"
+        :total-pages="totalPages"
+        :direction="direction === 'rtl' ? 'rtl' : 'ltr'"
+        :zoom="zoom"
+        :enhanced-urls="enhancedUrls"
+        @update:zoom="(value) => emit('update:zoom', value)"
+        @prev="emit('prev')"
+        @next="emit('next')"
+        @toggle-chrome="toggleChrome"
+      />
+      <DualPageMode
+        v-else-if="mode === 'dual'"
+        :gid="gid"
+        :page="currentPage"
+        :total-pages="totalPages"
+        :direction="direction === 'rtl' ? 'rtl' : 'ltr'"
+        :enhanced-urls="enhancedUrls"
+        @prev="emit('prev')"
+        @next="emit('next')"
+        @toggle-chrome="toggleChrome"
+      />
+      <ScrollMode
+        v-else
+        :gid="gid"
+        :total-pages="totalPages"
+        :current-page="currentPage"
+        :scrubbing="seeking"
+        :enhanced-urls="enhancedUrls"
+        @update:current-page="(page) => emit('update:currentPage', page)"
+        @toggle-chrome="toggleChrome"
+      />
+    </div>
 
     <!--
       GalleryHeader replica (clock / stroked N/M progress / battery),
@@ -109,15 +116,30 @@
       :page-mode="pageMode"
       :zoom="zoom"
       :auto-play="autoPlay"
-      :brightness="brightness"
+      :brightness-level="brightnessLevel"
       :wake-lock="wakeLock"
+      :orientation-lock="orientationLock"
+      :current-page="currentPage + 1"
+      :total-pages="totalPages"
       @close="closeSettings"
+      @jump="openJumpDialog"
       @update:direction="(value) => emit('update:direction', value)"
       @update:page-mode="(value) => emit('update:pageMode', value)"
       @update:zoom="(value) => emit('update:zoom', value)"
       @update:auto-play="(value) => emit('update:autoPlay', value)"
-      @update:brightness="(value) => emit('update:brightness', value)"
+      @update:brightness-level="(value) => emit('update:brightnessLevel', value)"
       @update:wake-lock="(value) => emit('update:wakeLock', value)"
+      @update:orientation-lock="(value) => emit('update:orientationLock', value)"
+    />
+
+    <!-- A5: 跳页对话框（设置面板菜单入口 + G 键）；确定走 SeekBarPanel
+         同一 seek 通路（update:currentPage），双页铺摊语义由既有换算保证 -->
+    <PageJumpDialog
+      :visible="jumpDialogVisible"
+      :current-page="currentPage"
+      :total-pages="totalPages"
+      @close="closeJumpDialog"
+      @jump="onJumpCommit"
     />
 
     <!-- Brightness mask — the activity_gallery.xml `mask` ColorView -->
@@ -147,8 +169,14 @@
  *   `gallerySliderBackgroundColor`), mirrored for RTL reading; the page jump
  *   applies on release (`change`), while labels track the drag live. In
  *   scroll mode the drag also previews instantly (A8).
- * - Brightness is the `mask` ColorView: a black overlay whose opacity
- *   follows the brightness setting (0 = follow system).
+ * - Brightness (A6): 设备本地亮度 0–200。0–100 是 `mask` ColorView 语义：
+ *   黑色遮罩，不透明度随压暗等级变化（0 = 跟随系统）；101–200 提亮段不加
+ *   遮罩，以页面容器的 CSS filter 近似 App 端 lp.screenBrightness 真背光
+ *   增强——跨端同步值恒写 clamp(v, 0, 100)，红线在 ReaderView.writeSettings。
+ * - Page jump (A5): 跳页对话框（PageJumpDialog，ReaderSettings 菜单入口 +
+ *   G 快捷键），确认与 SeekBarPanel 松手走完全相同的 seek 通路。
+ * - Orientation lock (A7): 全屏期间按设备本地偏好 `screen.orientation.lock`，
+ *   退全屏/卸载必解锁（含在途请求兜底），被拒静默降级。
  * - Auto-play mirrors `auto_transfer`: a countdown chip above the seek bar.
  * - Adjacent pages are preloaded (next 2 / prev 1) for zero-wait turns, at
  *   the same responsive `?w=` width the page components request.
@@ -174,10 +202,12 @@ import ReaderStatusBar from './ReaderStatusBar.vue'
 import SeekBarPanel from './SeekBarPanel.vue'
 import ReaderToolbar from './ReaderToolbar.vue'
 import ReaderSettings from './ReaderSettings.vue'
+import PageJumpDialog from './PageJumpDialog.vue'
 import PageMode from './PageMode.vue'
 import DualPageMode from './DualPageMode.vue'
 import ScrollMode from './ScrollMode.vue'
 import { pageImageUrl } from './PageMode.vue'
+import type { OrientationLockPref } from './ReaderSettings.vue'
 import type {
   AutoPlayState,
   PageModePref,
@@ -199,8 +229,16 @@ interface ImageReaderProps {
   mode: ResolvedReaderMode
   /** Zoom factor for page mode. v-model:zoom. */
   zoom: number
-  /** 0 = system brightness; 1–100 dims via the mask. v-model:brightness. */
-  brightness: number
+  /**
+   * A6: 设备本地亮度等级 0–200（ReaderView 的 reader-settings localStorage
+   * 键 `brightnessLevel`，不进服务器同步）。0 = 跟随系统；1–100 压暗（遮罩
+   * (1 - v/100) * 0.87，与一期完全一致）；101–200 提亮（页面容器 CSS
+   * filter: brightness(1 + (v-100)/100)，不加遮罩——App 端该段是真背光增强
+   * GalleryActivity.setScreenLightness，Web 以 filter 近似）。跨端同步的
+   * prefs.reader.brightness 只写 clamp(v, 0, 100)（红线在 ReaderView）。
+   * v-model:brightnessLevel。
+   */
+  brightnessLevel: number
   /** Auto-play state. v-model:autoPlay. */
   autoPlay: AutoPlayState
   /** Countdown progress of the current auto-play tick, 0–1. */
@@ -210,6 +248,11 @@ interface ImageReaderProps {
    * 不进服务器同步）。v-model:wakeLock。
    */
   wakeLock: boolean
+  /**
+   * A7: 屏幕方向锁定（ReaderSettings 面板三态选择，设备本地偏好，不进服务
+   * 器同步）。仅全屏时尝试 screen.orientation.lock；被拒静默降级。
+   */
+  orientationLock: OrientationLockPref
   /** AI-enhanced hot-swap URLs keyed by 0-based page. */
   enhancedUrls?: ReadonlyMap<number, string>
 }
@@ -219,9 +262,10 @@ interface ImageReaderEmits {
   (e: 'update:direction', direction: ReadingDirection): void
   (e: 'update:pageMode', mode: PageModePref): void
   (e: 'update:zoom', zoom: number): void
-  (e: 'update:brightness', brightness: number): void
+  (e: 'update:brightnessLevel', brightnessLevel: number): void
   (e: 'update:autoPlay', state: AutoPlayState): void
   (e: 'update:wakeLock', enabled: boolean): void
+  (e: 'update:orientationLock', lock: OrientationLockPref): void
   /** Semantic navigation — the parent maps to page indices (spread-aware). */
   (e: 'prev'): void
   (e: 'next'): void
@@ -270,10 +314,14 @@ const showIntervalTicks = computed(
 
 /**
  * Esc（键盘）与触屏边缘向内滑动（useEdgeBackGesture）共用的返回入口，
- * 语义对齐 Android 端「返回键退出阅读器」：设置面板开着先关面板，否则
- * 向上抛 back 由父级退出（history back 优先）。
+ * 语义对齐 Android 端「返回键退出阅读器」：跳页对话框/设置面板开着先关
+ * 面板，否则向上抛 back 由父级退出（history back 优先）。
  */
 function handleBack() {
+  if (jumpDialogVisible.value) {
+    closeJumpDialog()
+    return
+  }
   if (settingsVisible.value) {
     closeSettings()
     return
@@ -372,6 +420,60 @@ function closeSettings() {
   if (chromeVisible.value) statusBarEpoch.value += 1
 }
 
+/* ------------------------------------------------------------------ */
+/* A5 — 跳页对话框（ReaderSettings 菜单入口 + G 键）                     */
+/* ------------------------------------------------------------------ */
+
+const jumpDialogVisible = ref(false)
+
+/** 打开跳页：设置面板先收起、chrome 唤出（对话框与 chrome 同屏）。 */
+function openJumpDialog(): void {
+  if (props.totalPages <= 0) return // 未知页数（import .db）无跳页语义
+  settingsVisible.value = false
+  chromeVisible.value = true
+  jumpDialogVisible.value = true
+}
+
+function closeJumpDialog(): void {
+  jumpDialogVisible.value = false
+  // 与 closeSettings 同一 re-arm：对话框打开期间被搁置的 idle 倒计时重来。
+  if (chromeVisible.value) statusBarEpoch.value += 1
+}
+
+/**
+ * 对话框确定（1-based 页号，已由对话框钳入 [1, totalPages]）→ 与滑杆松手
+ * （SeekBarPanel `change` → onSeekCommit）完全同一 seek 通路；双页模式下
+ * 「跳到的页即铺摊主页」由既有的渲染换算自动保证。
+ */
+function onJumpCommit(page: number): void {
+  emit('update:currentPage', page - 1)
+  closeJumpDialog()
+}
+
+/**
+ * G 键快捷键。useKeyboardNav（ReaderView 侧，冻结文件）不认领单字母 G，
+ * 这里在阅读器侧自挂 window keydown；守卫与 useKeyboardNav 同一套（修饰键/
+ * IME/表单焦点放行），对话框输入框里打字不会被劫持。
+ */
+function onReaderKeyDown(event: KeyboardEvent): void {
+  if (event.ctrlKey || event.metaKey || event.altKey) return
+  if (event.isComposing) return
+  const target = event.target
+  if (
+    target instanceof HTMLElement &&
+    (target.isContentEditable ||
+      target.tagName === 'INPUT' ||
+      target.tagName === 'TEXTAREA' ||
+      target.tagName === 'SELECT')
+  ) {
+    return
+  }
+  if (event.key.length === 1 && event.key.toLowerCase() === 'g') {
+    event.preventDefault()
+    openJumpDialog()
+  }
+}
+
 /** Seek bar release — the page jump applies here (1-based contract). */
 function onSeekCommit(page: number) {
   emit('update:currentPage', page - 1)
@@ -394,13 +496,32 @@ function stopAutoPlay() {
 }
 
 /* ------------------------------------------------------------------ */
-/* Brightness mask (activity_gallery.xml `mask` ColorView)             */
+/* Brightness (A6) — 0–100 遮罩压暗 + 101–200 filter 提亮               */
 /* ------------------------------------------------------------------ */
 
-// Wave-2 T2 定案：brightness 为压暗等级 0–100（0 = 跟随系统），遮罩不透明度
-// = (1 - v/100) * 0.87——系数与 App 端遮罩 alpha 0xde/255 ≈ 0.87 三端统一。
+/**
+ * 一期语义原样保留（Wave-2 T2 定案）：≤100 为压暗等级（0 = 跟随系统），
+ * 遮罩不透明度 = (1 - v/100) * 0.87——系数与 App 端遮罩 alpha 0xde/255
+ * ≈ 0.87 三端统一。101–200 段不加遮罩（App 端该段 mMaskView.setColor(0)）。
+ */
+const dimmingLevel = computed(() => Math.min(props.brightnessLevel, 100))
+
 const maskOpacity = computed(() =>
-  props.brightness <= 0 ? 0 : (1 - props.brightness / 100) * 0.87,
+  dimmingLevel.value <= 0 ? 0 : (1 - dimmingLevel.value / 100) * 0.87,
+)
+
+/**
+ * 提亮段（101–200）：对页面内容容器加 CSS filter（200 → 2×），chrome 与
+ * 遮罩都不参与。定性说明：App 端同段是 lp.screenBrightness 真背光增强
+ * （设备本地，GalleryActivity.setScreenLightness 的 lightness 0–200），Web
+ * 无法直接驱动背光，以 filter 近似——因此跨端同步值恒写 clamp(v, 0, 100)
+ * （用户拉到 >100 时同步值停在 100，App 端把 100 解释为「无压暗」，正确），
+ * 从不把 >100 写进 synced store。红线落实在 ReaderView.writeSettings。
+ */
+const pagesFilterStyle = computed<{ filter: string } | undefined>(() =>
+  props.brightnessLevel > 100
+    ? { filter: `brightness(${1 + (props.brightnessLevel - 100) / 100})` }
+    : undefined,
 )
 
 /* ------------------------------------------------------------------ */
@@ -470,6 +591,9 @@ const isFullscreen = ref(false)
 
 function onFullscreenChange(): void {
   isFullscreen.value = document.fullscreenElement != null
+  // A7: 方向锁跟随全屏生命周期——进全屏（重新）上锁，退全屏解锁。
+  if (isFullscreen.value) void applyOrientationLock()
+  else releaseOrientationLock()
 }
 
 /** 进入阅读器流程中对阅读器根元素请求全屏（用户手势调用链内）。 */
@@ -503,6 +627,88 @@ watch(
   (enabled) => {
     if (enabled) void enterFullscreen()
     else exitReaderFullscreen()
+  },
+)
+
+/* ------------------------------------------------------------------ */
+/* A7 — 屏幕方向锁定（设备本地偏好；仅全屏尝试，被拒静默降级）           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * Web 无法像 Android 一样 setRequestedOrientation——`screen.orientation.lock`
+ * 只在全屏文档上受支持（iOS Safari / 非全屏环境直接 reject）。策略：
+ * - 锁定跟随 isFullscreen 生命周期：进全屏（重新）上锁，退全屏解锁；
+ * - 卸载兜底解锁（含请求仍在途、迟到兑现的情况）——方向锁绝不过期滞留
+ *   （「解锁泄漏」红线）；
+ * - lock 被拒：静默降级，偏好本身照常保留（仅本机不生效）。
+ * `OrientationLockPref`（none/portrait/landscape）定义在 ReaderSettings.vue
+ * （面板是偏好入口，ImageReader 经既有依赖引入，避免反向环）。
+ */
+type LockableOrientation = Exclude<OrientationLockPref, 'none'>
+
+/** 最小接口声明：lib.dom 的 ScreenOrientation.lock 类型随 TS 版本漂移，
+ *  统一收窄到本地最小面 + 运行时特性检测。 */
+interface LockableScreenOrientation {
+  lock(orientation: LockableOrientation): Promise<void>
+  unlock(): void
+}
+
+function lockableScreenOrientation(): LockableScreenOrientation | undefined {
+  if (typeof screen === 'undefined') return undefined
+  const orientation = (screen as { orientation?: Partial<LockableScreenOrientation> }).orientation
+  return orientation &&
+    typeof orientation.lock === 'function' &&
+    typeof orientation.unlock === 'function'
+    ? (orientation as LockableScreenOrientation)
+    : undefined
+}
+
+/** 当前已请求（含在途）的锁值；null = 无锁。 */
+let activeOrientationLock: LockableOrientation | null = null
+/** 卸载后仍在途的 lock 迟到兑现时要立刻反向 unlock（防幽灵锁）。 */
+let orientationDisposed = false
+
+async function applyOrientationLock(): Promise<void> {
+  const orientation = lockableScreenOrientation()
+  const want = props.orientationLock
+  if (!orientation || want === 'none' || !isFullscreen.value) return
+  if (activeOrientationLock === want) return
+  activeOrientationLock = want
+  try {
+    await orientation.lock(want)
+    // 在途期间被切换/退全屏/卸载：迟到的兑现立即反解锁，不留幽灵锁。
+    if (orientationDisposed || activeOrientationLock !== want) {
+      activeOrientationLock = null
+      try {
+        orientation.unlock()
+      } catch {
+        // 幂等清理。
+      }
+    }
+  } catch {
+    // 被拒（iOS Safari / 非全屏 / 不支持）——静默降级，仅记偏好。
+    if (activeOrientationLock === want) activeOrientationLock = null
+  }
+}
+
+function releaseOrientationLock(): void {
+  const orientation = lockableScreenOrientation()
+  const held = activeOrientationLock
+  activeOrientationLock = null
+  if (held === null || !orientation) return
+  try {
+    orientation.unlock()
+  } catch {
+    // 无锁可解（浏览器已随退出全屏复位）——幂等清理。
+  }
+}
+
+// 面板里切三态：none → 解锁；portrait/landscape → 全屏中即时换锁。
+watch(
+  () => props.orientationLock,
+  (value) => {
+    if (value !== 'none' && isFullscreen.value) void applyOrientationLock()
+    else releaseOrientationLock()
   },
 )
 
@@ -552,9 +758,10 @@ watch(
 )
 
 onMounted(() => {
-  // T1b/T1c：文档级监听与根元素无关，先于 rootRef 早退守卫挂上。
+  // T1b/T1c/A5：文档/窗口级监听与根元素无关，先于 rootRef 早退守卫挂上。
   document.addEventListener('visibilitychange', onReaderVisibilityChange)
   document.addEventListener('fullscreenchange', onFullscreenChange)
+  window.addEventListener('keydown', onReaderKeyDown)
   // 进入时若已在全屏（浏览器级恢复/用户手动），先同步一次状态。
   isFullscreen.value = document.fullscreenElement != null
   const el = rootRef.value
@@ -576,6 +783,11 @@ onMounted(() => {
 onBeforeUnmount(() => {
   document.removeEventListener('visibilitychange', onReaderVisibilityChange)
   document.removeEventListener('fullscreenchange', onFullscreenChange)
+  window.removeEventListener('keydown', onReaderKeyDown)
+  // A7 红线：先置卸载旗标（在途 lock 迟到兑现时立刻反解锁），再主动解锁
+  // ——方向锁绝不允许越过阅读器会话泄漏到后续页面。
+  orientationDisposed = true
+  releaseOrientationLock()
   // 退出阅读器路由 → 还原全屏（只还原自己进入的）。
   exitReaderFullscreen()
   void releaseWakeLock()
@@ -593,7 +805,7 @@ watch(
   },
 )
 
-defineExpose({ toggleChrome, handleBack, isFullscreen })
+defineExpose({ toggleChrome, handleBack, isFullscreen, openJumpDialog })
 </script>
 
 <style scoped>
@@ -615,6 +827,18 @@ defineExpose({ toggleChrome, handleBack, isFullscreen })
   right: 0;
   z-index: 20;
   pointer-events: none;
+}
+
+/*
+ * A6: 页面内容容器——提亮段（101–200）CSS filter 的载体。恒为 absolute
+ * inset 0：filter 会让元素成为 absolute 后代的包含块，容器自身先定位好，
+ * 几何（相对 .image-reader 铺满）在 filter 有/无两种状态下完全一致；
+ * chrome（状态栏/工具栏/滑杆）留在容器外，不被提亮。
+ */
+.image-reader__pages {
+  position: absolute;
+  inset: 0;
+  transition: filter var(--duration-scene-opacity) var(--ease-decelerate-quart);
 }
 
 /* Bottom SeekBarPanel slides away with the chrome. Padded so the slider

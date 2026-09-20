@@ -6,9 +6,11 @@ import com.hippo.anotherviewer.client.exception.SiteException
 import com.hippo.anotherviewer.web.config.SiteCoreConfigProperties
 import com.hippo.anotherviewer.web.dto.JobSubmitResponse
 import com.hippo.anotherviewer.web.dto.JobType
+import com.hippo.anotherviewer.web.util.HttpCacheSupport
 import com.hippo.anotherviewer.web.util.ResponseTooLargeException
 import com.hippo.anotherviewer.web.util.ThumbnailScaler
 import com.hippo.anotherviewer.web.util.bytesBounded
+import com.hippo.anotherviewer.web.repository.PageFileHashRepository
 import com.hippo.anotherviewer.web.service.DownloadDirIndex
 import com.hippo.anotherviewer.web.service.DownloadService
 import com.hippo.anotherviewer.web.service.EhAvailabilityService
@@ -20,11 +22,14 @@ import com.hippo.anotherviewer.web.service.GalleryLookupService
 import com.hippo.anotherviewer.web.service.ImageCacheService
 import com.hippo.anotherviewer.web.service.PrefetchService
 import com.hippo.anotherviewer.web.service.storage.PoolReadGate
+import com.hippo.anotherviewer.web.service.storage.PoolReadPermit
 import com.hippo.anotherviewer.web.service.storage.StorageTuning
 import com.hippo.network.StatusCodeException
 import okhttp3.HttpUrl
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import org.slf4j.LoggerFactory
+import org.springframework.core.io.FileSystemResource
+import org.springframework.core.io.Resource
 import org.springframework.http.HttpHeaders
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -32,6 +37,10 @@ import org.springframework.http.ResponseEntity
 import org.springframework.web.bind.annotation.*
 import org.springframework.web.servlet.mvc.method.annotation.StreamingResponseBody
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileNotFoundException
+import java.io.FilterInputStream
+import java.io.InputStream
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
@@ -40,6 +49,7 @@ import java.util.concurrent.RejectedExecutionHandler
 import java.util.concurrent.Semaphore
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Image delivery endpoints.
@@ -60,6 +70,18 @@ import java.util.concurrent.TimeUnit
  * HDD 3 / ZFS 8|16 且同目录页序放行）；缓存命中 / `w=` 缩放命中 / 在途合并路径
  * 只碰 SSD 侧缓存层，不过闸。成功 serve 池页后按 `pageTurnPrefetchEnabled`
  * （SSD 关、HDD/ZFS 开）后台预热同画廊下一页池文件进页缓存（不递归 N+2）。
+ *
+ * P-S2（二期 Wave 1）：池页 serve 流式化 + HTTP 条件请求。
+ * - 池页 serve 体改为区间流 Resource（转换器在响应写出窗口从流上定位拷贝，
+ *   任何时刻不整文件进堆；对外字节与头格式与旧 readBytes 实现逐字节一致）；
+ *   池读闸门票由响应体的流 close() 归还（[CountedResource]），持票窗口
+ *   与物理读窗口仍重合（W3-P「读全过程持票」不变）。
+ * - 池页 serve 带 ETag：有完整性基线 → 强 `"sha256:<hash>"`，无基线 → 弱
+ *   `W/"<size>-<mtime>"`；`If-None-Match` 命中 → 304 空体（在池读闸门**之前**
+ *   判定：不读盘、不过闸、不产生预读副作用）。基线刷新（heal 换 hash）后旧
+ *   ETag 自然失效——这正是强 ETag 的意义。见 [HttpCacheSupport] 键策略。
+ * - `/proxy` 补 `Cache-Control: public, max-age=86400` + 缓存键派生弱 ETag
+ *   + 缓存命中路径上的 304 分支（不触发上游请求）。
  */
 @RestController
 @RequestMapping("/api/v1/image")
@@ -75,6 +97,9 @@ class ImageProxyController(
     private val jobService: JobService,
     private val availability: EhAvailabilityService,
     private val downloadDirIndex: DownloadDirIndex,
+    // P-S2：页文件完整性基线（强 ETag 来源）。只读（findByGidAndPage），
+    // 页号口径见 [poolPageEtag]——API 0-based == 基线表 0-based，直查无需换算。
+    private val pageFileHashRepository: PageFileHashRepository,
     // W3-P：存储形态自适应参数（翻页预读开关）与存储池读并发闸门——
     // 上限/开关跟随 StorageTuning.current() 快照，profile 重探后由 gate 惰性重建。
     private val storageTuning: StorageTuning,
@@ -85,6 +110,8 @@ class ImageProxyController(
     companion object {
         private const val MAX_CONCURRENT_PAGE_FETCHES = 4
         private const val CACHE_MAX_AGE = "max-age=86400"
+        /** P-S2: /proxy 公共缓存头（含 public——缩略图按 url+w 派生稳定，可共享缓存）。 */
+        private const val PROXY_CACHE_CONTROL = "public, max-age=86400"
         /** P3: /proxy 全局并发 curl 上限（25 卡首开 → 6 并发批次排队）。 */
         private const val MAX_CONCURRENT_PROXY_FETCHES = 6
         /** P4: 缩略图 per-request curl --max-time（秒）；上游挂着时快速失败，不占满默认 60s。 */
@@ -149,14 +176,24 @@ class ImageProxyController(
         // 与阅读端点不同，/proxy 的契约要求非法值（非数字/≤0/超大）一律回退
         // 原尺寸，绝不能因参数绑定失败 4xx；Int? 绑定会把非数字直接打成 400。
         @RequestParam(required = false) w: String?,
+        // P-S2: 条件请求头。304 只在缓存命中路径上判定（不触发任何上游请求）；
+        // fetch-on-miss 必须先取回字节（响应仍带 ETag/Cache-Control 供后续再验证）。
+        @RequestHeader(name = HttpHeaders.IF_NONE_MATCH, required = false) ifNoneMatch: String?,
     ): ResponseEntity<*> {
         // 解析失败 → null → 全程走原尺寸路径（与不带 w 的既有行为逐字节一致）。
         val thumbWidth = ThumbnailScaler.parseThumbnailWidth(w)
 
         // 缩放结果缓存命中（w 并入缓存键，不同宽度互不污染，原尺寸条目不动）。
         if (thumbWidth != null) {
-            imageCacheService.getCachedImage(ThumbnailScaler.thumbnailCacheKey(url, thumbWidth))?.let { scaled ->
+            val scaledKey = ThumbnailScaler.thumbnailCacheKey(url, thumbWidth)
+            imageCacheService.getCachedImage(scaledKey)?.let { scaled ->
+                // P-S2: 缩放缓存命中路径的 304 判定（各 w= 变体各自 ETag）。
+                val etag = HttpCacheSupport.weakEtagForKey(scaledKey)
+                if (HttpCacheSupport.ifNoneMatchMatches(ifNoneMatch, etag)) {
+                    return HttpCacheSupport.notModified(etag, PROXY_CACHE_CONTROL)
+                }
                 return ResponseEntity.ok()
+                    .proxyCacheHeaders(etag)
                     .header(HttpHeaders.CONTENT_TYPE, ThumbnailScaler.sniffMime(scaled) ?: MediaType.IMAGE_JPEG_VALUE)
                     .body(scaled)
             }
@@ -165,11 +202,17 @@ class ImageProxyController(
         val cached = imageCacheService.getCachedImage(url)
         if (cached != null) {
             if (thumbWidth == null) {
+                // P-S2: 原尺寸缓存命中路径的 304 判定（ETag = sha256(url) 派生）。
+                val etag = HttpCacheSupport.proxyEtag(url)
+                if (HttpCacheSupport.ifNoneMatchMatches(ifNoneMatch, etag)) {
+                    return HttpCacheSupport.notModified(etag, PROXY_CACHE_CONTROL)
+                }
                 return ResponseEntity.ok()
+                    .proxyCacheHeaders(etag)
                     .header(HttpHeaders.CONTENT_TYPE, MediaType.IMAGE_JPEG_VALUE)
                     .body(cached)
             }
-            return serveScaledOrOriginal(cached, MediaType.IMAGE_JPEG_VALUE, url, thumbWidth)
+            return serveScaledOrOriginal(cached, MediaType.IMAGE_JPEG_VALUE, url, thumbWidth, ifNoneMatch)
         }
 
         // W3 R4-13 fetch-on-miss (acceptance addition for the Tier-2 thumbnail
@@ -197,7 +240,7 @@ class ImageProxyController(
         val existing = proxyFetchers[url]
         if (existing != null) {
             return try {
-                maybeScaleJoined(existing.join(), url, thumbWidth)
+                maybeScaleJoined(existing.join(), url, thumbWidth, ifNoneMatch)
             } catch (e: Exception) {
                 logger.warn("In-flight image proxy fetch failed for url={}", url, e)
                 proxyUnavailableEnvelope()
@@ -217,14 +260,14 @@ class ImageProxyController(
         if (raced != null) {
             proxyFetchSemaphore.release()
             return try {
-                maybeScaleJoined(raced.join(), url, thumbWidth)
+                maybeScaleJoined(raced.join(), url, thumbWidth, ifNoneMatch)
             } catch (e: Exception) {
                 logger.warn("In-flight image proxy fetch failed for url={}", url, e)
                 proxyUnavailableEnvelope()
             }
         }
         try {
-            return maybeScaleJoined(future.join(), url, thumbWidth)
+            return maybeScaleJoined(future.join(), url, thumbWidth, ifNoneMatch)
         } catch (e: Exception) {
             logger.warn("Image proxy fetch failed for url={}", url, e)
             return proxyUnavailableEnvelope()
@@ -245,29 +288,62 @@ class ImageProxyController(
      * 绝不 4xx（缩略图是体验优化）。非 2xx envelope（404/502…）也不缩放，
      * 错误按原样透传（E2E-6 原则：不拿假内容盖错误）。
      */
-    private fun maybeScaleJoined(joined: ResponseEntity<*>, url: String, width: Int?): ResponseEntity<*> {
+    private fun maybeScaleJoined(
+        joined: ResponseEntity<*>,
+        url: String,
+        width: Int?,
+        ifNoneMatch: String?,
+    ): ResponseEntity<*> {
         if (width == null) return joined
         val body = joined.body
         if (!joined.statusCode.is2xxSuccessful || body !is ByteArray) return joined
         val mime = joined.headers.contentType?.toString() ?: MediaType.IMAGE_JPEG_VALUE
-        return serveScaledOrOriginal(body, mime, url, width)
+        return serveScaledOrOriginal(body, mime, url, width, ifNoneMatch)
     }
 
     /**
      * V4 W1: 缩放 [source] 并把产物写入 `w` 派生缓存键（原尺寸条目保持不动）。
      * 缩放不可能时（非 JPEG/PNG、动图 GIF、只放不缩、解码失败）原样返回，
      * 且不写缩放缓存——后续同 w 请求再试一次，代价只是缓存字节的一次重解码。
+     *
+     * P-S2: 成功响应补 `Cache-Control` + ETag——缩放成功用 `thumb:` 变体键派生
+     * （各变体各自 ETag），回退原尺寸字节则用原尺寸键派生（响应字节即原字节）。
+     * [ifNoneMatch] 命中对应变体 → 304 空体：此时仍是缓存命中路径的延伸
+     * （字节已在手上，不触发上游；缩放产物照常入缓存，预热不变）。
      */
-    private fun serveScaledOrOriginal(source: ByteArray, sourceMime: String, url: String, width: Int): ResponseEntity<*> {
+    private fun serveScaledOrOriginal(
+        source: ByteArray,
+        sourceMime: String,
+        url: String,
+        width: Int,
+        ifNoneMatch: String?,
+    ): ResponseEntity<*> {
         val scaled = ThumbnailScaler.scaleToWidth(source, width)
-            ?: return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_TYPE, sourceMime)
-                .body(source)
+            ?: run {
+                val etag = HttpCacheSupport.proxyEtag(url)
+                if (HttpCacheSupport.ifNoneMatchMatches(ifNoneMatch, etag)) {
+                    return HttpCacheSupport.notModified(etag, PROXY_CACHE_CONTROL)
+                }
+                return ResponseEntity.ok()
+                    .proxyCacheHeaders(etag)
+                    .header(HttpHeaders.CONTENT_TYPE, sourceMime)
+                    .body(source)
+            }
         imageCacheService.cacheImage(ThumbnailScaler.thumbnailCacheKey(url, width), scaled.bytes)
+        val etag = HttpCacheSupport.weakEtagForKey(ThumbnailScaler.thumbnailCacheKey(url, width))
+        if (HttpCacheSupport.ifNoneMatchMatches(ifNoneMatch, etag)) {
+            return HttpCacheSupport.notModified(etag, PROXY_CACHE_CONTROL)
+        }
         return ResponseEntity.ok()
+            .proxyCacheHeaders(etag)
             .header(HttpHeaders.CONTENT_TYPE, scaled.mimeType)
             .body(scaled.bytes)
     }
+
+    /** P-S2: /proxy 成功响应的公共缓存头（`public, max-age=86400` + 弱 ETag）。 */
+    private fun ResponseEntity.BodyBuilder.proxyCacheHeaders(etag: String): ResponseEntity.BodyBuilder =
+        this.header(HttpHeaders.CACHE_CONTROL, PROXY_CACHE_CONTROL)
+            .header(HttpHeaders.ETAG, etag)
 
     /**
      * P3: /proxy 的单次上游抓取（自原 proxyImage miss 路径抽出，语义不变）。
@@ -304,7 +380,10 @@ class ImageProxyController(
                 return errorEnvelope(HttpStatus.NOT_FOUND, "NOT_FOUND", "site returned an empty image body")
             }
             imageCacheService.cacheImage(url, bytes)
+            // P-S2: fetch-on-miss 也带缓存头（后续请求可再验证；304 不在本路径
+            // 判定——本路径已经发起过上游请求，再回 304 只省字节不省请求）。
             return ResponseEntity.ok()
+                .proxyCacheHeaders(HttpCacheSupport.proxyEtag(url))
                 .header(HttpHeaders.CONTENT_TYPE, contentType)
                 .body(bytes)
         }
@@ -339,7 +418,10 @@ class ImageProxyController(
         @PathVariable page: Int,
         @RequestParam(required = false) w: Int?,
         @RequestParam(name = "enhanced", required = false, defaultValue = "false") enhanced: Boolean,
-        @RequestHeader(name = HttpHeaders.RANGE, required = false) range: String?
+        @RequestHeader(name = HttpHeaders.RANGE, required = false) range: String?,
+        // P-S2: 条件请求头（RFC 7232，弱比较）。仅在池页 serve 路径上判定，
+        // 且优先于 Range（304 优先）；其余 serve 路径暂不发布 ETag。
+        @RequestHeader(name = HttpHeaders.IF_NONE_MATCH, required = false) ifNoneMatch: String?,
     ): ResponseEntity<*> {
         // Page numbers are 0-based per contract; reject negatives explicitly.
         if (page < 0) return notFound(galleryId, page)
@@ -372,10 +454,31 @@ class ImageProxyController(
             // 需求 1（2026-08-30）：阅读命中存储池文件 → 若磁盘校验通过即置
             // 「已完成」——导入时所有行视为未下载完成，阅读匹配后升级。
             downloadService.completeIfVerified(galleryId)
+
+            // P-S2 ETag/304：命中判定在池读闸门**之前**——命中即 304 空体，
+            // 不读池文件、不占闸门票、不触发翻页预读（304 是 3xx，后面的
+            // is2xxSuccessful 预读分支天然不进）。强 ETag 只查基线表（DB 读，
+            // 非盘读）；无基线才碰文件元数据（length/mtime，非内容读）。
+            // If-None-Match 优先于 Range（RFC 7232 §6：条件评估先于范围处理）。
+            val etag = poolPageEtag(galleryId, page, pushedFile)
+            if (HttpCacheSupport.ifNoneMatchMatches(ifNoneMatch, etag)) {
+                return HttpCacheSupport.notModified(etag, CACHE_MAX_AGE)
+            }
+
             // W3-P 存储池读闸门：池文件「读全过程」持票（HDD/ZFS 限并发 + 同目录
             // 页序放行；gate 内 5s 排队超时强制放行，响应线程绝不无限等待）。
             // 上面的缓存/enhanced 命中路径只碰 SSD 侧缓存层，不过闸。
-            val response = poolReadGate.acquire(poolGateDirectory(galleryId), page).use { serveFile(pushedFile, range) }
+            // P-S2 流式 serve 后，物理读发生在响应写出窗口（消息转换器内）——
+            // 票不在此处 close，而是移交响应体的流 close() 归还
+            // （见 [serveFile] / [CountedResource]），持票窗口与物理读窗口仍
+            // 重合；serveFile 错误早退路径自行归还。
+            val permit = poolReadGate.acquire(poolGateDirectory(galleryId), page)
+            val response = try {
+                serveFile(pushedFile, range, permit, etag)
+            } catch (e: Throwable) {
+                permit.close()
+                throw e
+            }
             if (response.statusCode.is2xxSuccessful) {
                 // 翻页预读 N+1：成功 serve 池页后，后台把同画廊下一页池文件
                 // 预热进缓存（SSD 关、HDD/ZFS 开；fire-and-forget）。
@@ -626,28 +729,180 @@ class ImageProxyController(
         }
     }
 
-    private fun serveFile(file: File, range: String?): ResponseEntity<*> {
+    /**
+     * P-S2: 池页响应的 ETag（键策略与容错见 [HttpCacheSupport]）。
+     *
+     * **页号口径（换算说明）**：对外阅读端点 `/api/v1/image/{gid}/{page}` 的
+     * page 是 **0-based**（contracts/openapi.yaml streamGalleryImage）；
+     * page_file_hash 基线表的 page 同为 **0-based**（与 download_info /
+     * processing_task 同口径，见 PageFileHashEntity）——因此这里用 API 页号
+     * **直查基线表，无需换算**；磁盘池文件名的 1-based（`0001.jpg`）换算只
+     * 发生在 [DownloadDirIndex.findPage]。
+     *
+     * 有基线 → 强 ETag `"sha256:<hash>"`（algo 字段推导，现役恒 sha256）；
+     * 无基线 → 弱 `W/"<size>-<mtime>"`（文件元数据，非内容读）。
+     *
+     * **基线刷新后旧 ETag 自然失效**：heal/reverify 换 hash ⇒ ETag 变化 ⇒
+     * 客户端旧 If-None-Match 不再命中、拿到修复后的新字节。这是选强 ETag 的
+     * 根本原因（弱 size-mtime ETag 在内容被替换而 mtime 碰巧不变时会误命中；
+     * 反向风险——文件被改而基线未刷——由完整性巡检发现并刷新）。
+     */
+    private fun poolPageEtag(galleryId: Long, page: Int, file: File): String {
+        val baseline = pageFileHashRepository.findByGidAndPage(galleryId, page)
+        return if (baseline != null) {
+            HttpCacheSupport.strongEtag(algo = baseline.algo, hash = baseline.hash)
+        } else {
+            HttpCacheSupport.weakEtag(file.length(), file.lastModified())
+        }
+    }
+
+    /**
+     * P-S2 流式 serve 一个本地文件：体为 [CountedResource]（Resource 契约的
+     * 区间流实现）——由 Spring 的 ResourceHttpMessageConverter 在**响应写出
+     * 窗口**打开输入流（定位到区间起点、恰好读出区间长度即 EOF）、拷贝、
+     * finally close——任何时刻都不整文件进堆，1 字节 Range 只从流上读 1 字节。
+     *
+     * 为何不用 `ResourceRegion`：转换器选择走**声明泛型**（canWrite(type)），
+     * 本端点返回 `ResponseEntity<*>`（体类型混合：字节/Resource/JSON envelope），
+     * 声明处是通配符 → ResourceRegionHttpMessageConverter 永远不被选中（生产
+     * 同样会 500）。区间流 Resource 则由按**值类型**选中的 ResourceHttpMessage
+     * Converter 写出（完整 200 用例同通道），且 206/Content-Range 等头完全由
+     * 本方法掌控——对外字节语义与头格式与旧 readBytes 实现逐字节一致（416 只
+     * 带不可满足区间的 Content-Range 头；206 带 Content-Type/Content-Range/
+     * Accept-Ranges/Cache-Control/Content-Length；200 隐式 Content-Length 由
+     * 转换器按区间长度补齐）。MIME 维持扩展名映射（未知回退 image/jpeg）——
+     * 不新增内容嗅探，避免改变既有 Content-Type 输出。
+     *
+     * [permit]（池读闸门票，可空）：非空时票的**所有权移交响应体**——转换器
+     * finally 关闭输入流时归还闸门票（[CountedResource]，经幂等 AtomicBoolean
+     * 恰好归还一次），保证 W3-P「读全过程持票」在流式 serve 下仍成立（持票
+     * 窗口 = 响应写出窗口 = 物理读窗口）。[serveFile] 自身的错误早退路径
+     * （416/404 envelope）在此处自行归还票。残余风险：票移交后若在转换器打开
+     * 流之前出现异常（响应头写出失败等极窄窗口）票会滞留到 profile 重建（gate
+     * 换核）自然排空——不影响正确性，只临时少一个并发名额。
+     *
+     * [etag] 非空时附到 200/206 响应（304 由调用方在进本方法前返回）。
+     */
+    private fun serveFile(file: File, range: String?, permit: PoolReadPermit? = null, etag: String? = null): ResponseEntity<*> {
         return try {
+            if (!file.isFile) throw FileNotFoundException(file.absolutePath)
             val mime = IMAGE_MIME_BY_EXT[file.extension.lowercase()] ?: MediaType.IMAGE_JPEG_VALUE
-            serveBytes(file.readBytes(), mime, range)
+            val size = file.length()
+            MetricsController.imagesServed.incrementAndGet()
+            if (range != null) {
+                val parsed = parseRange(range, size)
+                if (parsed == null) {
+                    permit?.close()
+                    return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
+                        .header(HttpHeaders.CONTENT_RANGE, "bytes */$size")
+                        .build<Any>()
+                }
+                val (start, end) = parsed
+                val length = end - start + 1
+                return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
+                    .header(HttpHeaders.CONTENT_TYPE, mime)
+                    .header(HttpHeaders.CONTENT_RANGE, "bytes $start-$end/$size")
+                    .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                    .header(HttpHeaders.CACHE_CONTROL, CACHE_MAX_AGE)
+                    .etagHeader(etag)
+                    .header(HttpHeaders.CONTENT_LENGTH, length.toString())
+                    .body(CountedResource(file, start, length, permit))
+            }
+            ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_TYPE, mime)
+                .header(HttpHeaders.ACCEPT_RANGES, "bytes")
+                .header(HttpHeaders.CACHE_CONTROL, CACHE_MAX_AGE)
+                .etagHeader(etag)
+                .body(CountedResource(file, 0L, size, permit))
         } catch (e: Exception) {
+            permit?.close()
             logger.warn("Failed to read cached image {}", file, e)
             errorEnvelope(HttpStatus.NOT_FOUND, "NOT_FOUND", "Image not found")
+        }
+    }
+
+    private fun ResponseEntity.BodyBuilder.etagHeader(etag: String?): ResponseEntity.BodyBuilder =
+        if (etag != null) header(HttpHeaders.ETAG, etag) else this
+
+    /**
+     * P-S2: 区间流响应体（Resource 契约委托实现）。getInputStream 定位到
+     * [start]、读出恰好 [length] 字节即 EOF；close 时幂等归还池读闸门票
+     * （[permit] 可空 = 不涉及池读的缓存/enhanced 路径）。
+     */
+    private class CountedResource(
+        file: File,
+        private val start: Long,
+        private val length: Long,
+        private val permit: PoolReadPermit?,
+    ) : Resource by FileSystemResource(file) {
+        private val released = AtomicBoolean(false)
+
+        /** 覆写为**响应体**长度（区间长度），供转换器的默认头逻辑使用。 */
+        override fun contentLength(): Long = length
+
+        override fun getInputStream(): InputStream {
+            val raw = FileInputStream(file)
+            var toSkip = start
+            while (toSkip > 0) {
+                val skipped = raw.skip(toSkip)
+                if (skipped > 0) {
+                    toSkip -= skipped
+                } else if (raw.read() < 0) {
+                    break // 文件比预期短（并发截断）：直接流式 EOF，不再读
+                } else {
+                    toSkip -= 1
+                }
+            }
+            return BoundedReleasingStream(raw, length, permit, released)
+        }
+    }
+
+    /** 恰好读 [remaining] 字节即 EOF 的有界流；close 时幂等归还闸门票。 */
+    private class BoundedReleasingStream(
+        private val source: InputStream,
+        initialRemaining: Long,
+        private val permit: PoolReadPermit?,
+        private val released: AtomicBoolean,
+    ) : FilterInputStream(source) {
+        private var remaining = initialRemaining
+
+        override fun read(): Int {
+            if (remaining <= 0) return -1
+            val value = super.read()
+            if (value >= 0) remaining--
+            return value
+        }
+
+        override fun read(b: ByteArray, off: Int, len: Int): Int {
+            if (remaining <= 0) return -1
+            val n = super.read(b, off, minOf(len.toLong(), remaining).toInt())
+            if (n > 0) remaining -= n
+            return n
+        }
+
+        override fun close() {
+            try {
+                source.close()
+            } finally {
+                if (released.compareAndSet(false, true)) permit?.close()
+            }
         }
     }
 
     private fun serveBytes(data: ByteArray, contentType: String, range: String?): ResponseEntity<*> {
         MetricsController.imagesServed.incrementAndGet()
         if (range != null) {
-            val parsed = parseRange(range, data.size)
+            // P-S2: parseRange 统一 Long 化（与 serveFile 的文件长度口径共用）；
+            // 字节数组路径 start/end 恒 ≤ size-1 ≤ Int.MAX，回 Int 安全。
+            val parsed = parseRange(range, data.size.toLong())
             if (parsed == null) {
                 return ResponseEntity.status(HttpStatus.REQUESTED_RANGE_NOT_SATISFIABLE)
                     .header(HttpHeaders.CONTENT_RANGE, "bytes */${data.size}")
                     .build<Any>()
             }
             val (start, end) = parsed
-            val length = end - start + 1
-            val body = if (start == 0 && end == data.size - 1) data else data.copyOfRange(start, end + 1)
+            val length = (end - start + 1).toInt()
+            val body = if (start == 0L && end == data.size - 1L) data else data.copyOfRange(start.toInt(), end.toInt() + 1)
             return ResponseEntity.status(HttpStatus.PARTIAL_CONTENT)
                 .header(HttpHeaders.CONTENT_TYPE, contentType)
                 .header(HttpHeaders.CONTENT_RANGE, "bytes $start-$end/${data.size}")
@@ -665,9 +920,10 @@ class ImageProxyController(
 
     /**
      * Parse a single `bytes=start-end` (or `bytes=start-` / `bytes=-suffix`)
-     * range. Returns null when malformed or unsatisfiable.
+     * range. Returns null when malformed or unsatisfiable. [size] is Long so
+     * the same parser serves both in-memory byte arrays and streamed files.
      */
-    private fun parseRange(header: String, size: Int): Pair<Int, Int>? {
+    private fun parseRange(header: String, size: Long): Pair<Long, Long>? {
         if (size <= 0) return null
         if (!header.startsWith("bytes=")) return null
         val spec = header.substring(6).trim().split(",").firstOrNull() ?: return null
@@ -675,18 +931,18 @@ class ImageProxyController(
         if (dash < 0) return null
         val startStr = spec.substring(0, dash).trim()
         val endStr = spec.substring(dash + 1).trim()
-        val start: Int
-        val end: Int
+        val start: Long
+        val end: Long
         if (startStr.isEmpty()) {
             // Suffix range: last N bytes.
-            val suffix = endStr.toIntOrNull() ?: return null
+            val suffix = endStr.toLongOrNull() ?: return null
             if (suffix <= 0) return null
             start = (size - suffix).coerceAtLeast(0)
             end = size - 1
         } else {
-            start = startStr.toIntOrNull() ?: return null
+            start = startStr.toLongOrNull() ?: return null
             if (start >= size) return null
-            end = if (endStr.isEmpty()) size - 1 else (endStr.toIntOrNull() ?: return null).coerceAtMost(size - 1)
+            end = if (endStr.isEmpty()) size - 1 else (endStr.toLongOrNull() ?: return null).coerceAtMost(size - 1)
         }
         if (start > end) return null
         return start to end

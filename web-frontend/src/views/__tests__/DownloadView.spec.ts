@@ -137,6 +137,35 @@ function stubResizeObserver(): void {
   vi.stubGlobal('ResizeObserver', FakeResizeObserver)
 }
 
+/**
+ * P-F2 ② fake 帧时钟：进度消息经 requestAnimationFrame 合帧后落地，测试用
+ * 手动队列替代真 rAF（不依赖 happy-dom 的帧调度时机）。`runFrames` 模拟
+ * 浏览器渲染一帧（清空并执行排队的回调）。
+ */
+let frameCallbacks: Map<number, FrameRequestCallback>
+let frameSeq: number
+
+function stubFrameClock(): void {
+  frameCallbacks = new Map()
+  frameSeq = 0
+  vi.stubGlobal(
+    'requestAnimationFrame',
+    vi.fn((cb: FrameRequestCallback) => {
+      frameSeq += 1
+      frameCallbacks.set(frameSeq, cb)
+      return frameSeq
+    }),
+  )
+  vi.stubGlobal('cancelAnimationFrame', vi.fn((id: number) => frameCallbacks.delete(id)))
+}
+
+/** 执行并清空当前排队的帧回调（≡ 一次渲染帧）。 */
+function runFrames(): void {
+  const pending = Array.from(frameCallbacks.values())
+  frameCallbacks.clear()
+  for (const cb of pending) cb(performance.now())
+}
+
 /** Download row fixture; `overrides` patches individual fields. */
 function makeDownload(id: number, overrides: Partial<DownloadItem> = {}): DownloadItem {
   return {
@@ -176,6 +205,7 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     ws.subscribeAll.mockClear()
     ws.connected.value = false
     stubResizeObserver()
+    stubFrameClock()
   })
 
   afterEach(() => {
@@ -250,6 +280,8 @@ describe('DownloadView (虚拟滚动 + 分页加载, plan-2026-08-06 A5/A7 + 202
     }) => void
     // Row 1 (gid 9001) is inside the virtual window at the top.
     handleProgress({ gid: 9001, state: 2, downloaded: 5, total: 10, speed: 0, label: 0 })
+    // P-F2 ②: 进度消息写入 rAF 待应用缓冲——驱动一帧后落地。
+    runFrames()
     await nextTick()
 
     expect(wrapper.text()).toContain('5/10 pages')

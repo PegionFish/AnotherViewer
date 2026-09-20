@@ -192,9 +192,10 @@
            viewport (+ overscan) are mounted; the ul keeps the full total
            height so the scrollbar and FastScroller geometry stay intact
            (tanstack virtualizer window mode). W3-C1（A4 先行卡）：行骨架切到
-           共享 AppListRow（缩略图→详情 / 主体→阅读 点击分区 + 多选勾选），
-           下载特有字段（percent/速率/进度条/状态/操作钮）经 slot 注入；
-           `download-item` 修饰类随行下发供下方 scoped 样式着色（S4 状态色）。 -->
+           共享 AppListRow；P-F2 ③：行内容整体抽到 DownloadProgressRow——
+           本视图只保留虚拟化 `<li>`（定位/入场动画），行字段（done/state/
+           速率）变化只重渲染该行，不重绘虚拟窗口其余行。key 沿用虚拟化
+           的 getItemKey（条目 id）。 -->
       <ul
         ref="listHostRef"
         class="download-list"
@@ -209,137 +210,20 @@
             animationDelay: `${Math.min(row.index * 24, 240)}ms`,
           }"
         >
-          <AppListRow
-            :id="row.item.id"
-            :gid="row.item.gid"
-            :title="displayTitle(row.item)"
-            :subtitle="displaySubtitle(row.item)"
-            :thumb="row.item.thumb"
-            :thumb-width="240"
-            :aria-label="`${displayTitle(row.item)} — ${stateLabelOf(row.item)}`"
-            :selectable="selectMode"
+          <DownloadProgressRow
+            :item="row.item"
+            :speeds="liveSpeeds"
+            :select-mode="selectMode"
             :selected="selectedIds.has(row.item.id)"
-            :class="['download-item', `download-item--${stateKeyOf(row.item)}`]"
             @open="onItemOpen"
             @read="onItemRead"
             @menu="onItemMenu"
             @select="onItemSelect"
-          >
-            <template #meta>
-              <CategoryChip v-if="row.chip" :category="row.chip" />
-              <!-- W1b 偏好接线（SearchView 同一门控）：上传者（showUploader，
-                   打码开启一律不渲染——敏感字段）+ 画廊页数（showGalleryPages，
-                   服务器下发 >0 才显示）。 -->
-              <span v-if="showUploader(row.item)" class="download-item__uploader">
-                {{ row.item.uploader }}
-              </span>
-              <span v-if="showGalleryPages(row.item)" class="download-item__gallery-pages">
-                {{ row.item.pages }}P
-              </span>
-              <span v-if="row.item.total > 0" class="download-item__pages">
-                {{ row.item.done }}/{{ row.item.total }} pages
-              </span>
-              <!-- W5/W7: 阅读进度角标（下载行），与 GalleryCard 的显示语义一致。 -->
-              <span
-                v-if="showReadProgressBadge(row.item)"
-                class="download-item__read-progress"
-                data-testid="read-progress-badge"
-              >
-                {{ readProgressLabelOf(row.item) }}
-              </span>
-            </template>
-
-            <!-- percent (left) + speed/ETA (right) — both text_super_small 12sp -->
-            <div class="download-item__stats">
-              <span class="download-item__percent">{{ percentTextOf(row.item) }}</span>
-              <span
-                v-if="statsTextOf(row.item, liveSpeeds[row.item.gid] ?? 0)"
-                class="download-item__speed"
-              >
-                {{ statsTextOf(row.item, liveSpeeds[row.item.gid] ?? 0) }}
-              </span>
-            </div>
-
-            <!-- Horizontal ProgressBar replica (determinate; slides when total is
-                 still unknown, mirroring Android's indeterminate fallback) -->
-            <div
-              class="download-item__track"
-              role="progressbar"
-              :aria-label="`Download progress for ${displayTitle(row.item)}`"
-              :aria-valuemin="0"
-              :aria-valuemax="100"
-              :aria-valuenow="isIndeterminate(row.item) ? undefined : percentOf(row.item)"
-            >
-              <div
-                class="download-item__fill"
-                :class="{
-                  'download-item__fill--indeterminate': isIndeterminate(row.item),
-                  'download-item__fill--sheen': isDownloading(row.item) && !isIndeterminate(row.item),
-                }"
-                :style="isIndeterminate(row.item) ? undefined : { width: `${percentOf(row.item)}%` }"
-              />
-            </div>
-
-            <div class="download-item__footer">
-              <!-- State text (Android: textColorThemeAccent, above the actions) -->
-              <span class="download-item__state">
-                <span class="download-item__state-dot" aria-hidden="true" />
-                {{ stateLabelOf(row.item) }}
-              </span>
-
-              <!-- Action cluster: 40dp icons with 8dp padding, as in item_download.xml -->
-              <div class="download-item__actions">
-                <button
-                  v-if="canStart(row.item)"
-                  type="button"
-                  class="download-item__action"
-                  title="Start"
-                  aria-label="Start download"
-                  @click.stop="onStart(row.item.id)"
-                >
-                  <AppIcon name="play-dark" size="24px" />
-                </button>
-                <button
-                  v-if="canPause(row.item)"
-                  type="button"
-                  class="download-item__action"
-                  title="Pause"
-                  aria-label="Pause download"
-                  @click.stop="onPause(row.item.id)"
-                >
-                  <AppIcon name="pause-dark" size="24px" />
-                </button>
-                <button
-                  v-if="canCancel(row.item)"
-                  type="button"
-                  class="download-item__action"
-                  title="Stop"
-                  aria-label="Stop download"
-                  @click.stop="onCancel(row.item.id)"
-                >
-                  <AppIcon name="close-dark" size="24px" />
-                </button>
-                <button
-                  type="button"
-                  class="download-item__action download-item__action--danger"
-                  title="Delete"
-                  aria-label="Delete download"
-                  @click.stop="onDelete(row.item.id)"
-                >
-                  <AppIcon name="delete-dark" size="24px" />
-                </button>
-              </div>
-            </div>
-
-            <!-- Failure reason (DownloadInfo.error), secondary text under the state -->
-            <p
-              v-if="isFailed(row.item) && errorTextOf(row.item)"
-              class="download-item__error"
-              :title="errorTextOf(row.item)"
-            >
-              {{ errorTextOf(row.item) }}
-            </p>
-          </AppListRow>
+            @start="onStart"
+            @pause="onPause"
+            @cancel="onCancel"
+            @delete="onDelete"
+          />
         </li>
       </ul>
     </ContentLayout>
@@ -476,6 +360,25 @@ export function buildReaderRoute(target: DownloadRouteTarget): {
 } {
   return { path: `/reader/${target.gid}`, query: target.token ? { token: target.token } : {} }
 }
+
+/**
+ * P-F2 ①：条目索引构建（gid/id → item 的 Map，O(1) 定位取代 O(n)
+ * Array#find）。键冲突保留首个命中——与 `find` 的"返回第一个匹配"语义
+ * 一致（重复 gid 数据脏态下两者定位到同一条）。独立导出供等价断言测试。
+ * （DownloadItem 类型复用 setup 块的导入——两个 script 块合并为同一模块
+ * 作用域，重复导入会报 Duplicate identifier。）
+ */
+export function buildItemIndex(
+  items: DownloadItem[],
+  keyOf: (item: DownloadItem) => number,
+): Map<number, DownloadItem> {
+  const map = new Map<number, DownloadItem>()
+  for (const item of items) {
+    const key = keyOf(item)
+    if (!map.has(key)) map.set(key, item)
+  }
+  return map
+}
 </script>
 
 <script setup lang="ts">
@@ -506,9 +409,6 @@ import { usePagedList } from '@/composables/usePagedList'
 import { usePcInput } from '@/composables/usePcInput'
 import FilterSlotBar from '@/components/FilterSlotBar.vue'
 import type { FabAction } from '@/types/components'
-import { CATEGORY_BY_BIT } from '@/types/components'
-import { maskedTitle, privacyMaskEnabled } from '@/utils/privacyMask'
-import { isJpnSubtitleVisible } from '@/utils/jpnSubtitle'
 import { usePreferencesStore } from '@/stores/preferences'
 import {
   DEFAULT_DOWNLOAD_LIST_PREFS,
@@ -518,8 +418,7 @@ import {
 import ContentLayout from '@/components/layout/ContentLayout.vue'
 import FabLayout from '@/components/atoms/FabLayout.vue'
 import AppIcon from '@/components/atoms/AppIcon.vue'
-import CategoryChip from '@/components/atoms/CategoryChip.vue'
-import AppListRow from '@/components/gallery/AppListRow.vue'
+import DownloadProgressRow from '@/components/download/DownloadProgressRow.vue'
 
 /** View states matching ContentLayout's internal ViewTransition. */
 type ViewState = 'loading' | 'content' | 'empty' | 'error'
@@ -629,6 +528,14 @@ const {
 })
 
 /**
+ * P-F2 ①：gid / id → 条目索引（派生 computed，整页替换 items 时重算）。
+ * 进度消息定位、操作按钮定位从 O(n) `Array#find` 换 O(1) Map.get；键冲突
+ * 保留首个（buildItemIndex 内与 find 的首中语义对齐）。
+ */
+const itemsByGid = computed(() => buildItemIndex(downloads.value, (item) => item.gid))
+const itemsById = computed(() => buildItemIndex(downloads.value, (item) => item.id))
+
+/**
  * 视图层加载入口：过滤/标签/刷新等所有入口都回第 1 页（原 load() 的
  * offset=0 语义）。`silent: true` 不切 loading 态——宿主自管忙态的入口
  * （下拉刷新 / 批量操作后的静默重载 / 挂载首屏）。
@@ -717,7 +624,6 @@ const virtualRows = computed(() =>
     index: vitem.index,
     start: vitem.start,
     item: downloads.value[vitem.index],
-    chip: CATEGORY_BY_BIT[downloads.value[vitem.index].category],
   })),
 )
 
@@ -800,161 +706,6 @@ function onRetry(): void {
   void load()
 }
 
-/* --------------------------------------------------- row presentation --- */
-
-/** 行展示标题——脱敏在本视图完成（与原 DownloadItem 同一表达式，逻辑不变）。 */
-function displayTitle(item: DownloadItem): string {
-  return maskedTitle(item.title || item.titleJpn || 'Untitled', item.gid)
-}
-
-/**
- * General 偏好快捷视图（W1b：showJpnTitle / showUploader / showGalleryPages，
- * SearchView 同源读取）。prefs 未加载时为 undefined——上传者/页数按防御默认
- * 隐藏；日文副题的未加载防闪失兜底在 isJpnSubtitleVisible 内部处理。
- */
-const generalPrefs = computed(() => preferencesStore.prefs?.general)
-
-/**
- * 行副题（日文标题）：打码开启或 showJpnTitle 关闭时隐藏（SearchView
- * displaySubtitle 同一门控；prefs 未加载按显示渲染防闪失——T2 定案）。
- */
-function displaySubtitle(item: DownloadItem): string | null {
-  if (privacyMaskEnabled.value) return null
-  if (!item.titleJpn) return null
-  if (!isJpnSubtitleVisible(generalPrefs.value)) return null
-  return item.titleJpn
-}
-
-/**
- * 上传者（B-2 信息开关的下载页接线）：严格 `=== true` 才显示；隐私打码
- * 开启时属敏感内容一律隐藏（SearchView/GalleryCard 同语义）。
- */
-function showUploader(item: DownloadItem): boolean {
-  return (
-    generalPrefs.value?.showUploader === true &&
-    !privacyMaskEnabled.value &&
-    Boolean(item.uploader)
-  )
-}
-
-/**
- * 画廊页数（`{{ pages }}P`）：偏好开启且服务器下发了 >0 的页数才显示
- * （`pages` 可能为 0 / 旧服务器缺省 undefined → 隐藏）。
- */
-function showGalleryPages(item: DownloadItem): boolean {
-  return generalPrefs.value?.showGalleryPages === true && (item.pages ?? 0) > 0
-}
-
-/* W5/W7 (plan-2026-09-02): 阅读进度角标——showReadProgress 开且进度 > 0 才
-   显示；格式对齐 Android GalleryAdapterNew：N/MP（有总页数）或 NP（页数
-   未知）。字段缺失（旧服务器 undefined）时隐藏，与 GalleryCard 语义一致。 */
-function readProgressLabelOf(item: DownloadItem): string {
-  const progress = item.readProgress
-  if (typeof progress !== 'number' || !Number.isFinite(progress) || progress <= 0) return ''
-  const current = progress + 1
-  return item.total > 0 ? `${current}/${item.total}P` : `${current}P`
-}
-
-function showReadProgressBadge(item: DownloadItem): boolean {
-  return preferencesStore.prefs?.general?.showReadProgress === true && readProgressLabelOf(item) !== ''
-}
-
-function isDownloading(item: DownloadItem): boolean {
-  return item.state === STATE_DOWNLOAD
-}
-
-function isFailed(item: DownloadItem): boolean {
-  return item.state === STATE_FAILED
-}
-
-/** Failure reason from the backend; empty when the item has none. */
-function errorTextOf(item: DownloadItem): string {
-  return item.error?.trim() || ''
-}
-
-/** Downloading with an unknown page count → sliding indeterminate bar. */
-function isIndeterminate(item: DownloadItem): boolean {
-  return isDownloading(item) && item.total <= 0
-}
-
-function percentOf(item: DownloadItem): number {
-  return item.total > 0 ? Math.min(100, Math.round((item.done / item.total) * 100)) : 0
-}
-
-function percentTextOf(item: DownloadItem): string {
-  return item.total > 0 ? `${percentOf(item)}%` : '—'
-}
-
-/** CSS modifier key for the current state (S4 state colors on the row). */
-function stateKeyOf(item: DownloadItem): string {
-  switch (item.state) {
-    case STATE_NONE:
-      return 'idle'
-    case STATE_WAIT:
-      return 'wait'
-    case STATE_DOWNLOAD:
-      return 'download'
-    case STATE_FINISH:
-      return 'finish'
-    default:
-      return 'failed'
-  }
-}
-
-/** Android `download_state_*` strings (values-en/strings.xml:377-383). */
-function stateLabelOf(item: DownloadItem): string {
-  switch (item.state) {
-    case STATE_NONE:
-      return 'Idle'
-    case STATE_WAIT:
-      return 'Waiting'
-    case STATE_DOWNLOAD:
-      return 'Downloading'
-    case STATE_FINISH:
-      return 'Done'
-    default:
-      return 'Failed'
-  }
-}
-
-/** Android shows the start icon when idle or failed (retry). */
-function canStart(item: DownloadItem): boolean {
-  return item.state === STATE_NONE || item.state === STATE_FAILED
-}
-
-function canPause(item: DownloadItem): boolean {
-  return isDownloading(item)
-}
-
-function canCancel(item: DownloadItem): boolean {
-  return item.state === STATE_WAIT || isDownloading(item)
-}
-
-/** Seconds remaining at the current rate (0 = not computable). */
-function etaSecondsOf(item: DownloadItem, speed: number): number {
-  if (speed <= 0 || item.total <= 0) return 0
-  return Math.max(0, item.total - item.done) / speed
-}
-
-function formatEta(seconds: number): string {
-  const s = Math.round(seconds)
-  const h = Math.floor(s / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  if (h > 0) return `${h}h ${m}m`
-  const sec = s % 60
-  if (m > 0) return `${m}m ${sec}s`
-  return `${sec}s`
-}
-
-/** Right-hand stats text: rate + ETA while downloading. */
-function statsTextOf(item: DownloadItem, speed: number): string {
-  if (!isDownloading(item)) return ''
-  if (speed <= 0) return 'Fetching…'
-  const rate = speed >= 10 ? speed.toFixed(0) : speed.toFixed(1)
-  const eta = etaSecondsOf(item, speed) > 0 ? ` · ETA ${formatEta(etaSecondsOf(item, speed))}` : ''
-  return `${rate} pages/s${eta}`
-}
-
 /* -------------------------------------------------------- row actions --- */
 
 /**
@@ -966,7 +717,8 @@ async function runItemAction(
   action: (id: number) => Promise<boolean>,
   nextState: number,
 ): Promise<void> {
-  const item = downloads.value.find((entry) => entry.id === id)
+  // P-F2 ①：O(1) 定位（原 Array#find 按 id 线性扫）。
+  const item = itemsById.value.get(id)
   const previousState = item?.state
   if (item) item.state = nextState
   try {
@@ -1034,14 +786,15 @@ function onItemMenu(id: number): void {
 }
 
 /** Android 端逻辑：缩略图 → 详情页；主体 → 直接阅读。
- *  P-A/P-B（plan-2026-08-30 §3.4.0）：本地 token 透传。 */
+ *  P-A/P-B（plan-2026-08-30 §3.4.0）：本地 token 透传。
+ *  P-F2 ①：O(1) 定位（原 Array#find 按 gid 线性扫）。 */
 function onItemOpen(gid: number): void {
-  const item = downloads.value.find((entry) => entry.gid === gid)
+  const item = itemsByGid.value.get(gid)
   void router.push(item ? buildDetailRoute(item) : `/gallery/${gid}`)
 }
 
 function onItemRead(gid: number): void {
-  const item = downloads.value.find((entry) => entry.gid === gid)
+  const item = itemsByGid.value.get(gid)
   void router.push(item ? buildReaderRoute(item) : `/reader/${gid}`)
 }
 
@@ -1343,18 +1096,66 @@ function showToast(message: string): void {
 
 const { connected, connect, subscribeAll } = useWebSocket()
 
-/** gid → live transfer rate in pages/second, fed to each row. */
+/**
+ * gid → live transfer rate in pages/second, fed to each row (P-F2 ③：整表
+ * 作为 prop 下发，行组件只读自己的 gid 键)。引用保持不变、只在帧内**按键
+ * 原地写入**——父级模板不跟踪键，速率变化不重绘虚拟窗口，只触发读取该键
+ * 的行重渲染。
+ */
 const liveSpeeds = ref<Record<number, number>>({})
 
 /** gid → last progress sample, used to derive speed from deltas. */
 const speedSamples = new Map<number, { done: number; time: number }>()
 
-/** True once the all-downloads subscription is registered (survives
- *  reconnects via the composable's registry — no handle to keep). */
-let progressSubscribed = false
+/**
+ * P-F2 ②：待应用缓冲（gid → 最新消息 + 到达时刻）。高频 WS 消息只写缓冲，
+ * 一帧内批量应用到响应式状态——同 gid 多条消息保留最新一条（最终状态与
+ * 逐条应用一致，中间态不再逐条触发行重渲染）。
+ */
+const pendingProgress = new Map<number, { progress: DownloadProgress; receivedAt: number }>()
 
-function handleProgress(progress: DownloadProgress): void {
-  const item = downloads.value.find((entry) => entry.gid === progress.gid)
+/** rAF 停摆（后台 tab）的兜底时钟：缓冲最迟 100ms 落地。 */
+const PROGRESS_FLUSH_FALLBACK_MS = 100
+
+let flushFrameId: number | null = null
+let flushFallbackTimer: ReturnType<typeof setTimeout> | null = null
+
+/** 排一帧合帧：rAF 主时钟 + 100ms 定时器兜底（同一份缓冲，先到先应用）。 */
+function scheduleProgressFlush(): void {
+  if (flushFrameId === null) {
+    flushFrameId = requestAnimationFrame(applyPendingProgress)
+  }
+  if (flushFallbackTimer === null) {
+    flushFallbackTimer = setTimeout(applyPendingProgress, PROGRESS_FLUSH_FALLBACK_MS)
+  }
+}
+
+/** 取消已排的帧/兜底时钟（应用或卸载时）。 */
+function cancelProgressFlush(): void {
+  if (flushFrameId !== null) {
+    cancelAnimationFrame(flushFrameId)
+    flushFrameId = null
+  }
+  if (flushFallbackTimer !== null) {
+    clearTimeout(flushFallbackTimer)
+    flushFallbackTimer = null
+  }
+}
+
+/** 帧回调：把缓冲里的最新进度一次性写入响应式状态（每帧一次）。 */
+function applyPendingProgress(): void {
+  cancelProgressFlush()
+  if (pendingProgress.size === 0) return
+  const batch = Array.from(pendingProgress.values())
+  pendingProgress.clear()
+  for (const { progress, receivedAt } of batch) {
+    applyProgress(progress, receivedAt)
+  }
+}
+
+/** 单条进度落地（原 handleProgress 主体，速率采样时刻改为消息到达时刻）。 */
+function applyProgress(progress: DownloadProgress, receivedAt: number): void {
+  const item = itemsByGid.value.get(progress.gid)
   if (item) {
     item.state = progress.state
     item.done = progress.downloaded
@@ -1362,21 +1163,30 @@ function handleProgress(progress: DownloadProgress): void {
     item.label = progress.label
   }
 
-  const now = Date.now()
   const previous = speedSamples.get(progress.gid)
   let speed = progress.speed
-  if (speed <= 0 && previous && now > previous.time && progress.downloaded > previous.done) {
-    speed = ((progress.downloaded - previous.done) * 1000) / (now - previous.time)
+  if (speed <= 0 && previous && receivedAt > previous.time && progress.downloaded > previous.done) {
+    speed = ((progress.downloaded - previous.done) * 1000) / (receivedAt - previous.time)
   }
 
   if (progress.state === STATE_FINISH || progress.state === STATE_FAILED) {
     speedSamples.delete(progress.gid)
     liveSpeeds.value[progress.gid] = 0
   } else {
-    speedSamples.set(progress.gid, { done: progress.downloaded, time: now })
+    speedSamples.set(progress.gid, { done: progress.downloaded, time: receivedAt })
     liveSpeeds.value[progress.gid] = speed
   }
 }
+
+/** WS 消息入口：只写缓冲并排帧，不在消息线程碰响应式状态（P-F2 ②）。 */
+function handleProgress(progress: DownloadProgress): void {
+  pendingProgress.set(progress.gid, { progress, receivedAt: Date.now() })
+  scheduleProgressFlush()
+}
+
+/** True once the all-downloads subscription is registered (survives
+ *  reconnects via the composable's registry — no handle to keep). */
+let progressSubscribed = false
 
 /* Subscribe once the STOMP session is up (subscribeAll is a no-op before). */
 watch(
@@ -1401,6 +1211,9 @@ onUnmounted(() => {
   if (searchTimer) clearTimeout(searchTimer)
   clearTimeout(toastTimer)
   window.removeEventListener('keydown', onDialogKeydown)
+  // P-F2 ②：未落地的进度合帧一并不排了（rAF + 兜底定时器 + 缓冲）。
+  cancelProgressFlush()
+  pendingProgress.clear()
 })
 </script>
 
@@ -1837,248 +1650,9 @@ onUnmounted(() => {
   }
 }
 
-/* ------------------------------------------- download row internals ---- */
-/* W3-C1：行骨架（卡片面/勾选圈/缩略图/标题）在共享 AppListRow 内；这里只
-   保留下载特有的 slotted 内容样式（原 DownloadItem.vue 逐条搬入，声明不变
-   ——视觉零漂移）。`download-item--*` 状态修饰类由模板随行下发到 AppListRow
-   根节点，用于给进度条/状态文案着色（S4 状态色）。 */
-.download-item__pages {
-  margin-left: auto;
-  font-size: var(--text-super-small); /* 12sp */
-  color: var(--text-color-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* W5/W7: 阅读进度角标 — 12sp secondary，跟在下载进度文案之后。 */
-.download-item__read-progress {
-  flex-shrink: 0;
-  font-size: var(--text-super-small); /* 12sp */
-  color: var(--text-color-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* W1b: 上传者（showUploader）— 12sp secondary，超长省略；打码开启不渲染。 */
-.download-item__uploader {
-  min-width: 0;
-  font-size: var(--text-super-small); /* 12sp */
-  color: var(--text-color-secondary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* W1b: 画廊页数（showGalleryPages）— 12sp secondary，`N P` 计数稳定对齐。 */
-.download-item__gallery-pages {
-  flex-shrink: 0;
-  font-size: var(--text-super-small); /* 12sp */
-  color: var(--text-color-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* ------------------------------------------------------------- stats --- */
-.download-item__stats {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--spacing);
-  font-size: var(--text-super-small); /* 12sp, percent + speed row */
-}
-
-.download-item__percent {
-  color: var(--text-color-primary);
-  font-weight: 500;
-  font-variant-numeric: tabular-nums;
-}
-
-.download-item__speed {
-  color: var(--text-color-secondary);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* ----------------------------------------------------- progress bar --- */
-.download-item__track {
-  height: 4px;
-  border-radius: 2px;
-  overflow: hidden;
-  background: var(--grey-300); /* S4 spec: grey-300 track (light) */
-}
-
-/* Theme-aware tracks matching Android progress_dark / progress_black. */
-[data-theme='dark'] .download-item__track {
-  background: var(--grey-600);
-}
-
-[data-theme='black'] .download-item__track {
-  background: var(--grey-700);
-}
-
-.download-item__fill {
-  position: relative;
-  height: 100%;
-  border-radius: 2px;
-  overflow: hidden;
-  background: var(--grey-500);
-  transition:
-    width 300ms var(--ease-decelerate-quart),
-    background-color 200ms linear;
-}
-
-/* State colors: downloading = accent, idle/wait = grey, done = green,
-   failed = red (S4 style spec). */
-.download-item--download .download-item__fill {
-  background: var(--color-accent);
-}
-
-.download-item--finish .download-item__fill {
-  background: var(--color-cat-game-cg);
-}
-
-.download-item--failed .download-item__fill {
-  background: var(--color-red-500);
-}
-
-/* Live sheen sweeping across the fill while downloading. */
-.download-item__fill--sheen::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(90deg, transparent 0%, var(--translucent-bg) 50%, transparent 100%);
-  transform: translateX(-100%);
-  animation: dl-sheen 1300ms linear infinite;
-}
-
-@keyframes dl-sheen {
-  to {
-    transform: translateX(100%);
-  }
-}
-
-/* Unknown page count: Material-style sliding segment. */
-.download-item__fill--indeterminate {
-  width: 40%;
-  background: var(--color-accent);
-  animation: dl-slide 1400ms var(--ease-decelerate-quart) infinite;
-}
-
-@keyframes dl-slide {
-  0% {
-    margin-left: -40%;
-  }
-  100% {
-    margin-left: 100%;
-  }
-}
-
-/* ------------------------------------------------------------ footer --- */
-.download-item__footer {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--spacing);
-  margin-top: auto;
-}
-
-.download-item__state {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: var(--text-super-small); /* 12sp */
-  font-weight: 500;
-  color: var(--grey-500);
-}
-
-.download-item--download .download-item__state {
-  color: var(--color-accent);
-}
-
-.download-item--finish .download-item__state {
-  color: var(--color-cat-game-cg);
-}
-
-.download-item--failed .download-item__state {
-  color: var(--color-red-500);
-}
-
-.download-item__state-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: currentColor;
-  flex-shrink: 0;
-}
-
-.download-item--download .download-item__state-dot {
-  animation: dl-pulse 1000ms ease-in-out infinite;
-}
-
-@keyframes dl-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.3;
-  }
-}
-
-/* ----------------------------------------------------- failure reason --- */
-.download-item__error {
-  margin: 0;
-  font-size: var(--text-super-small); /* 12sp */
-  color: var(--text-color-secondary);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* ----------------------------------------------------------- actions --- */
-.download-item__actions {
-  display: flex;
-  align-items: center;
-}
-
-/* 40dp touch targets with 24dp glyphs (item_download.xml ImageViews). */
-.download-item__action {
-  width: 40px;
-  height: 40px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--drawable-color-primary);
-  cursor: pointer;
-  transition:
-    background-color 140ms var(--ease-decelerate-quart),
-    color 140ms var(--ease-decelerate-quart),
-    transform 120ms var(--ease-decelerate-quart);
-}
-
-.download-item__action:hover {
-  background: var(--color-surface-activated);
-}
-
-.download-item__action:active {
-  transform: scale(0.88);
-}
-
-.download-item__action:focus-visible {
-  outline: 2px solid var(--color-primary);
-  outline-offset: -2px;
-}
-
-.download-item__action--danger:hover {
-  color: var(--color-red-500);
-}
+/* 行内部样式（download-item__*，含 keyframes dl-sheen/dl-slide/dl-pulse）
+   随 P-F2 ③ 抽到 DownloadProgressRow.vue 的 scoped 块——选择器与声明原样
+   搬入，计算样式不变；此处保留虚拟列表容器自身的定位/动画。 */
 
 /* ------------------------------------------------------------- dialog --- */
 .dialog-scrim {
@@ -2240,13 +1814,12 @@ onUnmounted(() => {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  /* 行内动画（sheen/indeterminate/state-dot）的降级随行样式搬入
+     DownloadProgressRow.vue 的同名媒体查询。 */
   .download-list__item,
   .dialog-scrim,
   .dialog,
-  .toast,
-  .download-item__fill--sheen::after,
-  .download-item__fill--indeterminate,
-  .download-item--download .download-item__state-dot {
+  .toast {
     animation: none;
   }
 }

@@ -5,6 +5,7 @@ import org.junit.jupiter.api.Assertions.assertEquals
 import org.junit.jupiter.api.Assertions.assertNotNull
 import org.junit.jupiter.api.Assertions.assertNull
 import org.junit.jupiter.api.Assertions.assertTrue
+import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import org.junit.jupiter.api.io.TempDir
@@ -29,12 +30,28 @@ class DownloadDirIndexTest {
     private lateinit var config: SiteCoreConfigProperties
     private lateinit var index: DownloadDirIndex
 
+    /** 本测试创建过的实例：tearDown 统一停掉后台线程，杜绝与 @TempDir 清理竞态。 */
+    private val created = ArrayList<DownloadDirIndex>()
+
     @BeforeEach
     fun setUp() {
         config = SiteCoreConfigProperties()
         config.download.path = tempDir.absolutePath
-        index = DownloadDirIndex(config)
+        // P-S3：快照落 dataDir——测试内隔离，绝不写仓库的 ./data。
+        config.dataDir = File(tempDir, "data").absolutePath
+        index = newIndex()
     }
+
+    @AfterEach
+    fun tearDown() {
+        // shutdown 等在途重建（含快照覆写）收尾并拒绝新任务——否则测试结束后
+        // 后台快照写入会在 @TempDir 清理时重建 data/ 目录（DirectoryNotEmpty）。
+        created.forEach { it.shutdown() }
+        created.clear()
+    }
+
+    private fun newIndex(intervalMs: Long = 0): DownloadDirIndex =
+        DownloadDirIndex(config, intervalMs).also { created.add(it) }
 
     private fun gidDir(gid: Long): File = File(tempDir, gid.toString()).apply { mkdirs() }
 
@@ -186,7 +203,7 @@ class DownloadDirIndexTest {
     @Test
     fun `missing downloads root is a no-op`() {
         config.download.path = File(tempDir, "does-not-exist").absolutePath
-        index = DownloadDirIndex(config)
+        index = newIndex()
         index.loadAll()
         assertEquals(0, index.pageCount(1L))
     }
@@ -201,7 +218,7 @@ class DownloadDirIndexTest {
         File(titled, "0001.webp").writeBytes(byteArrayOf(1, 2, 3))
         File(titled, "0001.jpg").writeBytes(byteArrayOf(1, 2, 3))
         File(titled, "0002.png").writeBytes(byteArrayOf(1, 2, 3))
-        index = DownloadDirIndex(config, 60_000)
+        index = newIndex(60_000)
         index.loadAll()
 
         assertEquals(2, index.pageCount(77L))
@@ -228,7 +245,7 @@ class DownloadDirIndexTest {
         val dir = gidDir(9L)
         pushFile(9L, "0001.jpg")
         // interval > 0：指纹检查被节流跳过，自愈只能来自 entry.dir 自验失败。
-        index = DownloadDirIndex(config, 60_000)
+        index = newIndex(60_000)
         index.loadAll()
         assertEquals(1, index.pageCount(9L))
 
@@ -256,13 +273,14 @@ class DownloadDirIndexTest {
 
     @Test
     fun `ttl throttle skips the root fingerprint check until the interval elapses`() {
-        // 金丝雀：把根目录设为不可读（POSIX r 位；子树 stat 走 x 位不受影响）。
-        // 指纹检查一旦运行，listFiles 失败 → 指纹差异 → refresh 清空索引；而
-        // 命中路径只 stat 缓存的 dir，完全不碰根列表。以此区分“检查被节流
-        // 跳过”与“检查已运行”（注意：假设测试进程非 root）。
+        // 金丝雀（P-S3 后台化语义）：把根目录设为不可读（POSIX r 位；子树 stat
+        // 走 x 位不受影响）。到点后的指纹检查一旦运行 → 指纹差异 → 只调度后台
+        // 重建（请求线程零 walk、零同步 refresh）；在途期间请求继续用旧索引。
+        // 后台完成后整表交换，下一次查询看到空索引（占位 {gid} 目录不存在，
+        // 目录名是 1-titled）。
         val dir = File(tempDir, "1-titled").apply { mkdirs() }
         File(dir, "0001.jpg").writeBytes(byteArrayOf(1, 2, 3))
-        index = DownloadDirIndex(config, 100)
+        index = newIndex(100)
         index.loadAll()
         assertEquals(1, index.pageCount(1L))
 
@@ -271,9 +289,13 @@ class DownloadDirIndexTest {
             // 间隔内：ensureFresh 直接返回，索引命中照常服务。
             assertEquals(1, index.pageCount(1L))
 
-            // 到点后的下一次请求：指纹检查运行 → refresh 清空 → 占位 {gid}
-            // 目录不存在（目录名是 1-titled）→ pageCount 归零。
+            // 到点后的下一次请求：指纹检查运行 → 只调度后台重建 → 请求继续
+            // 用旧索引（绝不卡请求线程）。
             Thread.sleep(150)
+            assertEquals(1, index.pageCount(1L), "rebuild in flight: requests keep serving the old index")
+
+            // 后台重建完成后：新索引可见（整表交换）。
+            index.awaitBackgroundIdleForTest()
             assertEquals(0, index.pageCount(1L))
         } finally {
             assertTrue(tempDir.setReadable(true), "cleanup: restore root listing")
@@ -290,7 +312,7 @@ class DownloadDirIndexTest {
         gidDir(9L)
         pushFile(9L, "0001.jpg")
         // interval > 0：ensureFresh 被节流跳过，重扫只能由 invalidate 触发。
-        index = DownloadDirIndex(config, 60_000)
+        index = newIndex(60_000)
         index.loadAll()
         assertEquals(1, index.pageCount(9L))
 
