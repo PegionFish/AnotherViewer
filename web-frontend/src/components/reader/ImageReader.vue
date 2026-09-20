@@ -676,8 +676,13 @@ async function applyOrientationLock(): Promise<void> {
   activeOrientationLock = want
   try {
     await orientation.lock(want)
-    // 在途期间被切换/退全屏/卸载：迟到的兑现立即反解锁，不留幽灵锁。
-    if (orientationDisposed || activeOrientationLock !== want) {
+    // A7 迟到锁竞态（二期 Wave 2）：在途期间切到别的方向（lock(P) 未兑现时
+    // 又 lock(L)）后，P 的迟到兑现不再 unlock——activeOrientationLock 已指向
+    // 有效的新锁，此处 unlock 会误拆它。只保留卸载兜底：卸载后仍在途的迟到
+    // 兑现立即反向 unlock（防幽灵锁，「解锁泄漏」红线不变）。退全屏路径由
+    // releaseOrientationLock 的同步 unlock 覆盖，平台按提交序处理，迟到兑现
+    // 不会重新上锁。
+    if (orientationDisposed) {
       activeOrientationLock = null
       try {
         orientation.unlock()

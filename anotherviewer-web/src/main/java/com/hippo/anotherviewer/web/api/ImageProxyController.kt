@@ -777,8 +777,10 @@ class ImageProxyController(
      * finally 关闭输入流时归还闸门票（[CountedResource]，经幂等 AtomicBoolean
      * 恰好归还一次），保证 W3-P「读全过程持票」在流式 serve 下仍成立（持票
      * 窗口 = 响应写出窗口 = 物理读窗口）。[serveFile] 自身的错误早退路径
-     * （416/404 envelope）在此处自行归还票。残余风险：票移交后若在转换器打开
-     * 流之前出现异常（响应头写出失败等极窄窗口）票会滞留到 profile 重建（gate
+     * （416/404 envelope）在此处自行归还票。P1-2：转换器开流失败（池文件在
+     * serve 与开流之间消失，FNFE 被转换器异常表吞掉、不走 finally）由
+     * [CountedResource.getInputStream] 当场归还票——泄漏窗口已闭合；残余窗口
+     * 仅剩「头写出失败等转换器开流之前的异常」，票滞留到 profile 重建（gate
      * 换核）自然排空——不影响正确性，只临时少一个并发名额。
      *
      * [etag] 非空时附到 200/206 响应（304 由调用方在进本方法前返回）。
@@ -841,19 +843,37 @@ class ImageProxyController(
         override fun contentLength(): Long = length
 
         override fun getInputStream(): InputStream {
-            val raw = FileInputStream(file)
-            var toSkip = start
-            while (toSkip > 0) {
-                val skipped = raw.skip(toSkip)
-                if (skipped > 0) {
-                    toSkip -= skipped
-                } else if (raw.read() < 0) {
-                    break // 文件比预期短（并发截断）：直接流式 EOF，不再读
-                } else {
-                    toSkip -= 1
+            // P1-2（二期 Wave 2 红队）：开流失败（池文件在 serve 校验与开流之间
+            // 消失——阅读中删下载 / SMB 手删）必须当场归还闸门票：Spring 6.2.6
+            // ResourceHttpMessageConverter.writeContent 的异常表吞掉 FNFE 后不走
+            // 任何 finally，票永不过手 → BoundedReleasingStream 不存在、无人归还，
+            // HDD 闸门每漏一张永久占坑。released 与 BoundedReleasingStream 共用，
+            // CAS 保证与正常 close 路径幂等、绝不双还。skip/read 中途失败同样
+            // 收敛：关流 + 归还后重抛（此刻流尚未移交转换器，没人会替它 close）。
+            var raw: FileInputStream? = null
+            try {
+                raw = FileInputStream(file)
+                var toSkip = start
+                while (toSkip > 0) {
+                    val skipped = raw.skip(toSkip)
+                    if (skipped > 0) {
+                        toSkip -= skipped
+                    } else if (raw.read() < 0) {
+                        break // 文件比预期短（并发截断）：直接流式 EOF，不再读
+                    } else {
+                        toSkip -= 1
+                    }
                 }
+                return BoundedReleasingStream(raw, length, permit, released)
+            } catch (e: Exception) {
+                try {
+                    raw?.close()
+                } catch (ignored: Exception) {
+                    // 归还门票优先于关流失败。
+                }
+                if (released.compareAndSet(false, true)) permit?.close()
+                throw e
             }
-            return BoundedReleasingStream(raw, length, permit, released)
         }
     }
 

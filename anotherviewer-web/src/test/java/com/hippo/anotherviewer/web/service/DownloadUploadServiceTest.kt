@@ -437,6 +437,61 @@ class DownloadUploadServiceTest {
     }
 
     @Test
+    fun `completeUpload discards a stale pending progress frame so it cannot overwrite the finished row (E2E)`() {
+        // 二期 Wave 2 E2E 缝隙：同 taskId 的下载 worker 曾上报过进度、帧滞留在批量
+        // 器 pending 里；上传收尾写 state=3 后若不丢弃，下一 tick 的 drain（守卫只
+        // 跳 0/4，**不跳 3**）会把旧 done 覆盖到终态行上。与 deleteDownload 墓碑化
+        // 同款 discard，包在 flush 锁内与在途 tick 串行化。
+        val existingRow = DownloadInfoEntity().apply {
+            id = 77L
+            gid = 123L
+            token = "tok"
+            title = "Old"
+            state = 2
+            total = 10
+            done = 3
+        }
+        val repo = mock(DownloadInfoRepository::class.java).apply {
+            `when`(save(any(DownloadInfoEntity::class.java))).thenAnswer { inv ->
+                val e = inv.getArgument<DownloadInfoEntity>(0)
+                store[e.gid] = e
+                e
+            }
+            `when`(findAllByGid(anyLong())).thenAnswer { inv ->
+                listOfNotNull(store[inv.getArgument<Long>(0)])
+            }
+            // drain 的下一 tick 落库路径需要 findById——桩到同一行才能暴露覆盖。
+            `when`(findById(77L)).thenReturn(java.util.Optional.of(existingRow))
+        }
+        store[123L] = existingRow
+
+        val persister = DownloadProgressPersister(
+            repo,
+            scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor().apply { shutdownNow() },
+        )
+        val serviceWithPersister = DownloadUploadService(
+            repo,
+            hashRepo,
+            SiteCoreConfigProperties().apply { download.path = tempDir.absolutePath },
+            mock(ServerConfigService::class.java).apply {
+                `when`(getBoolean(anyString(), anyBoolean())).thenReturn(true)
+            },
+            persister,
+        )
+
+        persister.record(77L, 5) // 旧帧（上传终态写之前滞留）
+        assertTrue(serviceWithPersister.completeUpload(123L, UploadCompleteRequest(total = 20, done = 20)))
+
+        assertEquals(3, existingRow.state)
+        assertEquals(20, existingRow.done)
+
+        // 下一 tick 落库：pending 已被 discard，旧帧不得覆盖 state=3 行的 done。
+        persister.tick()
+        assertEquals(20, existingRow.done, "旧 done 帧不得覆盖 state=3 行（E2E 缝隙）")
+        assertEquals(3, existingRow.state)
+    }
+
+    @Test
     // MASTER-2026-08-22 S3：upload_enabled 关闭时 finalize 被拒绝（与 storePage 同语义）。
     fun `completeUpload refuses when upload is disabled`() {
         setUp(uploadEnabled = false)

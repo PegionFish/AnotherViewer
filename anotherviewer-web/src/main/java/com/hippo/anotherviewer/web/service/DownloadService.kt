@@ -393,8 +393,15 @@ class DownloadService(
         // and stops writing; the row transitions to state 0 (WAIT/paused).
         // P-S8 批量：暂停态写包进 flush 锁——在途批量 flush（加载的是暂停前状态）
         // 先完成，暂停写随后落地，行状态绝不被旧进度帧复活。
+        // P2-2（二期 Wave 2 E2E）：锁内**先 flush 再写 state=0**——drain 守卫跳过
+        // 暂停(0)行，若不先落库，pending 的最新 done 帧会滞留内存（行 done 停在
+        // 旧值，暂停瞬间进度丢失）；先 flush（此刻行状态仍是 1/2，合法写 done）
+        // 再写暂停态，行 done 反映暂停瞬间的真实进度，且该 id 再无 pending 残帧。
         tasks[id]?.requestStop()
-        progressPersister.locked { updateEntity(id) { it.state = 0 } }
+        progressPersister.locked {
+            progressPersister.flush(id)
+            updateEntity(id) { it.state = 0 }
+        }
         return true
     }
 

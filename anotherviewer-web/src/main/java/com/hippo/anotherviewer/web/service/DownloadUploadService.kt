@@ -31,7 +31,9 @@ class UploadDisabledException(message: String) : IllegalArgumentException(messag
  *   downloadDir 固定派生自 config.download.path。
  * - [storePage]：V 门校验后覆盖写单页，扩展名白名单 jpg/jpeg/png/gif/webp
  *   （保留原扩展名），并建/刷新 SHA-256 基线（origin=upload）。
- * - [completeUpload]：存在即更新，state=3（FINISHED）+ total/done。
+ * - [completeUpload]：存在即更新，state=3（FINISHED）+ total/done；终态写前在
+ *   flush 锁内丢弃进度批量器的待写帧（旧 done 帧不得覆盖 state=3 行，二期 Wave 2
+ *   E2E 缝隙修复）。
  */
 @Service
 class DownloadUploadService(
@@ -40,6 +42,10 @@ class DownloadUploadService(
     private val pageFileHashRepository: PageFileHashRepository,
     private val config: SiteCoreConfigProperties,
     private val serverConfig: ServerConfigService,
+    // 二期 Wave 2 E2E 缝隙：completeUpload 终态写前丢弃进度批量器的待写帧。
+    // 默认直构（绑定本仓库）仅为既有直构测试的源兼容保留；Spring 装配按类型
+    // 注入容器级单例（与 DownloadService 同款）。
+    private val progressPersister: DownloadProgressPersister = DownloadProgressPersister(downloadRepository),
 ) {
     private val logger = LoggerFactory.getLogger(DownloadUploadService::class.java)
 
@@ -207,11 +213,19 @@ class DownloadUploadService(
         }
         // U5：List 化查找 + firstOrNull（多行脏数据容错，同 initUpload）。
         val entity = downloadRepository.findAllByGid(gid).firstOrNull() ?: return false
-        entity.state = 3
-        entity.total = request.total
-        entity.done = request.done
-        entity.lastModified = System.currentTimeMillis()
-        downloadRepository.save(entity)
+        // 二期 Wave 2 E2E 缝隙：同 taskId 在进度批量器 pending 里的旧 done 帧会在
+        // 下一 tick 覆盖刚写的 state=3 行（drain 守卫只跳 0/4，**不跳 3**）。
+        // 与 deleteDownload 墓碑化同款 discard（终态 done 以请求为准，旧帧无意义）；
+        // 包在 flush 锁内是与在途 tick 串行化：先让在途 drain 完成、再丢弃、再写
+        // 终态，关闭「tick 摘帧 → 终态写 → tick 旧帧落库」的交错窗口。
+        progressPersister.locked {
+            progressPersister.discard(entity.id)
+            entity.state = 3
+            entity.total = request.total
+            entity.done = request.done
+            entity.lastModified = System.currentTimeMillis()
+            downloadRepository.save(entity)
+        }
         return true
     }
 

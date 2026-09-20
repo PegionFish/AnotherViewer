@@ -99,10 +99,14 @@ class ImageCacheService(
     /** 队列近似长度：ConcurrentLinkedDeque.size 为 O(n)，用计数器做软上限判断。 */
     private val writeQueueApproxSize = AtomicLong(0)
 
-    /** 上次全量对账时间戳（频控 + CAS 单飞；0 = 从未对账，首次允许立即对账）。 */
-    private val lastReconcileAtMs = AtomicLong(0L)
+    /** 上次全量对账时刻（System.nanoTime 口径；频控 + CAS 单飞；0 = 从未对账，首次允许立即对账）。 */
+    private val lastReconcileAtNanos = AtomicLong(0L)
 
-    /** 对账最小间隔；生产保持默认 60s，包内测试可调小验证窗口、调大禁用对账。 */
+    /**
+     * 对账最小间隔（毫秒）；生产保持默认 60s，包内测试可调小验证窗口、调大禁用
+     * 对账。窗口比较在 [System.nanoTime] 单调钟域内进行（红队 P2-6：免疫系统
+     * 墙钟回拨——旧实现用 currentTimeMillis，回拨会把窗口拉长到回拨时长）。
+     */
     @Volatile
     internal var reconcileMinIntervalMs: Long = DEFAULT_RECONCILE_MIN_INTERVAL_MS
 
@@ -417,8 +421,8 @@ class ImageCacheService(
 
         while (diskSizeBytes.get() > maxDiskBytes) {
             val candidate = pollWriteCandidate() ?: run {
-                // 队列耗尽仍超限：计数漂移 → 频控全量对账（重置计数器 + 清空
-                // 目录 + 空目录清理 + 重建队列）。
+                // 队列耗尽仍超限：计数漂移 → 频控全量对账（P1-1：只校准计数器
+                // + 重建队列，绝不删缓存文件；空目录壳清理随对账走）。
                 reconcileDiskState()
                 return
             }
@@ -433,34 +437,45 @@ class ImageCacheService(
     }
 
     /**
-     * P-S9 漂移对账：全量扫描 → 清空目录 → 重置计数器 → 按 lastModified 重建
-     * 队列（与 init 同口径）。频控：[reconcileMinIntervalMs] 内最多一次，CAS 单飞
-     * 保证多线程同时触发时只有一家执行。空目录清理随对账走（常规队列驱逐不再
-     * 清理空目录）。并发写入增量的归一口径与 [clearCache] 一致：以扫描时的磁盘
-     * 实际为准，由此引入的微小漂移由下次对账收敛。
+     * P1-1（二期 Wave 2 红队）漂移对账：**扫描结果即真相，绝不删任何缓存文件**。
+     * 全量扫描 → 直接 set 两个运行计数器 → 按 lastModified 重建写入序队列（与
+     * init 同口径）。频控用 [System.nanoTime]（单调钟，免疫系统时间回拨——
+     * 红队 P2-6 一并修复）；[reconcileMinIntervalMs] 窗口内最多一次，CAS 单飞
+     * 保证多线程同时触发时只有一家执行。
+     *
+     * 历史 bug（P1-1）：旧实现 collectFiles 后 `for (file in files) file.delete()`
+     * ——对账清空整个缓存目录，而计划规格从未授权删文件；且计数上漂是单向棘轮
+     * （evictPage 先减计数后 delete 不验成功、evict/覆写 TOCTOU），长期运行必然
+     * 周期性全清缓存 + EH 拉取风暴。修复后对账只校准计数，全部缓存文件保留，
+     * 驱逐仍只走写入序队列。空目录清理保留（与 clearCache 同款，只删空目录壳）。
+     * 并发写入增量的归一口径与 [clearCache] 一致：以扫描时的磁盘实际为准，
+     * 由此引入的微小漂移由下次对账收敛。
      */
     private fun reconcileDiskState() {
-        val now = System.currentTimeMillis()
+        val now = System.nanoTime()
+        // 饱和乘法：Long.MAX_VALUE（测试禁用对账）× 1e6 会回绕成负数，负窗口
+        // 恒放行会背弃"禁用"语义。
+        val intervalNanos =
+            if (reconcileMinIntervalMs >= Long.MAX_VALUE / 1_000_000L) Long.MAX_VALUE
+            else reconcileMinIntervalMs * 1_000_000L
         while (true) {
-            val last = lastReconcileAtMs.get()
-            if (now - last < reconcileMinIntervalMs) return
-            if (lastReconcileAtMs.compareAndSet(last, now)) break
+            val last = lastReconcileAtNanos.get()
+            // 0 = 从未对账 → 首次放行（nanoTime 是开机单调钟，now-0 不再像
+            // epoch 毫秒那样天然大于窗口，必须显式保留首次立即对账语义）。
+            if (last != 0L && now - last < intervalNanos) return
+            if (lastReconcileAtNanos.compareAndSet(last, now)) break
         }
         reconcileCount.incrementAndGet()
-        logger.warn("Disk cache counter drift detected, running full reconciliation on {}", cacheDir.absolutePath)
+        logger.warn("Disk cache counter drift detected, reconciling counters on {}", cacheDir.absolutePath)
+        // 扫描结果即真相：计数器直接对齐磁盘实际，一个文件都不删。
         val files = if (cacheDir.isDirectory) collectFiles(cacheDir) else emptyList()
-        for (file in files) {
-            file.delete()
-        }
-        // 清理删空后的目录（与 clearCache 同款）。
+        diskSizeBytes.set(files.sumOf { it.length() })
+        diskEntryCount.set(files.size.toLong())
+        rebuildWriteOrderQueue(files)
+        // 空目录清理（只删已无任何子项的目录壳；与 clearCache 同款）。
         cacheDir.listFiles()
             ?.filter { it.isDirectory && (it.listFiles()?.isEmpty() != false) }
             ?.forEach { it.delete() }
-        // 重新归一两个运行值（删除失败的文件仍留在磁盘上）。
-        val remaining = if (cacheDir.isDirectory) collectFiles(cacheDir) else emptyList()
-        diskSizeBytes.set(remaining.sumOf { it.length() })
-        diskEntryCount.set(remaining.size.toLong())
-        rebuildWriteOrderQueue(remaining)
     }
 
     /** 落盘成功后入写入序队列尾；超过软上限时丢弃最老候选（内存封顶）。 */
@@ -475,14 +490,24 @@ class ImageCacheService(
     private fun pollWriteCandidate(): File? =
         writeOrderQueue.pollFirst()?.also { writeQueueApproxSize.decrementAndGet() }
 
-    /** 清空并按 lastModified 升序重建写入序候选队列（init / 对账 / clearCache 共用）。 */
+    /**
+     * 清空并按 lastModified 升序重建写入序候选队列（init / 对账 / clearCache 共用）。
+     *
+     * P2-3（二期 Wave 2）：与运行时限入队（[enqueueWriteCandidate]）一致地套
+     * [MAX_WRITE_QUEUE_ENTRIES] 软上限——保留 lastModified 最新的 5 万条，更旧的
+     * 溢出丢弃（失去队列资格的文件交由漂移对账重新校准计数）。对账/init 面对的
+     * 全量清单本身可超过 5 万（>5 万文件的缓存目录），不套帽会让重建后的队列
+     * 超出运行时软上限的内存封顶约定。
+     */
     private fun rebuildWriteOrderQueue(files: List<File>) {
         writeOrderQueue.clear()
         writeQueueApproxSize.set(0)
-        files.sortedBy { it.lastModified() }.forEach { file ->
-            writeOrderQueue.addLast(file)
-            writeQueueApproxSize.incrementAndGet()
-        }
+        files.sortedBy { it.lastModified() }
+            .takeLast(MAX_WRITE_QUEUE_ENTRIES.toInt())
+            .forEach { file ->
+                writeOrderQueue.addLast(file)
+                writeQueueApproxSize.incrementAndGet()
+            }
     }
 
     // ── path / key helpers ─────────────────────────────────────

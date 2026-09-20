@@ -691,6 +691,64 @@ describe('ImageReader R1-A7 — 屏幕方向锁定（全屏联动 / 退全屏解
     expect(orientation.lock).toHaveBeenLastCalledWith('landscape')
   })
 
+  it('does not unlock the valid replacement lock when a stale lock request settles late (A7 迟到锁竞态)', async () => {
+    // 竞态序列：lock(P) 在途 → 切 landscape（lock(L) 在途）→ lock(P) 迟到兑现。
+    // 兑现前 activeOrientationLock 已指向 landscape——迟到兑现绝不能把它 unlock 掉。
+    const orientation = installScreenOrientation()
+    const resolvers = deferredLock(orientation)
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(1) // lock(P) 挂起在 resolvers[0]
+
+    await wrapper.setProps({ orientationLock: 'landscape' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(2) // lock(L) 挂起在 resolvers[1]
+    expect(orientation.lock).toHaveBeenLastCalledWith('landscape')
+    expect(orientation.unlock).not.toHaveBeenCalled()
+
+    // lock(P) 迟到兑现：修复前会因 activeOrientationLock !== 'portrait' 而误 unlock。
+    resolvers[0]?.()
+    await flushPromises()
+    expect(orientation.unlock).not.toHaveBeenCalled()
+    expect(orientation.lock).toHaveBeenCalledTimes(2)
+
+    // lock(L) 正常兑现：锁生效，同样无需反向 unlock。
+    resolvers[1]?.()
+    await flushPromises()
+    expect(orientation.unlock).not.toHaveBeenCalled()
+  })
+
+  it('a stale rejected lock does not clobber the replacement lock bookkeeping (迟到拒绝不搅局)', async () => {
+    // 可拒绝的在途句柄：lock(P) 迟到被拒时，拒绝分支只清理自己的记账，
+    // 不得动已指向 landscape 的 activeOrientationLock。
+    const orientation = installScreenOrientation()
+    const pendings: Array<{ resolve: () => void; reject: (e: Error) => void }> = []
+    orientation.lock.mockImplementation(
+      () => new Promise<void>((resolve, reject) => pendings.push({ resolve, reject })),
+    )
+    wrapper = mountReader({ orientationLock: 'portrait' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(1) // lock(P) 挂起在 pendings[0]
+
+    await wrapper.setProps({ orientationLock: 'landscape' })
+    await flushPromises()
+    expect(orientation.lock).toHaveBeenCalledTimes(2) // lock(L) 挂起在 pendings[1]
+
+    pendings[0]?.reject(new Error('AbortError'))
+    await flushPromises()
+    expect(orientation.unlock).not.toHaveBeenCalled()
+
+    // 收尾 none：恰好一次 unlock（landscape 在途挂起由 release 路径兜底）。
+    await wrapper.setProps({ orientationLock: 'none' })
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+
+    // landscape 迟到兑现发生在退全屏后：无锁状态不再补 unlock。
+    pendings[1]?.resolve()
+    await flushPromises()
+    expect(orientation.unlock).toHaveBeenCalledTimes(1)
+  })
+
   it('unlocks when the pref returns to none mid-reading', async () => {
     const orientation = installScreenOrientation()
     wrapper = mountReader({ orientationLock: 'portrait' })

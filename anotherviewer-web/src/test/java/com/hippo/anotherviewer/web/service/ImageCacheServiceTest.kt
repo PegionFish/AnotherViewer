@@ -335,35 +335,56 @@ class ImageCacheServiceTest {
     }
 
     @Test
-    fun `P-S9 counter drift triggers reconciliation exactly once under rate limit`() {
+    fun `P1-1 counter drift reconciliation keeps files, resets counters to disk truth and rebuilds the queue`() {
         val data = ByteArray(1024)
         service.cacheImageByKey(930L, 1, data, "jpg")
-        val scansAfterInit = service.fullScanCount.get()
+        // 管线/外部直写文件（不入队、不计数）——模拟 enhanced 派生或 SMB 侧直写。
+        val survivor = File(tempDir, "enhanced/930").apply { mkdirs() }.resolve("0.jpg")
+        survivor.writeBytes(ByteArray(2048))
 
-        // 人为漂移：计数推过上限，同时删掉真实文件（模拟漏减/外部删除导致的漂移）
+        val scansBefore = service.fullScanCount.get()
+        // 人为上漂（单向棘轮：evict 先减计数后 delete 不验成功 / 覆写 TOCTOU 类漂移）。
+        // 触发驱逐：队列里的真实条目（p1/p2）按写入序合法逐出后仍超限 → 队列耗尽 → 对账。
         service.debugInflateDiskSizeBytes(2L * 1024 * 1024)
-        File(tempDir, "930").deleteRecursively()
-
-        // 触发驱逐：队列条目指向不存在的文件被跳过 → 队列耗尽仍超限 → 对账
         service.cacheImageByKey(930L, 2, data, "jpg")
+
         assertEquals(1L, service.reconcileCount.get(), "漂移应触发一次对账")
-        assertEquals(scansAfterInit + 2, service.fullScanCount.get(), "对账 = 两次全量扫描（删除 + 归一）")
-        assertEquals(0L, service.getCacheStats().diskCacheSizeBytes, "对账应重置字节计数器")
-        assertEquals(0L, service.getDiskEntryCount(), "对账应重置条目计数器")
-        assertTrue(tempDir.listFiles()!!.none { it.isFile }, "对账应清空目录内文件")
-        assertFalse(File(tempDir, "930").exists(), "空目录清理应随对账完成")
+        assertEquals(
+            scansBefore + 1, service.fullScanCount.get(),
+            "对账 = 一次全量扫描（扫描即真相；旧实现删除后二次归一是两次）"
+        )
 
-        // 频控：60s 窗口内再次漂移不得重复对账
+        // P1-1 核心：对账绝不删任何缓存文件——未入队文件必须原样还在，
+        // 两个计数器与磁盘真实状态精确一致。
+        assertTrue(survivor.isFile, "对账不得删除任何缓存文件")
+        assertEquals(2048L, service.getCacheStats().diskCacheSizeBytes, "对账后字节计数 = 磁盘实际")
+        assertEquals(1L, service.getDiskEntryCount(), "对账后条目计数 = 磁盘实际")
+        // 空目录壳清理保留：p1/p2 被合法队列驱逐后 930/ 已空 → 壳随对账清掉；
+        // enhanced/930/ 还有文件 → 保留。
+        assertFalse(File(tempDir, "930").exists(), "空目录壳清理应随对账完成")
+        assertTrue(File(tempDir, "enhanced/930").isDirectory, "非空目录不得清理")
+
+        // 队列重建正确：对账后再次漂移，驱逐消费的是重建后的队列（survivor 按写入序唯一候选）。
         service.debugInflateDiskSizeBytes(2L * 1024 * 1024)
-        service.cacheImageByKey(930L, 3, data, "jpg")
-        assertEquals(1L, service.reconcileCount.get(), "频控窗口内不得重复对账")
-        assertFalse(File(tempDir, "930/3.jpg").exists())
+        service.cacheImageByKey(931L, 1, data, "jpg")
+        assertFalse(survivor.exists(), "重建后的队列应指向 survivor 并按序驱逐")
+        assertEquals(0L, service.getDiskEntryCount(), "驱逐 survivor + 新页后计数归零")
 
-        // 窗口过期（此处以调小间隔模拟）后允许再次对账
+        // 频控（P2-6：窗口比较在 System.nanoTime 单调钟域内——语义与旧毫秒窗口一致）：
+        // 60s 窗口内再次耗尽队列不得重复对账。
+        service.debugInflateDiskSizeBytes(2L * 1024 * 1024)
+        service.cacheImageByKey(932L, 1, data, "jpg")
+        assertEquals(1L, service.reconcileCount.get(), "频控窗口内不得重复对账")
+
+        // 窗口过期（此处以调小间隔模拟）后允许再次对账；第二次对账同样保留现存文件。
         service.reconcileMinIntervalMs = 0L
-        service.cacheImageByKey(930L, 4, data, "jpg")
+        val survivor2 = File(tempDir, "enhanced/934").apply { mkdirs() }.resolve("0.jpg")
+        survivor2.writeBytes(ByteArray(512))
+        service.cacheImageByKey(934L, 1, data, "jpg")
         assertEquals(2L, service.reconcileCount.get(), "频控窗口过期后应允许再次对账")
-        assertEquals(0L, service.getDiskEntryCount())
+        assertTrue(survivor2.isFile, "第二次对账同样不得删除现存文件")
+        assertEquals(512L, service.getCacheStats().diskCacheSizeBytes, "对账后计数与磁盘一致")
+        assertEquals(1L, service.getDiskEntryCount(), "对账后计数与磁盘一致")
     }
 
     @Test

@@ -1891,7 +1891,13 @@ paths:
           required: false
           schema:
             type: string
-          description: HTTP Range header for partial content (e.g. "bytes=0-1023")
+          description: |
+            HTTP Range header for partial content (e.g. "bytes=0-1023").
+            If-Range is NOT supported: the server never validates a Range
+            request against If-Range (RFC 7233 §3.2) — a Range request is
+            always answered with 206 regardless of any validator mismatch.
+            Clients wanting conditional behavior must use If-None-Match
+            (evaluated before Range) instead.
         - name: If-None-Match
           in: header
           required: false
@@ -1948,7 +1954,9 @@ paths:
                 type: string
                 format: binary
         '206':
-          description: Partial content (Range request)
+          description: >-
+            Partial content (Range request). If-Range is not supported: Range
+            is served without consulting If-Range (see the Range parameter).
           headers:
             Content-Range:
               schema:

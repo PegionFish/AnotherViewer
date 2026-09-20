@@ -370,6 +370,51 @@ class DownloadServiceTest {
         verify(downloadRepository, never()).save(any(DownloadInfoEntity::class.java))
     }
 
+    @Test
+    fun `pauseDownload flushes the pending progress frame before writing the paused state (P2-2)`() {
+        // 修复前：requestStop 后锁内直接 state=0，pending 的 done 帧滞留（drain 守卫
+        // 跳过暂停行，帧永远落不了库）——行 done 停在旧值。修复后：锁内先 flush
+        // （行状态仍是 2，合法写 done）再写暂停态，行 done 反映暂停瞬间真实进度。
+        val persister = DownloadProgressPersister(
+            downloadRepository,
+            scheduler = java.util.concurrent.Executors.newSingleThreadScheduledExecutor().apply { shutdownNow() },
+        )
+        val serviceWithPersister = DownloadService(
+            downloadRepository,
+            labelRepository,
+            SiteCoreConfigProperties().apply {
+                download.path = java.io.File(tempDir, "downloads").absolutePath
+            },
+            mock(ApplicationEventPublisher::class.java),
+            mock(ImageCacheService::class.java),
+            sessionManager,
+            galleryLookup,
+            mock(ServerConfigService::class.java),
+            availability,
+            downloadDirIndex,
+            historyRepository,
+            stubProvider("test-user"),
+            pageFileHashRepository,
+            progressPersister = persister,
+        )
+        val entity = DownloadInfoEntity().apply {
+            id = 1L; gid = 42L; token = "tok"; state = 2; total = 10; done = 2
+        }
+        `when`(downloadRepository.findById(1L)).thenReturn(Optional.of(entity))
+        `when`(downloadRepository.save(any(DownloadInfoEntity::class.java))).thenAnswer { it.getArgument(0) }
+
+        persister.record(1L, 7) // 页 worker 上报的最新进度（尚未落库）
+        assertTrue(serviceWithPersister.pauseDownload(1L))
+
+        assertEquals(0, entity.state, "暂停态必须落地")
+        assertEquals(7, entity.done, "pending 的最新 done 必须在暂停写之前落库（P2-2）")
+
+        // 幂等收尾：此后任何 flush 都不会再有该 id 的残帧可写。
+        persister.flushAll()
+        assertEquals(7, entity.done)
+        assertEquals(0, entity.state)
+    }
+
     // ── A7-2: 软删 / 复活 / 过滤 ──
 
     @Test

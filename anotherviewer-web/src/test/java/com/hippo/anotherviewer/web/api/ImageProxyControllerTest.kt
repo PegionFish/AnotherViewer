@@ -75,11 +75,14 @@ class ImageProxyControllerTest {
     /** Records the upstream request; answers with a canned response or throws. */
     private class FakeSite(private val responder: (Request) -> Response) : Interceptor {
         val lastRequest = AtomicReference<Request?>(null)
-        var callCount = 0
-            private set
+
+        // 并发安全调用计数：12 路并发自增下普通 Int 的丢失更新正是历史 ~1/8 flake
+        // 的根因之一（主线程断言 callCount==12 随机少 1）。
+        private val calls = java.util.concurrent.atomic.AtomicInteger(0)
+        val callCount: Int get() = calls.get()
 
         override fun intercept(chain: Interceptor.Chain): Response {
-            callCount++
+            calls.incrementAndGet()
             lastRequest.set(chain.request())
             return responder(chain.request())
         }
@@ -139,13 +142,15 @@ class ImageProxyControllerTest {
      * P10 required 注入：测试显式提供全部依赖。W3-P 起可替身池读闸门与
      * StorageTuning——默认「SSD 形态」直通闸门（不设闸、无预读副作用外溢，
      * 预读开关按未探测的保守 UNKNOWN 打开但默认 mock 的 DownloadDirIndex
-     * 查不到池文件，不会真正触发）。
+     * 查不到池文件，不会真正触发）。[advice] 可选注入额外的 @ControllerAdvice
+     * （P1-2 用 ResponseBodyAdvice 在「serve 校验后、转换器开流前」窗口删池文件）。
      */
     private fun buildMvc(
         gate: PoolReadGate = PoolReadGate({ Int.MAX_VALUE }, PoolReadGate.DEFAULT_FORCE_GRANT_TIMEOUT_MS),
         tuning: StorageTuning = StorageTuning(StorageProfileService(DefaultSystemFiles())),
         dirIndex: DownloadDirIndex = mock(DownloadDirIndex::class.java),
         downloadService: DownloadService = mock(DownloadService::class.java),
+        advice: Any? = null,
     ): MockMvc {
         val prefetchService = mock(PrefetchService::class.java)
         return MockMvcBuilders.standaloneSetup(
@@ -161,7 +166,7 @@ class ImageProxyControllerTest {
                 gate,
             )
         )
-            .setControllerAdvice(GlobalExceptionHandler())
+            .setControllerAdvice(*listOfNotNull(GlobalExceptionHandler(), advice).toTypedArray())
             .build()
     }
 
@@ -198,6 +203,32 @@ class ImageProxyControllerTest {
         val dir = java.io.File(root.toFile(), gid.toString()).apply { mkdirs() }
         java.io.File(dir, "%04d.jpg".format(apiPage + 1)).writeBytes(bytes)
         return dir
+    }
+
+    /**
+     * P1-2 测试具身：在「serve 校验（isFile）已过、转换器开流之前」的窗口删掉
+     * 池文件——复现"池文件在 serve 与开流之间消失（阅读中删下载/SMB 手删）"。
+     * 经 setControllerAdvice 注册的 ResponseBodyAdvice 恰好在消息转换前回调。
+     */
+    @org.springframework.web.bind.annotation.ControllerAdvice
+    private class VanishingPoolFileAdvice(private val file: java.io.File) :
+        org.springframework.web.servlet.mvc.method.annotation.ResponseBodyAdvice<Any> {
+        override fun supports(
+            returnType: org.springframework.core.MethodParameter,
+            converterType: Class<out org.springframework.http.converter.HttpMessageConverter<*>>,
+        ): Boolean = true
+
+        override fun beforeBodyWrite(
+            body: Any?,
+            returnType: org.springframework.core.MethodParameter,
+            selectedContentType: org.springframework.http.MediaType,
+            selectedConverterType: Class<out org.springframework.http.converter.HttpMessageConverter<*>>,
+            request: org.springframework.http.server.ServerHttpRequest,
+            response: org.springframework.http.server.ServerHttpResponse,
+        ): Any? {
+            file.delete()
+            return body
+        }
     }
 
     /** P-S2: 镜像 ImageCacheService.urlKey / HttpCacheSupport.sha256Hex（断言 /proxy ETag 用）。 */
@@ -436,7 +467,13 @@ class ImageProxyControllerTest {
 
     @Test
     fun `proxyImage caps concurrent upstream fetches at the global semaphore`() {
-        `when`(imageCacheService.getCachedImage(org.mockito.ArgumentMatchers.anyString())).thenReturn(null)
+        // 二期 Wave 2 确定性重写（一期以来满载 ~1/8 flake）：旧版 12 路裸 Thread
+        // 各自断言——AssertionError 在线程内逃逸不被主线程看见、普通 Int 计数在
+        // 并发下丢失更新、无同步起跑导致 12 路从未真正拥挤在信号量上。现为：
+        // ExecutorService + Future 收集每路结果（任何一路失败经 get() 在主线程
+        // 重抛）、CountDownLatch 同步起跑、主线程统一断言。语义不变：
+        // 12 路全部完成且并发上限 ≤ 全局信号量。
+        `when`(imageCacheService.getCachedImage(anyString())).thenReturn(null)
         val inFlight = java.util.concurrent.atomic.AtomicInteger(0)
         val maxObserved = java.util.concurrent.atomic.AtomicInteger(0)
         site = FakeSite { req ->
@@ -448,19 +485,35 @@ class ImageProxyControllerTest {
         }
         setUpClient(site)
 
-        val threads = (1..12).map { i ->
-            Thread {
-                try {
-                    mockMvc.perform(
-                        get("/api/v1/image/proxy").param("url", "https://e-hentai.org/t/200$i/thumb$i.jpg")
-                    ).andExpect(status().isOk)
-                } catch (e: Exception) {
-                    throw RuntimeException(e)
-                }
+        val pool = java.util.concurrent.Executors.newFixedThreadPool(12)
+        try {
+            val startGate = java.util.concurrent.CountDownLatch(1)
+            val futures = (1..12).map { i ->
+                pool.submit(
+                    java.util.concurrent.Callable {
+                        startGate.await(5, java.util.concurrent.TimeUnit.SECONDS)
+                        mockMvc.perform(
+                            get("/api/v1/image/proxy").param("url", "https://e-hentai.org/t/200$i/thumb$i.jpg")
+                        ).andExpect(status().isOk)
+                        true
+                    }
+                )
             }
+            startGate.countDown()
+            pool.shutdown() // 不再接新任务；已提交的 12 路照常跑完，awaitTermination 才可能到期
+            org.junit.jupiter.api.Assertions.assertTrue(
+                pool.awaitTermination(30, java.util.concurrent.TimeUnit.SECONDS),
+                "12 路请求必须全部完成",
+            )
+            futures.forEach { future ->
+                org.junit.jupiter.api.Assertions.assertTrue(
+                    future.get(1, java.util.concurrent.TimeUnit.SECONDS),
+                    "每一路都必须成功 serve",
+                )
+            }
+        } finally {
+            pool.shutdownNow()
         }
-        threads.forEach { it.start() }
-        threads.forEach { it.join(20_000) }
 
         org.junit.jupiter.api.Assertions.assertEquals(12, site.callCount)
         // P3: 全局 Semaphore(6) —— 25 卡首开按 6 并发批次排队，绝不超限。
@@ -743,6 +796,69 @@ class ImageProxyControllerTest {
         assertTrue(
             maxObserved.get() in 1..3,
             "real gate limit 3 must cap upstream concurrency (legacy semaphore allows 6), observed ${maxObserved.get()}"
+        )
+    }
+
+    // ------------------------------------------------------------------
+    // P1-2（二期 Wave 2 红队）：开流失败必须归还池读闸门票
+    // 池文件在 serve 校验与转换器开流之间消失（阅读中删下载/SMB 手删）时，
+    // Spring 6.2.6 writeContent 的异常表吞掉 FNFE、不走任何 finally——票若
+    // 不在 getInputStream 当场归还，HDD 闸门每漏一张永久占坑。
+    // ------------------------------------------------------------------
+
+    @Test
+    fun `gate ticket is returned when the pool file vanishes before the stream opens (P1-2)`(@TempDir root: Path) {
+        val gid = 705L
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        val dir = poolDirWithPageBytes(root, gid, 0, bytes)
+        val poolFile = java.io.File(dir, "0001.jpg")
+        config.download.path = root.toString()
+        // limit=1 的真闸门：freeSlots() 是泄漏的可观测面。
+        val gate = PoolReadGate({ 1 }, PoolReadGate.DEFAULT_FORCE_GRANT_TIMEOUT_MS)
+        mockMvc = buildMvc(
+            gate = gate,
+            dirIndex = DownloadDirIndex(config),
+            advice = VanishingPoolFileAdvice(poolFile),
+        )
+
+        // FNFE 被转换器异常表吞掉 → 响应照常 200 收场；修复前票就此永久占坑。
+        mockMvc.perform(get("/api/v1/image/$gid/0"))
+            .andExpect(status().isOk)
+
+        org.junit.jupiter.api.Assertions.assertEquals(
+            1, gate.freeSlots(),
+            "开流失败必须当场归还闸门票（limit=1 下泄漏会让 freeSlots 停在 0）",
+        )
+
+        // 修复后闸门不再被占：下一张票立即可得（不必排队/5s 强制放行）。
+        val ticket = gate.acquire(gid.toString(), 1)
+        org.junit.jupiter.api.Assertions.assertEquals(
+            0, gate.freeSlots(),
+            "新票据应立即获得（无泄漏占坑）",
+        )
+        ticket.close()
+        org.junit.jupiter.api.Assertions.assertEquals(1, gate.freeSlots())
+    }
+
+    @Test
+    fun `gate ticket is returned exactly once on the normal streaming path (P1-2 幂等不双还)`(@TempDir root: Path) {
+        val gid = 706L
+        val bytes = byteArrayOf(1, 2, 3, 4)
+        poolDirWithPageBytes(root, gid, 0, bytes)
+        config.download.path = root.toString()
+        val gate = PoolReadGate({ 1 }, PoolReadGate.DEFAULT_FORCE_GRANT_TIMEOUT_MS)
+        mockMvc = buildMvc(gate = gate, dirIndex = DownloadDirIndex(config))
+
+        mockMvc.perform(get("/api/v1/image/$gid/0"))
+            .andExpect(status().isOk)
+            .andExpect(content().bytes(bytes))
+
+        // 正常路径（getInputStream 成功 → 转换器 finally close → BoundedReleasingStream
+        // 归还）与 P1-2 的 CAS 守卫共用 released 标志：limit=1 下 freeSlots 应回到
+        // 恰好 1——双还只会更大。
+        org.junit.jupiter.api.Assertions.assertEquals(
+            1, gate.freeSlots(),
+            "票必须恰好归还一次（幂等，绝不双还）",
         )
     }
 
